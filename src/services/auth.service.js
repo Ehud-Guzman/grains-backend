@@ -1,0 +1,230 @@
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const User = require('../models/User');
+const { AppError } = require('../middleware/errorHandler.middleware');
+const { ROLES } = require('../utils/constants');
+const activityLogService = require('./activityLog.service');
+
+const MAX_FAILED_LOGINS = 5;
+const BCRYPT_WORK_FACTOR = 12;
+
+// Generate access + refresh token pair
+const generateTokens = (user) => {
+  const payload = { id: user._id, role: user.role };
+
+  const accessToken = jwt.sign(payload, process.env.JWT_ACCESS_SECRET, {
+    expiresIn: process.env.JWT_ACCESS_EXPIRY || '15m'
+  });
+
+  const refreshToken = jwt.sign(payload, process.env.JWT_REFRESH_SECRET, {
+    expiresIn: process.env.JWT_REFRESH_EXPIRY || '7d'
+  });
+
+  return { accessToken, refreshToken };
+};
+
+// Register a new customer account
+const register = async ({ name, phone, email, password }) => {
+  const existing = await User.findOne({ phone });
+  if (existing) {
+    throw new AppError('An account with this phone number already exists', 409, 'PHONE_TAKEN');
+  }
+
+  if (email) {
+    const emailTaken = await User.findOne({ email });
+    if (emailTaken) {
+      throw new AppError('An account with this email already exists', 409, 'EMAIL_TAKEN');
+    }
+  }
+
+  const passwordHash = await bcrypt.hash(password, BCRYPT_WORK_FACTOR);
+
+  const user = await User.create({
+    name,
+    phone,
+    email: email || null,
+    passwordHash,
+    role: ROLES.CUSTOMER
+  });
+
+  const { accessToken, refreshToken } = generateTokens(user);
+
+return {
+  user: { id: user._id, name: user.name, phone: user.phone, email: user.email, role: user.role, avatarURL: user.avatarURL || null },
+  accessToken,
+  refreshToken
+};
+};
+
+// Login - verify credentials, check lockout, return tokens
+const login = async ({ phone, password }, ip) => {
+  const user = await User.findOne({ phone });
+
+  if (!user) {
+    throw new AppError('Invalid phone number or password', 401, 'INVALID_CREDENTIALS');
+  }
+
+  if (user.isLocked) {
+    throw new AppError('This account has been locked due to too many failed login attempts. Please contact support.', 423, 'ACCOUNT_LOCKED');
+  }
+
+  const isMatch = await bcrypt.compare(password, user.passwordHash);
+
+  if (!isMatch) {
+    await incrementFailedLogin(user._id);
+    throw new AppError('Invalid phone number or password', 401, 'INVALID_CREDENTIALS');
+  }
+
+  // Reset failed login count on success
+  await User.findByIdAndUpdate(user._id, {
+    failedLoginCount: 0,
+    lastLoginAt: new Date()
+  });
+
+  const { accessToken, refreshToken } = generateTokens(user);
+
+  // Log the login event
+  const logAction = [ROLES.STAFF, ROLES.SUPERVISOR, ROLES.ADMIN, ROLES.SUPERADMIN].includes(user.role)
+    ? 'ADMIN_LOGIN'
+    : 'CUSTOMER_LOGIN';
+
+  await activityLogService.log({
+    actorId: user._id,
+    actorRole: user.role,
+    action: logAction,
+    ip
+  });
+
+return {
+  user: { id: user._id, name: user.name, phone: user.phone, email: user.email, role: user.role, avatarURL: user.avatarURL || null },
+  accessToken,
+  refreshToken
+};
+};
+
+// Refresh - verify refresh token, issue new access token
+const refreshToken = async (token) => {
+  let decoded;
+  try {
+    decoded = jwt.verify(token, process.env.JWT_REFRESH_SECRET);
+  } catch {
+    throw new AppError('Invalid or expired refresh token', 401, 'INVALID_REFRESH_TOKEN');
+  }
+
+  const user = await User.findById(decoded.id);
+  if (!user || user.isLocked) {
+    throw new AppError('User not found or account locked', 401, 'UNAUTHORIZED');
+  }
+
+  const { accessToken, refreshToken: newRefreshToken } = generateTokens(user);
+
+  return { accessToken, refreshToken: newRefreshToken };
+};
+
+// Increment failed login count, lock account after MAX_FAILED_LOGINS
+const incrementFailedLogin = async (userId) => {
+  const user = await User.findByIdAndUpdate(
+    userId,
+    { $inc: { failedLoginCount: 1 } },
+    { new: true }
+  );
+
+  if (user.failedLoginCount >= MAX_FAILED_LOGINS) {
+    await lockAccount(userId);
+  }
+};
+
+const lockAccount = async (userId) => {
+  await User.findByIdAndUpdate(userId, { isLocked: true });
+};
+
+// Change password — requires current password verification
+const changePassword = async (userId, currentPassword, newPassword) => {
+  const user = await User.findById(userId);
+  if (!user) throw new AppError('User not found', 404, 'USER_NOT_FOUND');
+
+  const isMatch = await bcrypt.compare(currentPassword, user.passwordHash);
+  if (!isMatch) throw new AppError('Current password is incorrect', 400, 'WRONG_PASSWORD');
+
+  if (newPassword.length < 8)
+    throw new AppError('New password must be at least 8 characters', 400, 'PASSWORD_TOO_SHORT');
+
+  if (currentPassword === newPassword)
+    throw new AppError('New password must be different from current password', 400, 'SAME_PASSWORD');
+
+  const passwordHash = await bcrypt.hash(newPassword, BCRYPT_WORK_FACTOR);
+  await User.findByIdAndUpdate(userId, { passwordHash });
+
+  await activityLogService.log({
+    actorId: userId,
+    actorRole: user.role,
+    action: 'PASSWORD_CHANGED',
+    targetId: userId,
+    targetType: 'User',
+    detail: {}
+  });
+
+  return { success: true };
+};
+
+const unlockAccount = async (userId, adminId) => {
+  const user = await User.findByIdAndUpdate(
+    userId,
+    { isLocked: false, failedLoginCount: 0 },
+    { new: true }
+  );
+
+  if (!user) {
+    throw new AppError('User not found', 404, 'USER_NOT_FOUND');
+  }
+
+  await activityLogService.log({
+    actorId: adminId,
+    actorRole: ROLES.ADMIN,
+    action: 'CUSTOMER_ACCOUNT_UNLOCKED',
+    targetId: userId,
+    targetType: 'User'
+  });
+
+  return user;
+};
+
+// ── GET MY PROFILE ────────────────────────────────────────────────────────────
+const getProfile = async (userId) => {
+  const user = await User.findById(userId).select('-passwordHash -failedLoginCount').lean();
+  if (!user) throw new AppError('User not found', 404, 'USER_NOT_FOUND');
+  return user;
+};
+
+// ── UPDATE MY PROFILE ─────────────────────────────────────────────────────────
+const updateProfile = async (userId, { name, email, addresses }) => {
+  if (email) {
+    const existing = await User.findOne({ email, _id: { $ne: userId } });
+    if (existing) throw new AppError('Email already in use', 409, 'EMAIL_TAKEN');
+  }
+
+  const user = await User.findByIdAndUpdate(
+    userId,
+    {
+      ...(name      && { name: name.trim() }),
+      ...(email !== undefined && { email: email || null }),
+      ...(addresses  && { addresses }),
+    },
+    { new: true, runValidators: true }
+  ).select('-passwordHash -failedLoginCount');
+
+  if (!user) throw new AppError('User not found', 404, 'USER_NOT_FOUND');
+
+  await activityLogService.log({
+    actorId: userId,
+    actorRole: user.role,
+    action: 'PROFILE_UPDATED',
+    targetId: userId,
+    targetType: 'User',
+    detail: {}
+  });
+
+  return user;
+};
+
+module.exports = { register, login, refreshToken, lockAccount, unlockAccount, incrementFailedLogin, changePassword, getProfile, updateProfile };

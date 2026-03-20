@@ -1,0 +1,36 @@
+const mongoose = require('mongoose');
+const { ROLES } = require('../utils/constants');
+
+const addressSchema = new mongoose.Schema({
+  label: { type: String, required: true },
+  value: { type: String, required: true },
+  isDefault: { type: Boolean, default: false }
+}, { _id: false });
+
+const userSchema = new mongoose.Schema({
+  name: { type: String, required: true, trim: true },
+  email:     { type: String, trim: true, lowercase: true, default: null },
+  avatarURL: { type: String, default: null },
+  phone: { type: String, required: true, trim: true },
+  passwordHash: { type: String, required: true },
+  role: {
+    type: String,
+    enum: Object.values(ROLES).filter(r => r !== 'guest'),
+    default: ROLES.CUSTOMER
+  },
+  addresses: [addressSchema],
+  notes: { type: String, default: null }, // internal admin notes
+  isLocked: { type: Boolean, default: false },
+  failedLoginCount: { type: Number, default: 0 },
+  lastLoginAt: { type: Date, default: null },
+  orderHistory: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Order' }]
+}, {
+  timestamps: true
+});
+
+// Indexes
+userSchema.index({ phone: 1 }, { unique: true });
+userSchema.index({ email: 1 }, { unique: true, sparse: true });
+userSchema.index({ role: 1 });
+
+module.exports = mongoose.model('User', userSchema);

@@ -1,0 +1,959 @@
+{
+  "info": {
+    "name": "Grains & Cereals API - Phase 3 (Reports, Users, Logs)",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:5000" },
+    { "key": "adminToken", "value": "" },
+    { "key": "superAdminToken", "value": "" },
+    { "key": "newStaffId", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "01 - Auth Setup",
+      "item": [
+        {
+          "name": "Login as Admin",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Admin token saved', () => {",
+                  "  const json = pm.response.json();",
+                  "  pm.expect(json.success).to.be.true;",
+                  "  pm.collectionVariables.set('adminToken', json.data.accessToken);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/auth/login",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phone\": \"0700000001\",\n  \"password\": \"admin1234\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Register SuperAdmin User",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 201 or 409 (already exists)', () => {",
+                  "  pm.expect([201, 409]).to.include(pm.response.code);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/auth/register",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Super Admin\",\n  \"phone\": \"0700000002\",\n  \"password\": \"superadmin1234\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Login as SuperAdmin (after Atlas role change to superadmin)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('SuperAdmin token saved', () => {",
+                  "  const json = pm.response.json();",
+                  "  pm.expect(json.success).to.be.true;",
+                  "  pm.collectionVariables.set('superAdminToken', json.data.accessToken);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/auth/login",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phone\": \"0700000002\",\n  \"password\": \"superadmin1234\"\n}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "02 - Dashboard KPIs",
+      "item": [
+        {
+          "name": "Get Dashboard KPIs",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Has all KPI fields', () => {",
+                  "  const d = pm.response.json().data;",
+                  "  pm.expect(d.ordersToday).to.exist;",
+                  "  pm.expect(d.pendingOrders).to.exist;",
+                  "  pm.expect(d.revenueToday).to.exist;",
+                  "  pm.expect(d.revenueThisMonth).to.exist;",
+                  "  pm.expect(d.lowStockCount).to.exist;",
+                  "  pm.expect(d.recentOrders).to.be.an('array');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{adminToken}}" }],
+            "url": "{{baseUrl}}/api/admin/reports/kpis"
+          }
+        },
+        {
+          "name": "Get KPIs - No Token (expect 401)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 401', () => pm.response.to.have.status(401));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/admin/reports/kpis"
+          }
+        }
+      ]
+    },
+    {
+      "name": "03 - Sales Reports",
+      "item": [
+        {
+          "name": "Sales Report - Today",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Has summary and byDay', () => {",
+                  "  const d = pm.response.json().data;",
+                  "  pm.expect(d.summary).to.exist;",
+                  "  pm.expect(d.byDay).to.be.an('array');",
+                  "  pm.expect(d.byCategory).to.be.an('array');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{adminToken}}" }],
+            "url": "{{baseUrl}}/api/admin/reports/sales?period=today"
+          }
+        },
+        {
+          "name": "Sales Report - Last 7 Days",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Has revenue data', () => {",
+                  "  pm.expect(pm.response.json().data.summary.totalRevenue).to.be.a('number');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{adminToken}}" }],
+            "url": "{{baseUrl}}/api/admin/reports/sales?period=week"
+          }
+        },
+        {
+          "name": "Sales Report - Last 30 Days",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{adminToken}}" }],
+            "url": "{{baseUrl}}/api/admin/reports/sales?period=month"
+          }
+        },
+        {
+          "name": "Sales Report - Custom Date Range",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Period reflects custom range', () => {",
+                  "  pm.expect(pm.response.json().data.period).to.exist;",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{adminToken}}" }],
+            "url": "{{baseUrl}}/api/admin/reports/sales?from=2025-01-01&to=2026-12-31"
+          }
+        }
+      ]
+    },
+    {
+      "name": "04 - Product Reports",
+      "item": [
+        {
+          "name": "Best Sellers - This Month",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Has products array', () => {",
+                  "  pm.expect(pm.response.json().data.products).to.be.an('array');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{adminToken}}" }],
+            "url": "{{baseUrl}}/api/admin/reports/best-sellers?period=month&limit=5"
+          }
+        },
+        {
+          "name": "Best Sellers - All Time",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{adminToken}}" }],
+            "url": "{{baseUrl}}/api/admin/reports/best-sellers?from=2025-01-01&to=2026-12-31&limit=10"
+          }
+        },
+        {
+          "name": "Slow Movers - Last 30 Days",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Has slowMovers array and count', () => {",
+                  "  const d = pm.response.json().data;",
+                  "  pm.expect(d.slowMovers).to.be.an('array');",
+                  "  pm.expect(d.count).to.be.a('number');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{adminToken}}" }],
+            "url": "{{baseUrl}}/api/admin/reports/slow-movers?days=30"
+          }
+        }
+      ]
+    },
+    {
+      "name": "05 - Stock Reports",
+      "item": [
+        {
+          "name": "Stock Valuation",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Has total value and rows', () => {",
+                  "  const d = pm.response.json().data;",
+                  "  pm.expect(d.totalStockValueKES).to.be.a('number');",
+                  "  pm.expect(d.rows).to.be.an('array');",
+                  "  pm.expect(d.rows[0].totalValueKES).to.be.a('number');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{adminToken}}" }],
+            "url": "{{baseUrl}}/api/admin/reports/stock-valuation"
+          }
+        },
+        {
+          "name": "Stock Movement - Last 30 Days",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Has logs and summary', () => {",
+                  "  const d = pm.response.json().data;",
+                  "  pm.expect(d.logs).to.be.an('array');",
+                  "  pm.expect(d.summary).to.exist;",
+                  "  pm.expect(d.count).to.be.a('number');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{adminToken}}" }],
+            "url": "{{baseUrl}}/api/admin/reports/stock-movement?period=month"
+          }
+        },
+        {
+          "name": "Stock Movement - Custom Range",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{adminToken}}" }],
+            "url": "{{baseUrl}}/api/admin/reports/stock-movement?from=2025-01-01&to=2026-12-31"
+          }
+        }
+      ]
+    },
+    {
+      "name": "06 - Customer & Order Reports",
+      "item": [
+        {
+          "name": "Customer Report",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Has segment counts and customers array', () => {",
+                  "  const d = pm.response.json().data;",
+                  "  pm.expect(d.total).to.be.a('number');",
+                  "  pm.expect(d.repeat).to.be.a('number');",
+                  "  pm.expect(d.highValue).to.be.a('number');",
+                  "  pm.expect(d.inactive).to.be.a('number');",
+                  "  pm.expect(d.customers).to.be.an('array');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{adminToken}}" }],
+            "url": "{{baseUrl}}/api/admin/reports/customers"
+          }
+        },
+        {
+          "name": "Orders by Status Report",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Has byStatus array and peak hours', () => {",
+                  "  const d = pm.response.json().data;",
+                  "  pm.expect(d.byStatus).to.be.an('array');",
+                  "  pm.expect(d.peakHours).to.be.an('array');",
+                  "  pm.expect(d.avgOrderValue).to.be.a('number');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{adminToken}}" }],
+            "url": "{{baseUrl}}/api/admin/reports/orders?period=month"
+          }
+        }
+      ]
+    },
+    {
+      "name": "07 - CSV Exports (Admin+)",
+      "item": [
+        {
+          "name": "Export Sales CSV",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Content-Type is CSV', () => {",
+                  "  pm.expect(pm.response.headers.get('Content-Type')).to.include('text/csv');",
+                  "});",
+                  "pm.test('Content-Disposition set', () => {",
+                  "  pm.expect(pm.response.headers.get('Content-Disposition')).to.include('attachment');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{adminToken}}" }],
+            "url": "{{baseUrl}}/api/admin/reports/export/sales?period=month"
+          }
+        },
+        {
+          "name": "Export Best Sellers CSV",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Returns CSV', () => {",
+                  "  pm.expect(pm.response.headers.get('Content-Type')).to.include('text/csv');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{adminToken}}" }],
+            "url": "{{baseUrl}}/api/admin/reports/export/best-sellers?period=month"
+          }
+        },
+        {
+          "name": "Export Stock Valuation CSV",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Returns CSV', () => {",
+                  "  pm.expect(pm.response.headers.get('Content-Type')).to.include('text/csv');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{adminToken}}" }],
+            "url": "{{baseUrl}}/api/admin/reports/export/stock-valuation"
+          }
+        },
+        {
+          "name": "Export Customers CSV",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Returns CSV', () => {",
+                  "  pm.expect(pm.response.headers.get('Content-Type')).to.include('text/csv');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{adminToken}}" }],
+            "url": "{{baseUrl}}/api/admin/reports/export/customers"
+          }
+        },
+        {
+          "name": "Export Orders CSV",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{adminToken}}" }],
+            "url": "{{baseUrl}}/api/admin/reports/export/orders?period=month"
+          }
+        },
+        {
+          "name": "Export Stock Movement CSV",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{adminToken}}" }],
+            "url": "{{baseUrl}}/api/admin/reports/export/stock-movement?period=month"
+          }
+        },
+        {
+          "name": "Export with Supervisor Token (expect 403)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 403 - supervisor cannot export', () => pm.response.to.have.status(403));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{adminToken}}" }],
+            "url": "{{baseUrl}}/api/admin/reports/export/sales?period=month"
+          }
+        }
+      ]
+    },
+    {
+      "name": "08 - User Management (SuperAdmin only)",
+      "item": [
+        {
+          "name": "Create Staff Account",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 201', () => pm.response.to.have.status(201));",
+                  "pm.test('Staff account created', () => {",
+                  "  const d = pm.response.json().data;",
+                  "  pm.expect(d.role).to.equal('staff');",
+                  "  pm.expect(d.id).to.exist;",
+                  "  pm.collectionVariables.set('newStaffId', d.id);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{superAdminToken}}" }
+            ],
+            "url": "{{baseUrl}}/api/admin/users",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Jane Staff\",\n  \"phone\": \"0711000099\",\n  \"password\": \"staffpass123\",\n  \"role\": \"staff\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Create Staff - Invalid Role (expect 400)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 400', () => pm.response.to.have.status(400));",
+                  "pm.test('VALIDATION_ERROR', () => {",
+                  "  pm.expect(pm.response.json().error).to.equal('VALIDATION_ERROR');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{superAdminToken}}" }
+            ],
+            "url": "{{baseUrl}}/api/admin/users",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Bad Role\",\n  \"phone\": \"0711000077\",\n  \"password\": \"pass12345\",\n  \"role\": \"superuser\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Create Staff - Duplicate Phone (expect 409)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 409', () => pm.response.to.have.status(409));",
+                  "pm.test('PHONE_TAKEN', () => {",
+                  "  pm.expect(pm.response.json().error).to.equal('PHONE_TAKEN');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{superAdminToken}}" }
+            ],
+            "url": "{{baseUrl}}/api/admin/users",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Duplicate\",\n  \"phone\": \"0711000099\",\n  \"password\": \"pass12345\",\n  \"role\": \"staff\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Get All Admin Users",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Returns admin users list', () => {",
+                  "  pm.expect(pm.response.json().data).to.be.an('array');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{superAdminToken}}" }],
+            "url": "{{baseUrl}}/api/admin/users"
+          }
+        },
+        {
+          "name": "Change Role - Staff to Supervisor",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Role updated to supervisor', () => {",
+                  "  pm.expect(pm.response.json().data.role).to.equal('supervisor');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PUT",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{superAdminToken}}" }
+            ],
+            "url": "{{baseUrl}}/api/admin/users/{{newStaffId}}/role",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"role\": \"supervisor\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Change Role - Invalid Role (expect 400)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 400', () => pm.response.to.have.status(400));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PUT",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{superAdminToken}}" }
+            ],
+            "url": "{{baseUrl}}/api/admin/users/{{newStaffId}}/role",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"role\": \"manager\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Lock Account",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Account locked', () => {",
+                  "  pm.expect(pm.response.json().data.isLocked).to.be.true;",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Authorization", "value": "Bearer {{superAdminToken}}" }],
+            "url": "{{baseUrl}}/api/admin/users/{{newStaffId}}/lock"
+          }
+        },
+        {
+          "name": "Unlock Account",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Account unlocked', () => {",
+                  "  pm.expect(pm.response.json().data.isLocked).to.be.false;",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Authorization", "value": "Bearer {{superAdminToken}}" }],
+            "url": "{{baseUrl}}/api/admin/users/{{newStaffId}}/unlock"
+          }
+        },
+        {
+          "name": "Reset Password",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Password reset confirmed', () => {",
+                  "  pm.expect(pm.response.json().message).to.include('reset');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{superAdminToken}}" }
+            ],
+            "url": "{{baseUrl}}/api/admin/users/{{newStaffId}}/reset-password",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"password\": \"newpassword123\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Reset Password - Too Short (expect 400)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 400', () => pm.response.to.have.status(400));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{superAdminToken}}" }
+            ],
+            "url": "{{baseUrl}}/api/admin/users/{{newStaffId}}/reset-password",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"password\": \"123\"\n}"
+            }
+          }
+        },
+        {
+          "name": "User Management with Admin Token (expect 403)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 403 - admin cannot access user management', () => pm.response.to.have.status(403));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{adminToken}}" }],
+            "url": "{{baseUrl}}/api/admin/users"
+          }
+        }
+      ]
+    },
+    {
+      "name": "09 - Activity Logs (SuperAdmin only)",
+      "item": [
+        {
+          "name": "Get All Activity Logs",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Has logs array and pagination', () => {",
+                  "  const d = pm.response.json().data;",
+                  "  pm.expect(d.logs).to.be.an('array');",
+                  "  pm.expect(d.total).to.be.a('number');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{superAdminToken}}" }],
+            "url": "{{baseUrl}}/api/admin/logs"
+          }
+        },
+        {
+          "name": "Filter Logs by Action",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('All logs have correct action', () => {",
+                  "  const logs = pm.response.json().data.logs;",
+                  "  logs.forEach(log => {",
+                  "    pm.expect(log.action).to.equal('ORDER_APPROVED');",
+                  "  });",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{superAdminToken}}" }],
+            "url": "{{baseUrl}}/api/admin/logs?action=ORDER_APPROVED"
+          }
+        },
+        {
+          "name": "Filter Logs by Date Range",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{superAdminToken}}" }],
+            "url": "{{baseUrl}}/api/admin/logs?from=2025-01-01&to=2026-12-31&limit=50"
+          }
+        },
+        {
+          "name": "Filter Logs by Target Type",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{superAdminToken}}" }],
+            "url": "{{baseUrl}}/api/admin/logs?targetType=Order"
+          }
+        },
+        {
+          "name": "Activity Logs with Admin Token (expect 403)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 403 - admin cannot view system logs', () => pm.response.to.have.status(403));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{adminToken}}" }],
+            "url": "{{baseUrl}}/api/admin/logs"
+          }
+        }
+      ]
+    }
+  ]
+}
