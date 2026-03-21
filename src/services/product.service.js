@@ -146,6 +146,9 @@ const update = async (productId, data, adminId) => {
   // Prevent overwriting createdBy
   delete data.createdBy;
   Object.assign(product, data);
+  // Explicitly mark arrays as modified — Object.assign bypasses Mongoose change detection
+  product.markModified('imageURLs');
+  product.markModified('varieties');
   await product.save();
 
   await activityLogService.log({
