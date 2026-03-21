@@ -24,7 +24,11 @@ const getLogs = async (filters = {}, { page = 1, limit = 20 } = {}) => {
   const query = {};
 
   if (filters.actorId) query.actorId = filters.actorId;
-  if (filters.action) query.action = filters.action;
+  if (filters.action) {
+    // Support comma-separated list of actions (for category filtering)
+    const actions = filters.action.split(',').map(a => a.trim()).filter(Boolean)
+    query.action = actions.length === 1 ? actions[0] : { $in: actions }
+  }
   if (filters.targetType) query.targetType = filters.targetType;
   if (filters.from || filters.to) {
     query.timestamp = {};
