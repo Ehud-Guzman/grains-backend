@@ -5,6 +5,29 @@ const { registerValidator, loginValidator, refreshValidator } = require('../vali
 const { validate } = require('../middleware/validate.middleware');
 const { verifyToken, optionalAuth } = require('../middleware/auth.middleware');
 const { authLimiter } = require('../middleware/rateLimit.middleware');
+const multer = require('multer');
+const cloudinary = require('cloudinary').v2;
+
+// Cloudinary config
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key:    process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
+
+// Multer for avatar uploads
+const uploadAvatar = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const allowed = ['image/jpeg', 'image/png', 'image/webp', 'image/jpg'];
+    allowed.includes(file.mimetype)
+      ? cb(null, true)
+      : cb(new Error('Only JPEG, PNG, or WebP images are allowed'));
+  }
+});
+
+// ── PUBLIC AUTH ROUTES ────────────────────────────────────────────────────────
 
 // POST /api/auth/register
 router.post('/register', authLimiter, registerValidator, validate, authController.register);
@@ -15,10 +38,12 @@ router.post('/login', authLimiter, loginValidator, validate, authController.logi
 // POST /api/auth/refresh
 router.post('/refresh', refreshValidator, validate, authController.refresh);
 
-// POST /api/auth/logout
+// POST /api/auth/logout — send { refreshToken } in body to blacklist it
 router.post('/logout', optionalAuth, authController.logout);
 
-// POST /api/auth/change-password (requires auth)
+// ── AUTHENTICATED ROUTES ──────────────────────────────────────────────────────
+
+// POST /api/auth/change-password
 router.post('/change-password', verifyToken, authController.changePassword);
 
 // GET /api/auth/me — get own profile
@@ -27,34 +52,14 @@ router.get('/me', verifyToken, authController.getProfile);
 // PUT /api/auth/me — update own profile
 router.put('/me', verifyToken, authController.updateProfile);
 
-module.exports = router;
-
-// POST /api/auth/avatar — upload profile picture (requires auth)
-const multer = require('multer');
-const cloudinary = require('cloudinary').v2;
-
-cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key:    process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET,
-});
-
-const uploadAvatar = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 5 * 1024 * 1024 },
-  fileFilter: (req, file, cb) => {
-    const allowed = ['image/jpeg', 'image/png', 'image/webp', 'image/jpg'];
-    allowed.includes(file.mimetype) ? cb(null, true) : cb(new Error('Only JPEG, PNG, or WebP images are allowed'));
-  }
-});
-
+// POST /api/auth/avatar — upload profile picture
 router.post('/avatar', verifyToken, uploadAvatar.single('avatar'), async (req, res, next) => {
   try {
     if (!req.file) {
       return res.status(400).json({ success: false, message: 'No image provided' });
     }
 
-    // Upload to Cloudinary — square crop, optimised
+    // Upload to Cloudinary — square crop with face detection
     const url = await new Promise((resolve, reject) => {
       const stream = cloudinary.uploader.upload_stream(
         {
@@ -90,3 +95,5 @@ router.post('/avatar', verifyToken, uploadAvatar.single('avatar'), async (req, r
     next(err);
   }
 });
+
+module.exports = router;

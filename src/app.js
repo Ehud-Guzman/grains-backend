@@ -21,12 +21,14 @@ require('./models/StockLog');
 require('./models/ActivityLog');
 require('./models/OrderCounter');
 require('./models/Settings');
+require('./models/TokenBlacklist');
 
 // ── PUBLIC ROUTES ─────────────────────────────────────────────────────────────
 const authRoutes     = require('./routes/auth.routes');
 const productRoutes  = require('./routes/product.routes');
 const orderRoutes    = require('./routes/order.routes');
 const settingsRoutes = require('./routes/settings.routes');
+const paymentRoutes  = require('./routes/payment.routes');
 
 // ── ADMIN ROUTES ──────────────────────────────────────────────────────────────
 const adminProductRoutes  = require('./routes/admin/product.routes');
@@ -37,6 +39,7 @@ const adminReportRoutes   = require('./routes/admin/report.routes');
 const adminUserRoutes     = require('./routes/admin/user.routes');
 const adminLogRoutes      = require('./routes/admin/log.routes');
 const adminSettingsRoutes = require('./routes/admin/settings.routes');
+const adminPaymentRoutes  = require('./routes/admin/payment.routes');
 
 const app = express();
 
@@ -51,12 +54,12 @@ app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
-      styleSrc: ["'self'", "'unsafe-inline'"],
-      scriptSrc: ["'self'"],
-      imgSrc: ["'self'", "data:", "res.cloudinary.com"],
+      styleSrc:   ["'self'", "'unsafe-inline'"],
+      scriptSrc:  ["'self'"],
+      imgSrc:     ["'self'", "data:", "res.cloudinary.com"],
       connectSrc: ["'self'"],
-      fontSrc: ["'self'"],
-      objectSrc: ["'none'"],
+      fontSrc:    ["'self'"],
+      objectSrc:  ["'none'"],
       upgradeInsecureRequests: process.env.NODE_ENV === 'production' ? [] : null
     }
   },
@@ -77,8 +80,8 @@ if (process.env.NODE_ENV !== 'test') {
 }
 
 // ── BODY PARSING ──────────────────────────────────────────────────────────────
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+app.use(express.json({ limit: '10kb' }));
+app.use(express.urlencoded({ extended: true, limit: '10kb' }));
 
 // ── TRUST PROXY ───────────────────────────────────────────────────────────────
 app.set('trust proxy', 1);
@@ -117,6 +120,7 @@ app.use('/api/auth',     authRoutes);
 app.use('/api/products', productRoutes);
 app.use('/api/orders',   orderRoutes);
 app.use('/api/settings', settingsRoutes);
+app.use('/api/payments', paymentRoutes);
 
 // ── ADMIN ROUTES ──────────────────────────────────────────────────────────────
 app.use('/api/admin/products',  adminProductRoutes);
@@ -127,6 +131,7 @@ app.use('/api/admin/reports',   adminReportRoutes);
 app.use('/api/admin/users',     adminUserRoutes);
 app.use('/api/admin/logs',      adminLogRoutes);
 app.use('/api/admin/settings',  adminSettingsRoutes);
+app.use('/api/admin/payments',  adminPaymentRoutes);
 
 // ── 404 HANDLER ───────────────────────────────────────────────────────────────
 app.use((req, res) => {

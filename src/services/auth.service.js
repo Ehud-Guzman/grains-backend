@@ -1,6 +1,7 @@
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
+const TokenBlacklist = require('../models/TokenBlacklist');
 const { AppError } = require('../middleware/errorHandler.middleware');
 const { ROLES } = require('../utils/constants');
 const activityLogService = require('./activityLog.service');
@@ -8,7 +9,7 @@ const activityLogService = require('./activityLog.service');
 const MAX_FAILED_LOGINS = 5;
 const BCRYPT_WORK_FACTOR = 12;
 
-// Generate access + refresh token pair
+// ── GENERATE TOKENS ───────────────────────────────────────────────────────────
 const generateTokens = (user) => {
   const payload = { id: user._id, role: user.role };
 
@@ -23,7 +24,7 @@ const generateTokens = (user) => {
   return { accessToken, refreshToken };
 };
 
-// Register a new customer account
+// ── REGISTER ──────────────────────────────────────────────────────────────────
 const register = async ({ name, phone, email, password }) => {
   const existing = await User.findOne({ phone });
   if (existing) {
@@ -49,14 +50,14 @@ const register = async ({ name, phone, email, password }) => {
 
   const { accessToken, refreshToken } = generateTokens(user);
 
-return {
-  user: { id: user._id, name: user.name, phone: user.phone, email: user.email, role: user.role, avatarURL: user.avatarURL || null },
-  accessToken,
-  refreshToken
-};
+  return {
+    user: { id: user._id, name: user.name, phone: user.phone, email: user.email, role: user.role, avatarURL: user.avatarURL || null },
+    accessToken,
+    refreshToken
+  };
 };
 
-// Login - verify credentials, check lockout, return tokens
+// ── LOGIN ─────────────────────────────────────────────────────────────────────
 const login = async ({ phone, password }, ip) => {
   const user = await User.findOne({ phone });
 
@@ -95,15 +96,22 @@ const login = async ({ phone, password }, ip) => {
     ip
   });
 
-return {
-  user: { id: user._id, name: user.name, phone: user.phone, email: user.email, role: user.role, avatarURL: user.avatarURL || null },
-  accessToken,
-  refreshToken
-};
+  return {
+    user: { id: user._id, name: user.name, phone: user.phone, email: user.email, role: user.role, avatarURL: user.avatarURL || null },
+    accessToken,
+    refreshToken
+  };
 };
 
-// Refresh - verify refresh token, issue new access token
+// ── REFRESH ───────────────────────────────────────────────────────────────────
 const refreshToken = async (token) => {
+  // 1. Check blacklist first — fast fail if already invalidated
+  const blacklisted = await TokenBlacklist.findOne({ token });
+  if (blacklisted) {
+    throw new AppError('Token has been invalidated. Please log in again.', 401, 'TOKEN_REVOKED');
+  }
+
+  // 2. Verify signature + expiry
   let decoded;
   try {
     decoded = jwt.verify(token, process.env.JWT_REFRESH_SECRET);
@@ -111,17 +119,58 @@ const refreshToken = async (token) => {
     throw new AppError('Invalid or expired refresh token', 401, 'INVALID_REFRESH_TOKEN');
   }
 
+  // 3. Check user still exists and is not locked
   const user = await User.findById(decoded.id);
   if (!user || user.isLocked) {
     throw new AppError('User not found or account locked', 401, 'UNAUTHORIZED');
   }
 
-  const { accessToken, refreshToken: newRefreshToken } = generateTokens(user);
+  // 4. Token rotation — blacklist the used token so it can't be reused
+  const expiresAt = new Date(decoded.exp * 1000);
+  try {
+    await TokenBlacklist.create({ token, userId: user._id, expiresAt });
+  } catch (err) {
+    // Ignore duplicate key — already blacklisted, still reject
+    if (err.code !== 11000) throw err;
+  }
 
+  // 5. Issue new token pair
+  const { accessToken, refreshToken: newRefreshToken } = generateTokens(user);
   return { accessToken, refreshToken: newRefreshToken };
 };
 
-// Increment failed login count, lock account after MAX_FAILED_LOGINS
+// ── LOGOUT ────────────────────────────────────────────────────────────────────
+const logout = async (token, userId, role) => {
+  // Blacklist the refresh token so it can't be used after logout
+  if (token) {
+    try {
+      const decoded = jwt.verify(token, process.env.JWT_REFRESH_SECRET);
+      const expiresAt = new Date(decoded.exp * 1000);
+      await TokenBlacklist.create({ token, userId: decoded.id, expiresAt });
+    } catch (err) {
+      if (err.code !== 11000) {
+        // Token already expired or invalid — no need to blacklist, logout is still valid
+      }
+    }
+  }
+
+  // Log the logout event
+  if (userId) {
+    const logAction = [ROLES.STAFF, ROLES.SUPERVISOR, ROLES.ADMIN, ROLES.SUPERADMIN].includes(role)
+      ? 'ADMIN_LOGOUT'
+      : 'CUSTOMER_LOGIN'; // customers don't have a CUSTOMER_LOGOUT constant yet — use existing
+
+    await activityLogService.log({
+      actorId: userId,
+      actorRole: role,
+      action: 'ADMIN_LOGOUT' // covers all roles for now
+    }).catch(() => {}); // non-blocking — logout should always succeed
+  }
+
+  return { success: true };
+};
+
+// ── INCREMENT FAILED LOGIN ────────────────────────────────────────────────────
 const incrementFailedLogin = async (userId) => {
   const user = await User.findByIdAndUpdate(
     userId,
@@ -134,11 +183,35 @@ const incrementFailedLogin = async (userId) => {
   }
 };
 
+// ── LOCK ACCOUNT ──────────────────────────────────────────────────────────────
 const lockAccount = async (userId) => {
   await User.findByIdAndUpdate(userId, { isLocked: true });
 };
 
-// Change password — requires current password verification
+// ── UNLOCK ACCOUNT ────────────────────────────────────────────────────────────
+const unlockAccount = async (userId, adminId) => {
+  const user = await User.findByIdAndUpdate(
+    userId,
+    { isLocked: false, failedLoginCount: 0 },
+    { new: true }
+  );
+
+  if (!user) {
+    throw new AppError('User not found', 404, 'USER_NOT_FOUND');
+  }
+
+  await activityLogService.log({
+    actorId: adminId,
+    actorRole: ROLES.ADMIN,
+    action: 'CUSTOMER_ACCOUNT_UNLOCKED',
+    targetId: userId,
+    targetType: 'User'
+  });
+
+  return user;
+};
+
+// ── CHANGE PASSWORD ───────────────────────────────────────────────────────────
 const changePassword = async (userId, currentPassword, newPassword) => {
   const user = await User.findById(userId);
   if (!user) throw new AppError('User not found', 404, 'USER_NOT_FOUND');
@@ -167,36 +240,14 @@ const changePassword = async (userId, currentPassword, newPassword) => {
   return { success: true };
 };
 
-const unlockAccount = async (userId, adminId) => {
-  const user = await User.findByIdAndUpdate(
-    userId,
-    { isLocked: false, failedLoginCount: 0 },
-    { new: true }
-  );
-
-  if (!user) {
-    throw new AppError('User not found', 404, 'USER_NOT_FOUND');
-  }
-
-  await activityLogService.log({
-    actorId: adminId,
-    actorRole: ROLES.ADMIN,
-    action: 'CUSTOMER_ACCOUNT_UNLOCKED',
-    targetId: userId,
-    targetType: 'User'
-  });
-
-  return user;
-};
-
-// ── GET MY PROFILE ────────────────────────────────────────────────────────────
+// ── GET PROFILE ───────────────────────────────────────────────────────────────
 const getProfile = async (userId) => {
   const user = await User.findById(userId).select('-passwordHash -failedLoginCount').lean();
   if (!user) throw new AppError('User not found', 404, 'USER_NOT_FOUND');
   return user;
 };
 
-// ── UPDATE MY PROFILE ─────────────────────────────────────────────────────────
+// ── UPDATE PROFILE ────────────────────────────────────────────────────────────
 const updateProfile = async (userId, { name, email, addresses }) => {
   if (email) {
     const existing = await User.findOne({ email, _id: { $ne: userId } });
@@ -227,4 +278,15 @@ const updateProfile = async (userId, { name, email, addresses }) => {
   return user;
 };
 
-module.exports = { register, login, refreshToken, lockAccount, unlockAccount, incrementFailedLogin, changePassword, getProfile, updateProfile };
+module.exports = {
+  register,
+  login,
+  refreshToken,
+  logout,
+  lockAccount,
+  unlockAccount,
+  incrementFailedLogin,
+  changePassword,
+  getProfile,
+  updateProfile
+};

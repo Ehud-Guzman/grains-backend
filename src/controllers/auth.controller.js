@@ -37,29 +37,26 @@ const refresh = async (req, res, next) => {
 
 const logout = async (req, res, next) => {
   try {
-    // JWT is stateless — client clears the token
-    // Log the logout event if user is authenticated
-    if (req.user) {
-      const activityLogService = require('../services/activityLog.service');
-      await activityLogService.log({
-        actorId: req.user.id,
-        actorRole: req.user.role,
-        action: 'ADMIN_LOGOUT',
-        ip: req.ip
-      });
-    }
+    const { refreshToken } = req.body;
+    const userId = req.user?.id;
+    const role   = req.user?.role;
+    // Blacklist refresh token + log the event
+    await authService.logout(refreshToken, userId, role);
     return success(res, null, 'Logged out successfully');
   } catch (err) {
     next(err);
   }
 };
 
-
 const changePassword = async (req, res, next) => {
   try {
     const { currentPassword, newPassword } = req.body;
     if (!currentPassword || !newPassword) {
-      return res.status(400).json({ success: false, error: 'MISSING_FIELDS', message: 'Current and new password are required' });
+      return res.status(400).json({
+        success: false,
+        error: 'MISSING_FIELDS',
+        message: 'Current and new password are required'
+      });
     }
     await authService.changePassword(req.user.id, currentPassword, newPassword);
     return success(res, null, 'Password changed successfully');
@@ -67,7 +64,6 @@ const changePassword = async (req, res, next) => {
     next(err);
   }
 };
-
 
 const getProfile = async (req, res, next) => {
   try {
