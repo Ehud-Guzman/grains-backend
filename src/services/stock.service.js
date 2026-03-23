@@ -280,9 +280,9 @@ const getOverview = async (filters = {}) => {
     }
   }
 
-  if (filters.lowStock === 'true') {
-    return rows.filter(r => r.status !== 'in_stock');
-  }
+if (filters.lowStock === 'true') {
+  return rows.filter(r => r.status !== 'in_stock' && !r.quoteOnly);
+}
 
   return rows;
 };
@@ -291,7 +291,7 @@ const getOverview = async (filters = {}) => {
 // SRS 5.4 - dashboard alert panel (UX B1)
 const getLowStock = async () => {
   const rows = await getOverview();
-  return rows.filter(r => r.status !== 'in_stock');
+ return rows.filter(r => r.status !== 'in_stock' && !r.quoteOnly);
 };
 
 // ── GET STOCK LOGS ────────────────────────────────────────────────────────────
