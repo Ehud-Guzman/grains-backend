@@ -62,6 +62,13 @@ const getOrdersByStatus = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+const getOnboardingAnalytics = async (req, res, next) => {
+  try {
+    const data = await reportService.getOnboardingAnalytics();
+    return success(res, data);
+  } catch (err) { next(err); }
+};
+
 // CSV export - streams file download to browser - SRS 5.7
 const exportReport = async (req, res, next) => {
   try {
@@ -85,5 +92,6 @@ module.exports = {
   getStockMovementReport,
   getCustomerReport,
   getOrdersByStatus,
+  getOnboardingAnalytics,
   exportReport
 };

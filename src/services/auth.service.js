@@ -24,6 +24,19 @@ const generateTokens = (user) => {
   return { accessToken, refreshToken };
 };
 
+const normalizeOnboarding = (onboarding = {}) => ({
+  version: onboarding.version || 1,
+  checklistProgress: onboarding.checklistProgress instanceof Map
+    ? Object.fromEntries(onboarding.checklistProgress)
+    : (onboarding.checklistProgress || {}),
+  dismissedTips: Array.isArray(onboarding.dismissedTips) ? onboarding.dismissedTips : [],
+  toursCompleted: Array.isArray(onboarding.toursCompleted) ? onboarding.toursCompleted : [],
+  milestones: Array.isArray(onboarding.milestones) ? onboarding.milestones : [],
+  helpCenterOpenedCount: onboarding.helpCenterOpenedCount || 0,
+  lastMilestoneAt: onboarding.lastMilestoneAt || null,
+  updatedAt: onboarding.updatedAt || null
+});
+
 // ── REGISTER ──────────────────────────────────────────────────────────────────
 const register = async ({ name, phone, email, password }) => {
   const existing = await User.findOne({ phone });
@@ -244,6 +257,7 @@ const changePassword = async (userId, currentPassword, newPassword) => {
 const getProfile = async (userId) => {
   const user = await User.findById(userId).select('-passwordHash -failedLoginCount').lean();
   if (!user) throw new AppError('User not found', 404, 'USER_NOT_FOUND');
+  user.onboarding = normalizeOnboarding(user.onboarding);
   return user;
 };
 
@@ -278,6 +292,60 @@ const updateProfile = async (userId, { name, email, addresses }) => {
   return user;
 };
 
+const getOnboarding = async (userId) => {
+  const user = await User.findById(userId).select('role onboarding');
+  if (!user) throw new AppError('User not found', 404, 'USER_NOT_FOUND');
+
+  return {
+    role: user.role,
+    onboarding: normalizeOnboarding(user.onboarding)
+  };
+};
+
+const updateOnboarding = async (userId, payload = {}) => {
+  const user = await User.findById(userId).select('role onboarding');
+  if (!user) throw new AppError('User not found', 404, 'USER_NOT_FOUND');
+
+  const next = normalizeOnboarding(user.onboarding);
+
+  if (payload.checklistProgress && typeof payload.checklistProgress === 'object') {
+    next.checklistProgress = payload.checklistProgress;
+  }
+  if (Array.isArray(payload.dismissedTips)) {
+    next.dismissedTips = [...new Set(payload.dismissedTips)];
+  }
+  if (Array.isArray(payload.toursCompleted)) {
+    next.toursCompleted = [...new Set(payload.toursCompleted)];
+  }
+  if (Array.isArray(payload.milestones)) {
+    next.milestones = [...new Set(payload.milestones)];
+    next.lastMilestoneAt = next.milestones.length ? new Date() : next.lastMilestoneAt;
+  }
+  if (payload.incrementHelpCenter === true) {
+    next.helpCenterOpenedCount += 1;
+  }
+
+  next.updatedAt = new Date();
+
+  user.onboarding = {
+    version: 1,
+    checklistProgress: next.checklistProgress,
+    dismissedTips: next.dismissedTips,
+    toursCompleted: next.toursCompleted,
+    milestones: next.milestones,
+    helpCenterOpenedCount: next.helpCenterOpenedCount,
+    lastMilestoneAt: next.lastMilestoneAt,
+    updatedAt: next.updatedAt
+  };
+
+  await user.save();
+
+  return {
+    role: user.role,
+    onboarding: normalizeOnboarding(user.onboarding)
+  };
+};
+
 module.exports = {
   register,
   login,
@@ -288,5 +356,7 @@ module.exports = {
   incrementFailedLogin,
   changePassword,
   getProfile,
-  updateProfile
+  updateProfile,
+  getOnboarding,
+  updateOnboarding
 };

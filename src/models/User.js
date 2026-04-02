@@ -7,6 +7,39 @@ const addressSchema = new mongoose.Schema({
   isDefault: { type: Boolean, default: false }
 }, { _id: false });
 
+const onboardingSchema = new mongoose.Schema({
+  version: { type: Number, default: 1 },
+  checklistProgress: {
+    type: Map,
+    of: Boolean,
+    default: () => ({})
+  },
+  dismissedTips: {
+    type: [String],
+    default: []
+  },
+  toursCompleted: {
+    type: [String],
+    default: []
+  },
+  milestones: {
+    type: [String],
+    default: []
+  },
+  helpCenterOpenedCount: {
+    type: Number,
+    default: 0
+  },
+  lastMilestoneAt: {
+    type: Date,
+    default: null
+  },
+  updatedAt: {
+    type: Date,
+    default: null
+  }
+}, { _id: false });
+
 const userSchema = new mongoose.Schema({
   name: { type: String, required: true, trim: true },
   email:     { type: String, trim: true, lowercase: true, default: null },
@@ -23,7 +56,11 @@ const userSchema = new mongoose.Schema({
   isLocked: { type: Boolean, default: false },
   failedLoginCount: { type: Number, default: 0 },
   lastLoginAt: { type: Date, default: null },
-  orderHistory: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Order' }]
+  orderHistory: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Order' }],
+  onboarding: {
+    type: onboardingSchema,
+    default: () => ({})
+  }
 }, {
   timestamps: true
 });

@@ -576,9 +576,85 @@ const exportReport = async (type, params) => {
       return { csv, filename: `stock-movement-${Date.now()}.csv` };
     }
 
+    case 'onboarding': {
+      const data = await getOnboardingAnalytics();
+      const csv = toCSV(data.rows, [
+        { label: 'Role', key: 'role' },
+        { label: 'Users', key: 'userCount' },
+        { label: 'Completed Tours', key: 'completedTours' },
+        { label: 'Avg Checklist Completion (%)', key: 'avgChecklistCompletion' },
+        { label: 'Help Center Opens', key: 'helpCenterOpens' },
+        { label: 'Milestones Reached', key: 'milestonesReached' }
+      ]);
+      return { csv, filename: `onboarding-report-${Date.now()}.csv` };
+    }
+
     default:
       throw new Error('Unknown report type');
   }
+};
+
+const getOnboardingAnalytics = async () => {
+  const users = await User.find({
+    role: { $in: ['customer', 'staff', 'supervisor', 'admin'] }
+  }).select('role onboarding').lean();
+
+  const byRole = new Map();
+
+  for (const user of users) {
+    const role = user.role;
+    const onboarding = user.onboarding || {};
+    const checklistProgress = onboarding.checklistProgress || {};
+    const checklistValues = checklistProgress instanceof Map
+      ? Array.from(checklistProgress.values())
+      : Object.values(checklistProgress);
+    const completedChecklist = checklistValues.filter(Boolean).length;
+    const checklistCompletion = checklistValues.length
+      ? Math.round((completedChecklist / checklistValues.length) * 100)
+      : 0;
+
+    if (!byRole.has(role)) {
+      byRole.set(role, {
+        role,
+        userCount: 0,
+        completedTours: 0,
+        avgChecklistCompletion: 0,
+        helpCenterOpens: 0,
+        milestonesReached: 0
+      });
+    }
+
+    const row = byRole.get(role);
+    row.userCount += 1;
+    row.completedTours += Array.isArray(onboarding.toursCompleted) ? onboarding.toursCompleted.length : 0;
+    row.avgChecklistCompletion += checklistCompletion;
+    row.helpCenterOpens += onboarding.helpCenterOpenedCount || 0;
+    row.milestonesReached += Array.isArray(onboarding.milestones) ? onboarding.milestones.length : 0;
+  }
+
+  const rows = Array.from(byRole.values()).map(row => ({
+    ...row,
+    avgChecklistCompletion: row.userCount
+      ? Math.round(row.avgChecklistCompletion / row.userCount)
+      : 0
+  }));
+
+  const totals = rows.reduce((acc, row) => ({
+    users: acc.users + row.userCount,
+    completedTours: acc.completedTours + row.completedTours,
+    helpCenterOpens: acc.helpCenterOpens + row.helpCenterOpens,
+    milestonesReached: acc.milestonesReached + row.milestonesReached
+  }), {
+    users: 0,
+    completedTours: 0,
+    helpCenterOpens: 0,
+    milestonesReached: 0
+  });
+
+  return {
+    rows,
+    totals
+  };
 };
 
 module.exports = {
@@ -590,5 +666,6 @@ module.exports = {
   getStockMovementReport,
   getCustomerReport,
   getOrdersByStatus,
-  exportReport
+  exportReport,
+  getOnboardingAnalytics
 };

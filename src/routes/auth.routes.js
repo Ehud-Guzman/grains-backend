@@ -52,6 +52,12 @@ router.get('/me', verifyToken, authController.getProfile);
 // PUT /api/auth/me — update own profile
 router.put('/me', verifyToken, authController.updateProfile);
 
+// GET /api/auth/onboarding — get own onboarding state
+router.get('/onboarding', verifyToken, authController.getOnboarding);
+
+// PATCH /api/auth/onboarding — update own onboarding state
+router.patch('/onboarding', verifyToken, authController.updateOnboarding);
+
 // POST /api/auth/avatar — upload profile picture
 router.post('/avatar', verifyToken, uploadAvatar.single('avatar'), async (req, res, next) => {
   try {

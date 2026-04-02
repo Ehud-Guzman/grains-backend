@@ -38,6 +38,10 @@ router.get('/customers', requireMinRole('supervisor'), reportController.getCusto
 // GET /api/admin/reports/orders?period=month
 router.get('/orders', requireMinRole('supervisor'), reportController.getOrdersByStatus);
 
+// ── ONBOARDING REPORT - supervisor+ ───────────────────────────────────────────
+// GET /api/admin/reports/onboarding
+router.get('/onboarding', requireMinRole('supervisor'), reportController.getOnboardingAnalytics);
+
 // ── CSV EXPORT - admin+ only per SRS 5.6 ─────────────────────────────────────
 // GET /api/admin/reports/export/:type?period=month
 // type: sales | best-sellers | stock-valuation | customers | orders | stock-movement

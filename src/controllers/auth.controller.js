@@ -80,4 +80,28 @@ const updateProfile = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-module.exports = { register, login, refresh, logout, changePassword, getProfile, updateProfile };
+const getOnboarding = async (req, res, next) => {
+  try {
+    const data = await authService.getOnboarding(req.user.id);
+    return success(res, data);
+  } catch (err) { next(err); }
+};
+
+const updateOnboarding = async (req, res, next) => {
+  try {
+    const data = await authService.updateOnboarding(req.user.id, req.body || {});
+    return success(res, data, 'Onboarding updated');
+  } catch (err) { next(err); }
+};
+
+module.exports = {
+  register,
+  login,
+  refresh,
+  logout,
+  changePassword,
+  getProfile,
+  updateProfile,
+  getOnboarding,
+  updateOnboarding
+};
