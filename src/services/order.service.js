@@ -6,9 +6,13 @@ const User = require('../models/User');
 const { AppError } = require('../middleware/errorHandler.middleware');
 const activityLogService = require('./activityLog.service');
 const stockService = require('./stock.service');
+const settingsService = require('./settings.service');
 const generateOrderRef = require('../utils/generateOrderRef');
 const { LOG_ACTIONS, ORDER_STATUSES, ORDER_STATUS_TRANSITIONS } = require('../utils/constants');
 const { paginate, buildPaginationMeta } = require('../utils/paginate');
+
+let autoCancelLastRunAt = 0;
+const AUTO_CANCEL_CHECK_INTERVAL_MS = 60 * 1000;
 
 // ── VALIDATE STOCK AVAILABILITY ───────────────────────────────────────────────
 // Called before order submission to prevent cart submission on out-of-stock (UX C1)
@@ -84,9 +88,103 @@ const buildOrderItems = async (cartItems) => {
   return { items, subtotal };
 };
 
+const assertShopCanAcceptOrders = (settings) => {
+  if (settings.maintenanceMode) {
+    throw new AppError(
+      settings.maintenanceMessage || 'We are currently undergoing maintenance. Please check back soon.',
+      503,
+      'MAINTENANCE_MODE'
+    );
+  }
+};
+
+const assertOrderMatchesSettings = ({ settings, deliveryMethod, paymentMethod, subtotal, isGuestOrder }) => {
+  if (isGuestOrder && !settings.allowGuestOrders) {
+    throw new AppError('Guest checkout is currently disabled. Please sign in to continue.', 403, 'GUEST_ORDERS_DISABLED');
+  }
+
+  if (settings.minimumOrderValue > 0 && subtotal < settings.minimumOrderValue) {
+    throw new AppError(
+      `Minimum order value is KES ${settings.minimumOrderValue.toLocaleString()}.`,
+      400,
+      'MINIMUM_ORDER_NOT_MET'
+    );
+  }
+
+  if (paymentMethod === 'mpesa' && !settings.allowMpesa) {
+    throw new AppError('M-Pesa payments are currently unavailable.', 400, 'PAYMENT_METHOD_DISABLED');
+  }
+
+  if (paymentMethod === 'pickup') {
+    if (!settings.allowPayOnPickup) {
+      throw new AppError('Pay on pickup is currently unavailable.', 400, 'PAYMENT_METHOD_DISABLED');
+    }
+    if (deliveryMethod !== 'pickup') {
+      throw new AppError('Pay on pickup is only available for pickup orders.', 400, 'INVALID_PAYMENT_METHOD');
+    }
+  }
+
+  if (paymentMethod === 'delivery') {
+    if (!settings.allowCashOnDelivery) {
+      throw new AppError('Cash on delivery is currently unavailable.', 400, 'PAYMENT_METHOD_DISABLED');
+    }
+    if (deliveryMethod !== 'delivery') {
+      throw new AppError('Pay on delivery is only available for delivery orders.', 400, 'INVALID_PAYMENT_METHOD');
+    }
+  }
+};
+
+const getConfiguredDeliveryFee = (settings, deliveryMethod) => (
+  deliveryMethod === 'delivery' ? (Number(settings.deliveryFee) || 0) : 0
+);
+
+const autoCancelExpiredPendingOrders = async () => {
+  const now = Date.now();
+  if (now - autoCancelLastRunAt < AUTO_CANCEL_CHECK_INTERVAL_MS) return;
+  autoCancelLastRunAt = now;
+
+  const settings = await settingsService.getSettings();
+  if (!settings.autoCancelHours || settings.autoCancelHours <= 0) return;
+
+  const cutoff = new Date(now - (settings.autoCancelHours * 60 * 60 * 1000));
+  const expiredOrders = await Order.find({
+    status: ORDER_STATUSES.PENDING,
+    createdAt: { $lte: cutoff }
+  });
+
+  for (const order of expiredOrders) {
+    const actorId = order.userId || order.guestId;
+
+    order.status = ORDER_STATUSES.CANCELLED;
+    order.statusHistory.push({
+      status: ORDER_STATUSES.CANCELLED,
+      changedAt: new Date(),
+      changedBy: actorId,
+      note: `Auto-cancelled after ${settings.autoCancelHours} hour(s) in pending status`
+    });
+
+    await order.save();
+
+    await activityLogService.log({
+      actorId,
+      actorRole: order.userId ? 'customer' : 'guest',
+      action: LOG_ACTIONS.ORDER_CANCELLED,
+      targetId: order._id,
+      targetType: 'Order',
+      detail: {
+        orderRef: order.orderRef,
+        automatic: true,
+        reason: 'AUTO_CANCEL_EXPIRED_PENDING'
+      }
+    });
+  }
+};
+
 // ── CREATE GUEST ORDER ────────────────────────────────────────────────────────
 // SRS 5.2 + 5.5 - no login required
 const createGuestOrder = async (orderData) => {
+  await autoCancelExpiredPendingOrders();
+
   // Validate stock before submission
   const stockErrors = await validateOrderStock(orderData.orderItems);
   if (stockErrors.length > 0) {
@@ -95,6 +193,15 @@ const createGuestOrder = async (orderData) => {
 
   // Build items with price snapshots
   const { items, subtotal } = await buildOrderItems(orderData.orderItems);
+  const settings = await settingsService.getSettings();
+  assertShopCanAcceptOrders(settings);
+  assertOrderMatchesSettings({
+    settings,
+    deliveryMethod: orderData.deliveryMethod,
+    paymentMethod: orderData.paymentMethod,
+    subtotal,
+    isGuestOrder: true
+  });
 
   // Find or create guest record
   let guest = await Guest.findOne({ phone: orderData.phone });
@@ -107,7 +214,7 @@ const createGuestOrder = async (orderData) => {
   }
 
   const orderRef = await generateOrderRef();
-  const deliveryFee = orderData.deliveryMethod === 'delivery' ? (orderData.deliveryFee || 0) : 0;
+  const deliveryFee = getConfiguredDeliveryFee(settings, orderData.deliveryMethod);
 
   const order = await Order.create({
     orderRef,
@@ -149,6 +256,8 @@ const createGuestOrder = async (orderData) => {
 // ── CREATE CUSTOMER ORDER ─────────────────────────────────────────────────────
 // SRS 5.2 - registered customer order
 const createCustomerOrder = async (orderData, userId) => {
+  await autoCancelExpiredPendingOrders();
+
   const stockErrors = await validateOrderStock(orderData.orderItems);
   if (stockErrors.length > 0) {
     throw new AppError(stockErrors[0], 409, 'STOCK_INSUFFICIENT');
@@ -158,8 +267,17 @@ const createCustomerOrder = async (orderData, userId) => {
   if (!user) throw new AppError('User not found', 404, 'USER_NOT_FOUND');
 
   const { items, subtotal } = await buildOrderItems(orderData.orderItems);
+  const settings = await settingsService.getSettings();
+  assertShopCanAcceptOrders(settings);
+  assertOrderMatchesSettings({
+    settings,
+    deliveryMethod: orderData.deliveryMethod,
+    paymentMethod: orderData.paymentMethod,
+    subtotal,
+    isGuestOrder: false
+  });
   const orderRef = await generateOrderRef();
-  const deliveryFee = orderData.deliveryMethod === 'delivery' ? (orderData.deliveryFee || 0) : 0;
+  const deliveryFee = getConfiguredDeliveryFee(settings, orderData.deliveryMethod);
 
   const order = await Order.create({
     orderRef,
@@ -200,6 +318,8 @@ const createCustomerOrder = async (orderData, userId) => {
 
 // ── GET SINGLE ORDER ──────────────────────────────────────────────────────────
 const getById = async (orderId) => {
+  await autoCancelExpiredPendingOrders();
+
   const order = await Order.findById(orderId)
     .populate('userId', 'name phone email')
     .populate('guestId', 'name phone location')
@@ -213,6 +333,8 @@ const getById = async (orderId) => {
 // ── GET ALL ORDERS (ADMIN) ────────────────────────────────────────────────────
 // SRS 5.2 admin capabilities + SRS 5.9 filtering
 const getAll = async (filters = {}, query = {}) => {
+  await autoCancelExpiredPendingOrders();
+
   const { page, limit, skip } = paginate(query);
   const matchStage = {};
 
@@ -254,6 +376,8 @@ const getAll = async (filters = {}, query = {}) => {
 
 // ── GET MY ORDERS (CUSTOMER) ──────────────────────────────────────────────────
 const getMyOrders = async (userId, query = {}) => {
+  await autoCancelExpiredPendingOrders();
+
   const { page, limit, skip } = paginate(query);
 
   const [total, orders] = await Promise.all([
@@ -271,6 +395,8 @@ const getMyOrders = async (userId, query = {}) => {
 // ── TRACK BY REF (GUEST) ──────────────────────────────────────────────────────
 // SRS 5.5 - public order tracking by phone + ref
 const trackByRef = async (phone, orderRef) => {
+  await autoCancelExpiredPendingOrders();
+
   // Find guest by phone
   const guest = await Guest.findOne({ phone });
   if (!guest) throw new AppError('No orders found for this phone number', 404, 'NOT_FOUND');
@@ -301,6 +427,8 @@ const validateTransition = (currentStatus, newStatus) => {
 // ── APPROVE ORDER ─────────────────────────────────────────────────────────────
 // SRS 5.2 - supervisor+, deducts stock atomically inside MongoDB transaction
 const approve = async (orderId, adminId) => {
+  await autoCancelExpiredPendingOrders();
+
   const session = await mongoose.startSession();
   session.startTransaction();
 
@@ -380,6 +508,8 @@ const approve = async (orderId, adminId) => {
 // ── REJECT ORDER ──────────────────────────────────────────────────────────────
 // SRS 5.2 - reason is mandatory
 const reject = async (orderId, adminId, reason) => {
+  await autoCancelExpiredPendingOrders();
+
   if (!reason || reason.trim().length < 3) {
     throw new AppError('A rejection reason is required', 400, 'REASON_REQUIRED');
   }
@@ -415,6 +545,8 @@ const reject = async (orderId, adminId, reason) => {
 // ── UPDATE STATUS ─────────────────────────────────────────────────────────────
 // SRS 5.2 - staff+ moves order through the pipeline
 const updateStatus = async (orderId, newStatus, adminId, note = null) => {
+  await autoCancelExpiredPendingOrders();
+
   const order = await Order.findById(orderId);
   if (!order) throw new AppError('Order not found', 404, 'ORDER_NOT_FOUND');
 
@@ -445,6 +577,8 @@ const updateStatus = async (orderId, newStatus, adminId, note = null) => {
 // ── CANCEL ORDER ──────────────────────────────────────────────────────────────
 // SRS 5.2 - customer can cancel only if still pending
 const cancel = async (orderId, userId) => {
+  await autoCancelExpiredPendingOrders();
+
   const order = await Order.findById(orderId);
   if (!order) throw new AppError('Order not found', 404, 'ORDER_NOT_FOUND');
 
@@ -517,6 +651,8 @@ const bulkReject = async (orderIds, adminId, reason) => {
 // ── PACKING SLIP DATA ─────────────────────────────────────────────────────────
 // SRS 5.2 - returns formatted data for print layout
 const getPackingSlip = async (orderId) => {
+  await autoCancelExpiredPendingOrders();
+
   const order = await Order.findById(orderId)
     .populate('userId', 'name phone email addresses')
     .populate('guestId', 'name phone location')
