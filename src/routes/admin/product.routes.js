@@ -51,7 +51,7 @@ router.get('/export', requireMinRole('admin'), exportHandler);
 router.get('/template', requireMinRole('admin'), templateHandler);
 
 // POST /api/admin/products/import
-router.post('/import', requireBusinessRole('admin'), uploadExcel.single('file'), importHandler);
+router.post('/import', requireMinRole('admin'), uploadExcel.single('file'), importHandler);
 
 // POST /api/admin/products/upload-images
 // Uploads images to Cloudinary and saves URLs to the product document

@@ -22,6 +22,29 @@ const login = async (req, res, next) => {
   }
 };
 
+const selectBranch = async (req, res, next) => {
+  try {
+    const { preAuthToken, branchId } = req.body;
+    if (!preAuthToken || !branchId) {
+      return res.status(400).json({ success: false, error: 'MISSING_FIELDS', message: 'preAuthToken and branchId are required' });
+    }
+    const result = await authService.selectBranch(preAuthToken, branchId);
+    return success(res, result, 'Branch selected');
+  } catch (err) {
+    next(err);
+  }
+};
+
+const switchBranch = async (req, res, next) => {
+  try {
+    const { branchId } = req.body; // null = global view (superadmin only)
+    const result = await authService.switchBranch(req.user.id, branchId || null);
+    return success(res, result, 'Branch switched');
+  } catch (err) {
+    next(err);
+  }
+};
+
 const refresh = async (req, res, next) => {
   try {
     const { refreshToken } = req.body;
@@ -97,6 +120,8 @@ const updateOnboarding = async (req, res, next) => {
 module.exports = {
   register,
   login,
+  selectBranch,
+  switchBranch,
   refresh,
   logout,
   changePassword,

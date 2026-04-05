@@ -8,11 +8,22 @@ const activityLogService = require('./activityLog.service');
 const stockService = require('./stock.service');
 const settingsService = require('./settings.service');
 const generateOrderRef = require('../utils/generateOrderRef');
-const { LOG_ACTIONS, ORDER_STATUSES, ORDER_STATUS_TRANSITIONS } = require('../utils/constants');
+const {
+  LOG_ACTIONS,
+  ORDER_STATUSES,
+  ORDER_STATUS_TRANSITIONS,
+  STOCK_CHANGE_TYPES,
+  STOCK_RESERVATION_STATUSES
+} = require('../utils/constants');
 const { paginate, buildPaginationMeta } = require('../utils/paginate');
 
 let autoCancelLastRunAt = 0;
 const AUTO_CANCEL_CHECK_INTERVAL_MS = 60 * 1000;
+
+const orderHasHeldStock = (order) => (
+  [STOCK_RESERVATION_STATUSES.HELD, STOCK_RESERVATION_STATUSES.CONSUMED]
+    .includes(order.stockReservationStatus || STOCK_RESERVATION_STATUSES.NONE)
+);
 
 // ── VALIDATE STOCK AVAILABILITY ───────────────────────────────────────────────
 // Called before order submission to prevent cart submission on out-of-stock (UX C1)
@@ -58,18 +69,32 @@ const validateOrderStock = async (orderItems) => {
 
 // ── BUILD ORDER ITEMS WITH PRICE SNAPSHOT ────────────────────────────────────
 // Snapshot prices at time of order - SRS 7.4
-const buildOrderItems = async (cartItems) => {
+const buildOrderItems = async (cartItems, options = {}) => {
+  const { branchId = null, session = null } = options;
   const items = [];
   let subtotal = 0;
 
   for (const item of cartItems) {
-    const product = await Product.findById(item.productId).lean();
+    const query = { _id: item.productId, isActive: true };
+    if (branchId) query.branchId = branchId;
+
+    const product = await Product.findOne(query, null, { session }).lean();
     if (!product) throw new AppError(`Product not found: ${item.productId}`, 404, 'PRODUCT_NOT_FOUND');
 
     const variety = product.varieties.find(v => v.varietyName === item.variety);
     const packaging = variety?.packaging.find(p => p.size === item.packaging);
 
     if (!packaging) throw new AppError(`Packaging ${item.variety} ${item.packaging} not found`, 404, 'PACKAGING_NOT_FOUND');
+    if (packaging.quoteOnly) {
+      throw new AppError(`${item.variety} ${item.packaging} requires a quote and cannot be ordered online`, 400, 'QUOTE_ONLY');
+    }
+    if (packaging.stock < item.quantity) {
+      throw new AppError(
+        `Insufficient stock for ${item.variety} ${item.packaging}. Available: ${packaging.stock}, Requested: ${item.quantity}`,
+        409,
+        'STOCK_INSUFFICIENT'
+      );
+    }
 
     const lineTotal = packaging.priceKES * item.quantity;
     subtotal += lineTotal;
@@ -86,6 +111,66 @@ const buildOrderItems = async (cartItems) => {
   }
 
   return { items, subtotal };
+};
+
+const reserveOrderStock = async (order, actorId, actorRole, session) => {
+  for (const item of order.orderItems) {
+    await stockService.deductStock(
+      item.productId,
+      item.variety,
+      item.packaging,
+      item.quantity,
+      order._id,
+      actorId,
+      session,
+      order.branchId,
+      {
+        changeType: STOCK_CHANGE_TYPES.ORDER_RESERVATION,
+        reason: `Order ${order.orderRef} stock reserved at placement`
+      }
+    );
+  }
+
+  order.stockReservationStatus = STOCK_RESERVATION_STATUSES.HELD;
+  order.stockReservedAt = new Date();
+  order.stockReleasedAt = null;
+  order.stockConsumedAt = null;
+  order.statusHistory[0].note = actorRole === 'guest'
+    ? 'Order placed and stock reserved'
+    : 'Order placed and stock reserved';
+  await order.save({ session });
+};
+
+const releaseOrderStock = async (order, actorId, session, note) => {
+  if (!orderHasHeldStock(order)) return false;
+
+  for (const item of order.orderItems) {
+    await stockService.releaseStock(
+      item.productId,
+      item.variety,
+      item.packaging,
+      item.quantity,
+      order._id,
+      actorId,
+      session,
+      order.branchId
+    );
+  }
+
+  order.stockReservationStatus = STOCK_RESERVATION_STATUSES.RELEASED;
+  order.stockReleasedAt = new Date();
+  if (note) {
+    const historyEntry = order.statusHistory[order.statusHistory.length - 1];
+    if (historyEntry) historyEntry.note = note;
+  }
+
+  return true;
+};
+
+const markOrderReservationConsumed = (order) => {
+  order.stockReservationStatus = STOCK_RESERVATION_STATUSES.CONSUMED;
+  if (!order.stockReservedAt) order.stockReservedAt = new Date();
+  order.stockConsumedAt = new Date();
 };
 
 const assertShopCanAcceptOrders = (settings) => {
@@ -138,63 +223,80 @@ const getConfiguredDeliveryFee = (settings, deliveryMethod) => (
   deliveryMethod === 'delivery' ? (Number(settings.deliveryFee) || 0) : 0
 );
 
-const autoCancelExpiredPendingOrders = async () => {
+const autoCancelExpiredPendingOrders = async (branchId) => {
   const now = Date.now();
   if (now - autoCancelLastRunAt < AUTO_CANCEL_CHECK_INTERVAL_MS) return;
   autoCancelLastRunAt = now;
 
-  const settings = await settingsService.getSettings();
+  if (!branchId) return; // skip auto-cancel in global (no-branch) context
+
+  const settings = await settingsService.getSettings(branchId);
   if (!settings.autoCancelHours || settings.autoCancelHours <= 0) return;
 
   const cutoff = new Date(now - (settings.autoCancelHours * 60 * 60 * 1000));
   const expiredOrders = await Order.find({
+    branchId,
     status: ORDER_STATUSES.PENDING,
     createdAt: { $lte: cutoff }
-  });
+  }).select('_id').lean();
 
-  for (const order of expiredOrders) {
-    const actorId = order.userId || order.guestId;
+  for (const { _id } of expiredOrders) {
+    const session = await mongoose.startSession();
+    session.startTransaction();
 
-    order.status = ORDER_STATUSES.CANCELLED;
-    order.statusHistory.push({
-      status: ORDER_STATUSES.CANCELLED,
-      changedAt: new Date(),
-      changedBy: actorId,
-      note: `Auto-cancelled after ${settings.autoCancelHours} hour(s) in pending status`
-    });
-
-    await order.save();
-
-    await activityLogService.log({
-      actorId,
-      actorRole: order.userId ? 'customer' : 'guest',
-      action: LOG_ACTIONS.ORDER_CANCELLED,
-      targetId: order._id,
-      targetType: 'Order',
-      detail: {
-        orderRef: order.orderRef,
-        automatic: true,
-        reason: 'AUTO_CANCEL_EXPIRED_PENDING'
+    try {
+      const order = await Order.findById(_id).session(session);
+      if (!order || order.status !== ORDER_STATUSES.PENDING) {
+        await session.commitTransaction();
+        continue;
       }
-    });
+
+      const actorId = order.userId || order.guestId;
+      const note = `Auto-cancelled after ${settings.autoCancelHours} hour(s) in pending status`;
+
+      order.status = ORDER_STATUSES.CANCELLED;
+      order.statusHistory.push({
+        status: ORDER_STATUSES.CANCELLED,
+        changedAt: new Date(),
+        changedBy: actorId,
+        note
+      });
+
+      await releaseOrderStock(order, actorId, session, note);
+      await order.save({ session });
+      await session.commitTransaction();
+
+      await activityLogService.log({
+        actorId,
+        actorRole: order.userId ? 'customer' : 'guest',
+        action: LOG_ACTIONS.ORDER_CANCELLED,
+        branchId: order.branchId,
+        targetId: order._id,
+        targetType: 'Order',
+        detail: {
+          orderRef: order.orderRef,
+          automatic: true,
+          reason: 'AUTO_CANCEL_EXPIRED_PENDING'
+        }
+      });
+    } catch (err) {
+      await session.abortTransaction();
+      throw err;
+    } finally {
+      session.endSession();
+    }
   }
 };
 
 // ── CREATE GUEST ORDER ────────────────────────────────────────────────────────
 // SRS 5.2 + 5.5 - no login required
-const createGuestOrder = async (orderData) => {
-  await autoCancelExpiredPendingOrders();
-
-  // Validate stock before submission
-  const stockErrors = await validateOrderStock(orderData.orderItems);
-  if (stockErrors.length > 0) {
-    throw new AppError(stockErrors[0], 409, 'STOCK_INSUFFICIENT');
-  }
-
-  // Build items with price snapshots
-  const { items, subtotal } = await buildOrderItems(orderData.orderItems);
-  const settings = await settingsService.getSettings();
+const createGuestOrder = async (orderData, branchId) => {
+  if (!branchId) throw new AppError('Branch context required to place an order', 400, 'BRANCH_REQUIRED');
+  await autoCancelExpiredPendingOrders(branchId);
+  const settings = await settingsService.getSettings(branchId);
   assertShopCanAcceptOrders(settings);
+
+  const { items, subtotal } = await buildOrderItems(orderData.orderItems, { branchId });
   assertOrderMatchesSettings({
     settings,
     deliveryMethod: orderData.deliveryMethod,
@@ -203,71 +305,79 @@ const createGuestOrder = async (orderData) => {
     isGuestOrder: true
   });
 
-  // Find or create guest record
-  let guest = await Guest.findOne({ phone: orderData.phone });
-  if (!guest) {
-    guest = await Guest.create({
-      name: orderData.name,
-      phone: orderData.phone,
-      location: orderData.deliveryAddress || ''
-    });
-  }
-
-  const orderRef = await generateOrderRef();
   const deliveryFee = getConfiguredDeliveryFee(settings, orderData.deliveryMethod);
+  const session = await mongoose.startSession();
+  session.startTransaction();
 
-  const order = await Order.create({
-    orderRef,
-    guestId: guest._id,
-    userId: null,
-    orderItems: items,
-    subtotal,
-    deliveryFee,
-    total: subtotal + deliveryFee,
-    deliveryMethod: orderData.deliveryMethod,
-    deliveryAddress: orderData.deliveryAddress || null,
-    paymentMethod: orderData.paymentMethod,
-    paymentStatus: 'pending',
-    status: ORDER_STATUSES.PENDING,
-    specialInstructions: orderData.specialInstructions || null,
-    statusHistory: [{
+  try {
+    let guest = await Guest.findOne({ phone: orderData.phone }, null, { session });
+    if (!guest) {
+      [guest] = await Guest.create([{
+        name: orderData.name,
+        phone: orderData.phone,
+        location: orderData.deliveryAddress || ''
+      }], { session });
+    }
+
+    const orderRef = await generateOrderRef(branchId, session);
+    let [order] = await Order.create([{
+      orderRef,
+      branchId,
+      guestId: guest._id,
+      userId: null,
+      orderItems: items,
+      subtotal,
+      deliveryFee,
+      total: subtotal + deliveryFee,
+      deliveryMethod: orderData.deliveryMethod,
+      deliveryAddress: orderData.deliveryAddress || null,
+      paymentMethod: orderData.paymentMethod,
+      paymentStatus: 'pending',
       status: ORDER_STATUSES.PENDING,
-      changedAt: new Date(),
-      changedBy: guest._id, // use guestId as actor for guest orders
-      note: 'Order placed'
-    }]
-  });
+      stockReservationStatus: STOCK_RESERVATION_STATUSES.NONE,
+      specialInstructions: orderData.specialInstructions || null,
+      statusHistory: [{
+        status: ORDER_STATUSES.PENDING,
+        changedAt: new Date(),
+        changedBy: guest._id,
+        note: 'Order placed'
+      }]
+    }], { session });
 
-  // Link order to guest
-  await Guest.findByIdAndUpdate(guest._id, { $push: { orders: order._id } });
+    await reserveOrderStock(order, guest._id, 'guest', session);
+    await Guest.findByIdAndUpdate(guest._id, { $push: { orders: order._id } }, { session });
+    await session.commitTransaction();
 
-  await activityLogService.log({
-    actorId: guest._id,
-    actorRole: 'guest',
-    action: LOG_ACTIONS.ORDER_CREATED,
-    targetId: order._id,
-    targetType: 'Order',
-    detail: { orderRef, total: order.total, itemCount: items.length }
-  });
+    await activityLogService.log({
+      actorId: guest._id,
+      actorRole: 'guest',
+      action: LOG_ACTIONS.ORDER_CREATED,
+      branchId,
+      targetId: order._id,
+      targetType: 'Order',
+      detail: { orderRef, total: order.total, itemCount: items.length, stockReserved: true }
+    });
 
-  return order;
+    return order;
+  } catch (err) {
+    await session.abortTransaction();
+    throw err;
+  } finally {
+    session.endSession();
+  }
 };
 
 // ── CREATE CUSTOMER ORDER ─────────────────────────────────────────────────────
 // SRS 5.2 - registered customer order
-const createCustomerOrder = async (orderData, userId) => {
-  await autoCancelExpiredPendingOrders();
-
-  const stockErrors = await validateOrderStock(orderData.orderItems);
-  if (stockErrors.length > 0) {
-    throw new AppError(stockErrors[0], 409, 'STOCK_INSUFFICIENT');
-  }
+const createCustomerOrder = async (orderData, userId, branchId) => {
+  if (!branchId) throw new AppError('Branch context required to place an order', 400, 'BRANCH_REQUIRED');
+  await autoCancelExpiredPendingOrders(branchId);
 
   const user = await User.findById(userId);
   if (!user) throw new AppError('User not found', 404, 'USER_NOT_FOUND');
 
-  const { items, subtotal } = await buildOrderItems(orderData.orderItems);
-  const settings = await settingsService.getSettings();
+  const settings = await settingsService.getSettings(branchId);
+  const { items, subtotal } = await buildOrderItems(orderData.orderItems, { branchId });
   assertShopCanAcceptOrders(settings);
   assertOrderMatchesSettings({
     settings,
@@ -276,51 +386,67 @@ const createCustomerOrder = async (orderData, userId) => {
     subtotal,
     isGuestOrder: false
   });
-  const orderRef = await generateOrderRef();
   const deliveryFee = getConfiguredDeliveryFee(settings, orderData.deliveryMethod);
+  const session = await mongoose.startSession();
+  session.startTransaction();
 
-  const order = await Order.create({
-    orderRef,
-    userId,
-    guestId: null,
-    orderItems: items,
-    subtotal,
-    deliveryFee,
-    total: subtotal + deliveryFee,
-    deliveryMethod: orderData.deliveryMethod,
-    deliveryAddress: orderData.deliveryAddress || null,
-    paymentMethod: orderData.paymentMethod,
-    paymentStatus: 'pending',
-    status: ORDER_STATUSES.PENDING,
-    specialInstructions: orderData.specialInstructions || null,
-    statusHistory: [{
+  try {
+    const orderRef = await generateOrderRef(branchId, session);
+    let [order] = await Order.create([{
+      orderRef,
+      branchId,
+      userId,
+      guestId: null,
+      orderItems: items,
+      subtotal,
+      deliveryFee,
+      total: subtotal + deliveryFee,
+      deliveryMethod: orderData.deliveryMethod,
+      deliveryAddress: orderData.deliveryAddress || null,
+      paymentMethod: orderData.paymentMethod,
+      paymentStatus: 'pending',
       status: ORDER_STATUSES.PENDING,
-      changedAt: new Date(),
-      changedBy: userId,
-      note: 'Order placed'
-    }]
-  });
+      stockReservationStatus: STOCK_RESERVATION_STATUSES.NONE,
+      specialInstructions: orderData.specialInstructions || null,
+      statusHistory: [{
+        status: ORDER_STATUSES.PENDING,
+        changedAt: new Date(),
+        changedBy: userId,
+        note: 'Order placed'
+      }]
+    }], { session });
 
-  // Link order to user history
-  await User.findByIdAndUpdate(userId, { $push: { orderHistory: order._id } });
+    await reserveOrderStock(order, userId, 'customer', session);
+    await User.findByIdAndUpdate(userId, { $push: { orderHistory: order._id } }, { session });
+    await session.commitTransaction();
 
-  await activityLogService.log({
-    actorId: userId,
-    actorRole: 'customer',
-    action: LOG_ACTIONS.ORDER_CREATED,
-    targetId: order._id,
-    targetType: 'Order',
-    detail: { orderRef, total: order.total, itemCount: items.length }
-  });
+    await activityLogService.log({
+      actorId: userId,
+      actorRole: 'customer',
+      action: LOG_ACTIONS.ORDER_CREATED,
+      branchId,
+      targetId: order._id,
+      targetType: 'Order',
+      detail: { orderRef, total: order.total, itemCount: items.length, stockReserved: true }
+    });
 
-  return order;
+    return order;
+  } catch (err) {
+    await session.abortTransaction();
+    throw err;
+  } finally {
+    session.endSession();
+  }
 };
 
 // ── GET SINGLE ORDER ──────────────────────────────────────────────────────────
-const getById = async (orderId) => {
-  await autoCancelExpiredPendingOrders();
+const getById = async (orderId, branchId) => {
+  await autoCancelExpiredPendingOrders(branchId);
 
-  const order = await Order.findById(orderId)
+  const query = { _id: orderId };
+  if (branchId) query.branchId = branchId;
+
+  const order = await Order.findOne(query)
     .populate('userId', 'name phone email')
     .populate('guestId', 'name phone location')
     .populate('paymentId')
@@ -332,11 +458,13 @@ const getById = async (orderId) => {
 
 // ── GET ALL ORDERS (ADMIN) ────────────────────────────────────────────────────
 // SRS 5.2 admin capabilities + SRS 5.9 filtering
-const getAll = async (filters = {}, query = {}) => {
-  await autoCancelExpiredPendingOrders();
+const getAll = async (filters = {}, query = {}, branchId) => {
+  await autoCancelExpiredPendingOrders(branchId);
 
   const { page, limit, skip } = paginate(query);
   const matchStage = {};
+
+  if (branchId) matchStage.branchId = branchId;
 
   if (filters.status) {
     matchStage.status = Array.isArray(filters.status)
@@ -375,14 +503,16 @@ const getAll = async (filters = {}, query = {}) => {
 };
 
 // ── GET MY ORDERS (CUSTOMER) ──────────────────────────────────────────────────
-const getMyOrders = async (userId, query = {}) => {
-  await autoCancelExpiredPendingOrders();
+const getMyOrders = async (userId, query = {}, branchId) => {
+  await autoCancelExpiredPendingOrders(branchId);
 
   const { page, limit, skip } = paginate(query);
+  // Customers can see their orders across all branches (shared accounts)
+  const filter = { userId };
 
   const [total, orders] = await Promise.all([
-    Order.countDocuments({ userId }),
-    Order.find({ userId })
+    Order.countDocuments(filter),
+    Order.find(filter)
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit)
@@ -426,56 +556,42 @@ const validateTransition = (currentStatus, newStatus) => {
 
 // ── APPROVE ORDER ─────────────────────────────────────────────────────────────
 // SRS 5.2 - supervisor+, deducts stock atomically inside MongoDB transaction
-const approve = async (orderId, adminId) => {
-  await autoCancelExpiredPendingOrders();
+const approve = async (orderId, adminId, branchId) => {
+  await autoCancelExpiredPendingOrders(branchId);
 
   const session = await mongoose.startSession();
   session.startTransaction();
 
   try {
-    const order = await Order.findById(orderId).session(session);
+    const query = { _id: orderId };
+    if (branchId) query.branchId = branchId;
+    const order = await Order.findOne(query).session(session);
     if (!order) throw new AppError('Order not found', 404, 'ORDER_NOT_FOUND');
 
     validateTransition(order.status, ORDER_STATUSES.APPROVED);
 
-    // Re-check stock inside transaction (concurrent orders protection - UX C1)
-    const stockWarnings = [];
-    for (const item of order.orderItems) {
-      const product = await Product.findOne(
-        { _id: item.productId, 'varieties.varietyName': item.variety },
-        { 'varieties.$': 1 },
-        { session }
-      );
+    if (order.stockReservationStatus === STOCK_RESERVATION_STATUSES.RELEASED) {
+      throw new AppError('This order no longer has stock reserved. Ask the customer to reorder.', 409, 'STOCK_RESERVATION_RELEASED');
+    }
 
-      const packaging = product?.varieties[0]?.packaging.find(p => p.size === item.packaging);
-      if (!packaging || packaging.stock < item.quantity) {
-        stockWarnings.push({
-          product: `${item.variety} ${item.packaging}`,
-          available: packaging?.stock || 0,
-          ordered: item.quantity
-        });
+    if (order.stockReservationStatus === STOCK_RESERVATION_STATUSES.NONE) {
+      for (const item of order.orderItems) {
+        await stockService.deductStock(
+          item.productId,
+          item.variety,
+          item.packaging,
+          item.quantity,
+          order._id,
+          adminId,
+          session,
+          order.branchId
+        );
       }
-    }
-
-    if (stockWarnings.length > 0) {
-      await session.abortTransaction();
-      throw new AppError(
-        `Stock insufficient for: ${stockWarnings.map(w => `${w.product} (available: ${w.available}, ordered: ${w.ordered})`).join(', ')}`,
-        409,
-        'STOCK_INSUFFICIENT'
-      );
-    }
-
-    // Deduct stock atomically for each item - SRS 5.4
-    for (const item of order.orderItems) {
-      await stockService.deductStock(
-        item.productId, item.variety, item.packaging,
-        item.quantity, order._id, adminId, session
-      );
     }
 
     // Update order status
     order.status = ORDER_STATUSES.APPROVED;
+    markOrderReservationConsumed(order);
     order.statusHistory.push({
       status: ORDER_STATUSES.APPROVED,
       changedAt: new Date(),
@@ -490,6 +606,7 @@ const approve = async (orderId, adminId) => {
       actorId: adminId,
       actorRole: 'supervisor',
       action: LOG_ACTIONS.ORDER_APPROVED,
+      branchId: order.branchId,
       targetId: order._id,
       targetType: 'Order',
       detail: { orderRef: order.orderRef }
@@ -507,118 +624,166 @@ const approve = async (orderId, adminId) => {
 
 // ── REJECT ORDER ──────────────────────────────────────────────────────────────
 // SRS 5.2 - reason is mandatory
-const reject = async (orderId, adminId, reason) => {
-  await autoCancelExpiredPendingOrders();
+const reject = async (orderId, adminId, reason, branchId) => {
+  await autoCancelExpiredPendingOrders(branchId);
 
   if (!reason || reason.trim().length < 3) {
     throw new AppError('A rejection reason is required', 400, 'REASON_REQUIRED');
   }
 
-  const order = await Order.findById(orderId);
-  if (!order) throw new AppError('Order not found', 404, 'ORDER_NOT_FOUND');
+  const session = await mongoose.startSession();
+  session.startTransaction();
 
-  validateTransition(order.status, ORDER_STATUSES.REJECTED);
+  try {
+    const query = { _id: orderId };
+    if (branchId) query.branchId = branchId;
+    const order = await Order.findOne(query).session(session);
+    if (!order) throw new AppError('Order not found', 404, 'ORDER_NOT_FOUND');
 
-  order.status = ORDER_STATUSES.REJECTED;
-  order.rejectionReason = reason;
-  order.statusHistory.push({
-    status: ORDER_STATUSES.REJECTED,
-    changedAt: new Date(),
-    changedBy: adminId,
-    note: reason
-  });
+    validateTransition(order.status, ORDER_STATUSES.REJECTED);
 
-  await order.save();
+    order.status = ORDER_STATUSES.REJECTED;
+    order.rejectionReason = reason;
+    order.statusHistory.push({
+      status: ORDER_STATUSES.REJECTED,
+      changedAt: new Date(),
+      changedBy: adminId,
+      note: reason
+    });
 
-  await activityLogService.log({
-    actorId: adminId,
-    actorRole: 'supervisor',
-    action: LOG_ACTIONS.ORDER_REJECTED,
-    targetId: order._id,
-    targetType: 'Order',
-    detail: { orderRef: order.orderRef, reason }
-  });
+    await releaseOrderStock(order, adminId, session, reason);
+    await order.save({ session });
+    await session.commitTransaction();
 
-  return order;
+    await activityLogService.log({
+      actorId: adminId,
+      actorRole: 'supervisor',
+      action: LOG_ACTIONS.ORDER_REJECTED,
+      branchId: order.branchId,
+      targetId: order._id,
+      targetType: 'Order',
+      detail: { orderRef: order.orderRef, reason, stockReleased: true }
+    });
+
+    return order;
+  } catch (err) {
+    await session.abortTransaction();
+    throw err;
+  } finally {
+    session.endSession();
+  }
 };
 
 // ── UPDATE STATUS ─────────────────────────────────────────────────────────────
 // SRS 5.2 - staff+ moves order through the pipeline
-const updateStatus = async (orderId, newStatus, adminId, note = null) => {
-  await autoCancelExpiredPendingOrders();
+const updateStatus = async (orderId, newStatus, adminId, note = null, branchId) => {
+  await autoCancelExpiredPendingOrders(branchId);
+  const session = await mongoose.startSession();
+  session.startTransaction();
 
-  const order = await Order.findById(orderId);
-  if (!order) throw new AppError('Order not found', 404, 'ORDER_NOT_FOUND');
+  try {
+    const query = { _id: orderId };
+    if (branchId) query.branchId = branchId;
+    const order = await Order.findOne(query).session(session);
+    if (!order) throw new AppError('Order not found', 404, 'ORDER_NOT_FOUND');
 
-  validateTransition(order.status, newStatus);
+    validateTransition(order.status, newStatus);
 
-  order.status = newStatus;
-  order.statusHistory.push({
-    status: newStatus,
-    changedAt: new Date(),
-    changedBy: adminId,
-    note
-  });
+    order.status = newStatus;
+    order.statusHistory.push({
+      status: newStatus,
+      changedAt: new Date(),
+      changedBy: adminId,
+      note
+    });
 
-  await order.save();
+    if (newStatus === ORDER_STATUSES.CANCELLED) {
+      await releaseOrderStock(order, adminId, session, note || 'Cancelled by staff');
+    }
 
-  await activityLogService.log({
-    actorId: adminId,
-    actorRole: 'staff',
-    action: LOG_ACTIONS.ORDER_STATUS_CHANGED,
-    targetId: order._id,
-    targetType: 'Order',
-    detail: { orderRef: order.orderRef, newStatus, note }
-  });
+    await order.save({ session });
+    await session.commitTransaction();
 
-  return order;
+    await activityLogService.log({
+      actorId: adminId,
+      actorRole: 'staff',
+      action: LOG_ACTIONS.ORDER_STATUS_CHANGED,
+      branchId: order.branchId,
+      targetId: order._id,
+      targetType: 'Order',
+      detail: {
+        orderRef: order.orderRef,
+        newStatus,
+        note,
+        stockReleased: newStatus === ORDER_STATUSES.CANCELLED
+      }
+    });
+
+    return order;
+  } catch (err) {
+    await session.abortTransaction();
+    throw err;
+  } finally {
+    session.endSession();
+  }
 };
 
 // ── CANCEL ORDER ──────────────────────────────────────────────────────────────
 // SRS 5.2 - customer can cancel only if still pending
-const cancel = async (orderId, userId) => {
-  await autoCancelExpiredPendingOrders();
+const cancel = async (orderId, userId, branchId) => {
+  await autoCancelExpiredPendingOrders(branchId);
+  const session = await mongoose.startSession();
+  session.startTransaction();
 
-  const order = await Order.findById(orderId);
-  if (!order) throw new AppError('Order not found', 404, 'ORDER_NOT_FOUND');
+  try {
+    const order = await Order.findById(orderId).session(session);
+    if (!order) throw new AppError('Order not found', 404, 'ORDER_NOT_FOUND');
 
-  // Customers can only cancel their own orders
-  if (order.userId && order.userId.toString() !== userId.toString()) {
-    throw new AppError('You can only cancel your own orders', 403, 'FORBIDDEN');
+    if (order.userId && order.userId.toString() !== userId.toString()) {
+      throw new AppError('You can only cancel your own orders', 403, 'FORBIDDEN');
+    }
+
+    validateTransition(order.status, ORDER_STATUSES.CANCELLED);
+
+    order.status = ORDER_STATUSES.CANCELLED;
+    order.statusHistory.push({
+      status: ORDER_STATUSES.CANCELLED,
+      changedAt: new Date(),
+      changedBy: userId,
+      note: 'Cancelled by customer'
+    });
+
+    await releaseOrderStock(order, userId, session, 'Cancelled by customer');
+    await order.save({ session });
+    await session.commitTransaction();
+
+    await activityLogService.log({
+      actorId: userId,
+      actorRole: 'customer',
+      action: LOG_ACTIONS.ORDER_CANCELLED,
+      branchId: order.branchId,
+      targetId: order._id,
+      targetType: 'Order',
+      detail: { orderRef: order.orderRef, stockReleased: true }
+    });
+
+    return order;
+  } catch (err) {
+    await session.abortTransaction();
+    throw err;
+  } finally {
+    session.endSession();
   }
-
-  validateTransition(order.status, ORDER_STATUSES.CANCELLED);
-
-  order.status = ORDER_STATUSES.CANCELLED;
-  order.statusHistory.push({
-    status: ORDER_STATUSES.CANCELLED,
-    changedAt: new Date(),
-    changedBy: userId,
-    note: 'Cancelled by customer'
-  });
-
-  await order.save();
-
-  await activityLogService.log({
-    actorId: userId,
-    actorRole: 'customer',
-    action: LOG_ACTIONS.ORDER_CANCELLED,
-    targetId: order._id,
-    targetType: 'Order',
-    detail: { orderRef: order.orderRef }
-  });
-
-  return order;
 };
 
 // ── BULK APPROVE ──────────────────────────────────────────────────────────────
 // SRS 5.2 admin - approve multiple pending orders
-const bulkApprove = async (orderIds, adminId) => {
+const bulkApprove = async (orderIds, adminId, branchId) => {
   const results = { approved: [], failed: [] };
 
   for (const id of orderIds) {
     try {
-      const order = await approve(id, adminId);
+      const order = await approve(id, adminId, branchId);
       results.approved.push(order.orderRef);
     } catch (err) {
       results.failed.push({ id, error: err.message });
@@ -629,7 +794,7 @@ const bulkApprove = async (orderIds, adminId) => {
 };
 
 // ── BULK REJECT ───────────────────────────────────────────────────────────────
-const bulkReject = async (orderIds, adminId, reason) => {
+const bulkReject = async (orderIds, adminId, reason, branchId) => {
   if (!reason || reason.trim().length < 3) {
     throw new AppError('A rejection reason is required for bulk reject', 400, 'REASON_REQUIRED');
   }
@@ -638,7 +803,7 @@ const bulkReject = async (orderIds, adminId, reason) => {
 
   for (const id of orderIds) {
     try {
-      const order = await reject(id, adminId, reason);
+      const order = await reject(id, adminId, reason, branchId);
       results.rejected.push(order.orderRef);
     } catch (err) {
       results.failed.push({ id, error: err.message });
@@ -650,10 +815,12 @@ const bulkReject = async (orderIds, adminId, reason) => {
 
 // ── PACKING SLIP DATA ─────────────────────────────────────────────────────────
 // SRS 5.2 - returns formatted data for print layout
-const getPackingSlip = async (orderId) => {
-  await autoCancelExpiredPendingOrders();
+const getPackingSlip = async (orderId, branchId) => {
+  await autoCancelExpiredPendingOrders(branchId);
 
-  const order = await Order.findById(orderId)
+  const query = { _id: orderId };
+  if (branchId) query.branchId = branchId;
+  const order = await Order.findOne(query)
     .populate('userId', 'name phone email addresses')
     .populate('guestId', 'name phone location')
     .lean();

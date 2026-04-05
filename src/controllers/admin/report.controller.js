@@ -3,7 +3,7 @@ const { success } = require('../../utils/apiResponse');
 
 const getDashboardKPIs = async (req, res, next) => {
   try {
-    const data = await reportService.getDashboardKPIs();
+    const data = await reportService.getDashboardKPIs(req.branchId);
     return success(res, data);
   } catch (err) { next(err); }
 };
@@ -11,7 +11,7 @@ const getDashboardKPIs = async (req, res, next) => {
 const getSalesReport = async (req, res, next) => {
   try {
     const { period, from, to } = req.query;
-    const data = await reportService.getSalesReport(period, from, to);
+    const data = await reportService.getSalesReport(period, from, to, req.branchId);
     return success(res, data);
   } catch (err) { next(err); }
 };
@@ -19,7 +19,7 @@ const getSalesReport = async (req, res, next) => {
 const getBestSellers = async (req, res, next) => {
   try {
     const { period, from, to, limit } = req.query;
-    const data = await reportService.getBestSellers(period, from, to, limit);
+    const data = await reportService.getBestSellers(period, from, to, limit, req.branchId);
     return success(res, data);
   } catch (err) { next(err); }
 };
@@ -27,14 +27,14 @@ const getBestSellers = async (req, res, next) => {
 const getSlowMovers = async (req, res, next) => {
   try {
     const { days } = req.query;
-    const data = await reportService.getSlowMovers(days || 30);
+    const data = await reportService.getSlowMovers(days || 30, req.branchId);
     return success(res, data);
   } catch (err) { next(err); }
 };
 
 const getStockValuation = async (req, res, next) => {
   try {
-    const data = await reportService.getStockValuation();
+    const data = await reportService.getStockValuation(req.branchId);
     return success(res, data);
   } catch (err) { next(err); }
 };
@@ -42,14 +42,14 @@ const getStockValuation = async (req, res, next) => {
 const getStockMovementReport = async (req, res, next) => {
   try {
     const { period, from, to } = req.query;
-    const data = await reportService.getStockMovementReport(period, from, to);
+    const data = await reportService.getStockMovementReport(period, from, to, req.branchId);
     return success(res, data);
   } catch (err) { next(err); }
 };
 
 const getCustomerReport = async (req, res, next) => {
   try {
-    const data = await reportService.getCustomerReport();
+    const data = await reportService.getCustomerReport(req.branchId);
     return success(res, data);
   } catch (err) { next(err); }
 };
@@ -57,7 +57,7 @@ const getCustomerReport = async (req, res, next) => {
 const getOrdersByStatus = async (req, res, next) => {
   try {
     const { period, from, to } = req.query;
-    const data = await reportService.getOrdersByStatus(period, from, to);
+    const data = await reportService.getOrdersByStatus(period, from, to, req.branchId);
     return success(res, data);
   } catch (err) { next(err); }
 };
@@ -75,7 +75,7 @@ const exportReport = async (req, res, next) => {
     const { type } = req.params;
     const { period, from, to } = req.query;
 
-    const { csv, filename } = await reportService.exportReport(type, { period, from, to });
+    const { csv, filename } = await reportService.exportReport(type, { period, from, to }, req.branchId);
 
     res.setHeader('Content-Type', 'text/csv');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);

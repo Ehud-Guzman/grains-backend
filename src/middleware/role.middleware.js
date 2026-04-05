@@ -51,9 +51,12 @@ const requireBusinessRole = (minRole) => {
       return next(new AppError('Authentication required', 401, 'UNAUTHORIZED'));
     }
 
-    // 🚫 Block superadmin from business actions
+    // Superadmin can do business ops only when they have selected a branch
     if (req.user.role === ROLES.SUPERADMIN) {
-      return next(new AppError('Superadmin cannot perform business operations', 403, 'FORBIDDEN'));
+      if (!req.branchId) {
+        return next(new AppError('Please select a branch to perform this action', 403, 'BRANCH_REQUIRED'));
+      }
+      return next(); // superadmin with branch context has full access
     }
 
     const userIndex = ROLE_HIERARCHY.indexOf(req.user.role);
@@ -67,6 +70,14 @@ const requireBusinessRole = (minRole) => {
   };
 };
 
+// Ensures a non-superadmin request has a branchId (auto-enforced via JWT)
+const requireBranch = (req, res, next) => {
+  if (!req.branchId) {
+    return next(new AppError('Branch context required', 403, 'BRANCH_REQUIRED'));
+  }
+  next();
+};
 
 
-module.exports = { requireRole, requireMinRole, requireBusinessRole };
+
+module.exports = { requireRole, requireMinRole, requireBusinessRole, requireBranch };

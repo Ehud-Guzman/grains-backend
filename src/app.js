@@ -10,8 +10,10 @@ require('dotenv').config();
 
 const { errorHandler } = require('./middleware/errorHandler.middleware');
 const { publicLimiter } = require('./middleware/rateLimit.middleware');
+const { requestTiming } = require('./middleware/requestTiming.middleware');
 
 // ── MODEL REGISTRATION ────────────────────────────────────────────────────────
+require('./models/Branch');
 require('./models/User');
 require('./models/Guest');
 require('./models/Product');
@@ -40,6 +42,8 @@ const adminUserRoutes     = require('./routes/admin/user.routes');
 const adminLogRoutes      = require('./routes/admin/log.routes');
 const adminSettingsRoutes = require('./routes/admin/settings.routes');
 const adminPaymentRoutes  = require('./routes/admin/payment.routes');
+const adminBranchRoutes   = require('./routes/admin/branch.routes');
+const adminBackupRoutes   = require('./routes/admin/backup.routes');
 
 const app = express();
 
@@ -78,6 +82,8 @@ app.use(cors({
 if (process.env.NODE_ENV !== 'test') {
   app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 }
+
+app.use(requestTiming);
 
 // ── BODY PARSING ──────────────────────────────────────────────────────────────
 app.use(express.json({ limit: '10kb' }));
@@ -132,6 +138,8 @@ app.use('/api/admin/users',     adminUserRoutes);
 app.use('/api/admin/logs',      adminLogRoutes);
 app.use('/api/admin/settings',  adminSettingsRoutes);
 app.use('/api/admin/payments',  adminPaymentRoutes);
+app.use('/api/admin/branches',  adminBranchRoutes);
+app.use('/api/admin/backups',   adminBackupRoutes);
 
 // ── 404 HANDLER ───────────────────────────────────────────────────────────────
 app.use((req, res) => {

@@ -9,9 +9,10 @@ const stockLogSchema = new mongoose.Schema({
   quantityChange: { type: Number, required: true }, // positive = added, negative = removed
   balanceAfter: { type: Number, required: true },
   reason: { type: String, required: true },
+  branchId: { type: mongoose.Schema.Types.ObjectId, ref: 'Branch', required: true },
   orderId: { type: mongoose.Schema.Types.ObjectId, ref: 'Order', default: null },
-  supplierId: { type: mongoose.Schema.Types.ObjectId, default: null }, // future: supplier management
-  warehouseId: { type: mongoose.Schema.Types.ObjectId, default: null }, // future: multi-warehouse
+  supplierId: { type: mongoose.Schema.Types.ObjectId, default: null },
+  warehouseId: { type: mongoose.Schema.Types.ObjectId, default: null },
   performedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   timestamp: { type: Date, default: Date.now }
 }, {
@@ -20,6 +21,7 @@ const stockLogSchema = new mongoose.Schema({
 });
 
 // Indexes
+stockLogSchema.index({ branchId: 1, timestamp: -1 });
 stockLogSchema.index({ productId: 1, varietyName: 1, packagingSize: 1 });
 stockLogSchema.index({ timestamp: -1 });
 stockLogSchema.index({ performedBy: 1 });

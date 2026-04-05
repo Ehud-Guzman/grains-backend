@@ -1,32 +1,41 @@
 const Settings = require('../models/Settings');
 const activityLogService = require('./activityLog.service');
 
-// ── IN-MEMORY CACHE ───────────────────────────────────────────────────────────
-let _cache = null;
+// ── IN-MEMORY CACHE (per branch) ──────────────────────────────────────────────
+const _cache = new Map(); // branchId => settings
 
-const invalidateCache = () => { _cache = null; };
+const invalidateCache = (branchId) => {
+  if (branchId) {
+    _cache.delete(String(branchId));
+  } else {
+    _cache.clear(); // clear all if no branchId given
+  }
+};
 
 // ── GET SETTINGS ──────────────────────────────────────────────────────────────
-// Creates the default document if it doesn't exist yet (first run)
-const getSettings = async () => {
-  if (_cache) return _cache;
+const getSettings = async (branchId) => {
+  if (!branchId) throw new Error('branchId is required to get settings');
 
-  let settings = await Settings.findById('app_settings').lean();
+  const key = String(branchId);
+  if (_cache.has(key)) return _cache.get(key);
+
+  const settingsId = `settings_${branchId}`;
+  let settings = await Settings.findById(settingsId).lean();
 
   if (!settings) {
-    // First boot — create defaults
-    settings = await Settings.create({ _id: 'app_settings' });
+    // First boot for this branch — create with defaults
+    settings = await Settings.create({ _id: settingsId, branchId });
     settings = settings.toObject();
   }
 
-  _cache = settings;
+  _cache.set(key, settings);
   return settings;
 };
 
 // ── GET PUBLIC SETTINGS ───────────────────────────────────────────────────────
 // Only shop info — safe to expose to frontend without auth
-const getPublicSettings = async () => {
-  const s = await getSettings();
+const getPublicSettings = async (branchId) => {
+  const s = await getSettings(branchId);
   return {
     shopName:     s.shopName,
     shopTagline:  s.shopTagline,
@@ -47,30 +56,37 @@ const getPublicSettings = async () => {
 };
 
 // ── UPDATE SETTINGS ───────────────────────────────────────────────────────────
-const updateSettings = async (data, adminId, adminRole) => {
-  // SuperAdmin-only fields
-  const superAdminFields = ['maintenanceMode', 'maintenanceMessage'];
+const updateSettings = async (data, adminId, adminRole, branchId) => {
+  if (!branchId) throw new Error('branchId is required to update settings');
 
+  // SuperAdmin-only fields
+  const superAdminFields = [
+    'maintenanceMode', 'maintenanceMessage',
+    'platformLocked', 'allowNewAdminAccounts',
+    'maxProductsPerBranch', 'maxStaffPerBranch', 'logRetentionDays',
+  ];
   if (adminRole !== 'superadmin') {
     superAdminFields.forEach(f => delete data[f]);
   }
 
-  // Never allow these to be set via this endpoint
   delete data._id;
+  delete data.branchId;
   delete data.updatedBy;
 
+  const settingsId = `settings_${branchId}`;
   const settings = await Settings.findByIdAndUpdate(
-    'app_settings',
-    { ...data, updatedAt: new Date(), updatedBy: adminId },
+    settingsId,
+    { ...data, branchId, updatedAt: new Date(), updatedBy: adminId },
     { new: true, upsert: true, runValidators: true }
   );
 
-  invalidateCache();
+  invalidateCache(branchId);
 
   await activityLogService.log({
     actorId: adminId,
     actorRole: adminRole,
     action: 'SETTINGS_UPDATED',
+    branchId,
     targetId: null,
     targetType: 'Settings',
     detail: { updatedFields: Object.keys(data) },

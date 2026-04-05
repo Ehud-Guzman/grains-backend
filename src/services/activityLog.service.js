@@ -1,12 +1,13 @@
 const ActivityLog = require('../models/ActivityLog');
 
 // Write an audit log entry - called at end of every mutating operation
-const log = async ({ actorId, actorRole, action, targetId = null, targetType = null, detail = {}, ip = null }) => {
+const log = async ({ actorId, actorRole, action, branchId = null, targetId = null, targetType = null, detail = {}, ip = null }) => {
   try {
     await ActivityLog.create({
       actorId,
       actorRole,
       action,
+      branchId: branchId || null,
       targetId,
       targetType,
       detail,
@@ -20,8 +21,11 @@ const log = async ({ actorId, actorRole, action, targetId = null, targetType = n
 };
 
 // Get paginated activity logs - read-only for superadmin
-const getLogs = async (filters = {}, { page = 1, limit = 20 } = {}) => {
+const getLogs = async (filters = {}, { page = 1, limit = 20 } = {}, branchId = null) => {
   const query = {};
+
+  // Superadmin in global view sees all; otherwise scope to branch
+  if (branchId) query.branchId = branchId;
 
   if (filters.actorId) query.actorId = filters.actorId;
   if (filters.action) {

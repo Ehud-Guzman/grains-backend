@@ -1,7 +1,11 @@
 const XLSX = require('xlsx');
 const Product = require('../models/Product');
+const Branch = require('../models/Branch');
 const activityLogService = require('./activityLog.service');
 const { LOG_ACTIONS } = require('../utils/constants');
+const { AppError } = require('../middleware/errorHandler.middleware');
+const { invalidateCache } = require('./product.service');
+const { normalizeImageUrls } = require('../utils/imageUrl');
 
 const HEADER_ROW = [
   'Product Name *',
@@ -18,9 +22,24 @@ const HEADER_ROW = [
   'Image URLs (JSON array)', // column L — optional, populated by generate-xlsx.js
 ];
 
+const validateHeaders = (headerRow = []) => {
+  const normalized = headerRow.map(value => String(value || '').trim());
+  const missing = HEADER_ROW.filter((expected, index) => normalized[index] !== expected);
+
+  if (missing.length > 0) {
+    throw new AppError(
+      'Invalid import template. Please download the latest template and try again.',
+      400,
+      'INVALID_IMPORT_TEMPLATE'
+    );
+  }
+};
+
 // ── EXPORT ────────────────────────────────────────────────────────────────────
-const exportProducts = async () => {
-  const products = await Product.find({}).lean();
+const exportProducts = async (branchId = null) => {
+  const filter = {};
+  if (branchId) filter.branchId = branchId;
+  const products = await Product.find(filter).lean();
   const rows = [];
 
   for (const product of products) {
@@ -36,7 +55,7 @@ const exportProducts = async () => {
         rows.push([product.name, product.category, product.description || '',
           product.isActive ? 'TRUE' : 'FALSE', variety.varietyName || '',
           variety.description || '', '', '', '', '', '',
-          JSON.stringify(variety.imageURLs || product.imageURLs || [])]);
+          JSON.stringify(normalizeImageUrls(variety.imageURLs || product.imageURLs || []))]);
         continue;
       }
       for (const pkg of packaging) {
@@ -49,7 +68,7 @@ const exportProducts = async () => {
           pkg.quoteOnly ? '' : (pkg.stock ?? ''),
           pkg.lowStockThreshold ?? 10,
           pkg.quoteOnly ? 'TRUE' : 'FALSE',
-          JSON.stringify(variety.imageURLs || product.imageURLs || []),
+          JSON.stringify(normalizeImageUrls(variety.imageURLs || product.imageURLs || [])),
         ]);
       }
     }
@@ -155,7 +174,9 @@ const parseImageURLs = (raw) => {
   if (!raw || String(raw).trim() === '') return [];
   try {
     const parsed = JSON.parse(String(raw).trim());
-    if (Array.isArray(parsed)) return parsed.filter(u => typeof u === 'string' && u.startsWith('http'));
+    if (Array.isArray(parsed)) {
+      return parsed.filter(u => typeof u === 'string' && u.trim().startsWith('http')).map(u => u.trim());
+    }
   } catch {
     // If not JSON, treat as single URL
     const url = String(raw).trim();
@@ -164,13 +185,106 @@ const parseImageURLs = (raw) => {
   return [];
 };
 
+const mergeUniqueStrings = (existing = [], incoming = []) => {
+  const values = [...(existing || []), ...(incoming || [])]
+    .filter(Boolean);
+
+  return [...new Set(values)];
+};
+
+const buildMergedVarieties = (existingVarieties = [], importedVarieties = []) => {
+  const existingMap = new Map(
+    (existingVarieties || []).map(variety => [String(variety.varietyName || '').trim().toLowerCase(), variety])
+  );
+
+  const merged = importedVarieties.map((importedVariety) => {
+    const varietyKey = String(importedVariety.varietyName || '').trim().toLowerCase();
+    const existingVariety = existingMap.get(varietyKey);
+    const existingPackagingMap = new Map(
+      (existingVariety?.packaging || []).map(pkg => [String(pkg.size || '').trim().toLowerCase(), pkg])
+    );
+
+    const packaging = (importedVariety.packaging || []).map((importedPkg) => {
+      const pkgKey = String(importedPkg.size || '').trim().toLowerCase();
+      const existingPkg = existingPackagingMap.get(pkgKey);
+
+      return {
+        size: importedPkg.size,
+        priceKES: importedPkg.quoteOnly
+          ? null
+          : (importedPkg.priceKES ?? existingPkg?.priceKES ?? null),
+        stock: importedPkg.quoteOnly
+          ? null
+          : (importedPkg.stock ?? existingPkg?.stock ?? 0),
+        lowStockThreshold: importedPkg.lowStockThreshold ?? existingPkg?.lowStockThreshold ?? 10,
+        quoteOnly: importedPkg.quoteOnly,
+      };
+    });
+
+    for (const existingPkg of (existingVariety?.packaging || [])) {
+      const pkgKey = String(existingPkg.size || '').trim().toLowerCase();
+      const alreadyIncluded = packaging.some(pkg => String(pkg.size || '').trim().toLowerCase() === pkgKey);
+      if (!alreadyIncluded) packaging.push(existingPkg);
+    }
+
+    existingMap.delete(varietyKey);
+
+    return {
+      varietyName: importedVariety.varietyName,
+      description: importedVariety.description || existingVariety?.description || '',
+      imageURLs: importedVariety.imageURLs?.length > 0
+        ? mergeUniqueStrings(existingVariety?.imageURLs, importedVariety.imageURLs)
+        : (existingVariety?.imageURLs || []),
+      packaging,
+    };
+  });
+
+  for (const leftoverVariety of existingMap.values()) {
+    merged.push(leftoverVariety);
+  }
+
+  return merged;
+};
+
 // ── IMPORT ────────────────────────────────────────────────────────────────────
-const importProducts = async (fileBuffer, adminId) => {
+const resolveImportBranches = async ({ branchId, actorRole, importScope }) => {
+  if (branchId) {
+    const branch = await Branch.findOne({ _id: branchId, isActive: true }).select('_id name').lean();
+    if (!branch) throw new AppError('Selected branch was not found or is inactive', 404, 'BRANCH_NOT_FOUND');
+    return [branch];
+  }
+
+  if (actorRole !== 'superadmin') {
+    throw new AppError('Branch context required for product import', 403, 'BRANCH_REQUIRED');
+  }
+
+  const scope = String(importScope || 'allBranches').trim();
+  if (scope !== 'allBranches') {
+    throw new AppError('Superadmin import without branch context must target all branches', 400, 'INVALID_IMPORT_SCOPE');
+  }
+
+  const branches = await Branch.find({ isActive: true }).select('_id name').lean();
+  if (branches.length === 0) {
+    throw new AppError('No active branches found for import', 400, 'NO_ACTIVE_BRANCHES');
+  }
+
+  return branches;
+};
+
+const importProducts = async (fileBuffer, adminId, options = {}) => {
+  const {
+    branchId = null,
+    actorRole = 'admin',
+    importScope = 'currentBranch',
+    dryRun = false,
+  } = options;
+
   const wb = XLSX.read(fileBuffer, { type: 'buffer' });
   const ws = wb.Sheets[wb.SheetNames[0]];
   const rawRows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
 
   if (rawRows.length < 2) throw new Error('File is empty or missing data rows');
+  validateHeaders(rawRows[0]);
 
   const dataRows = rawRows.slice(1).filter(row =>
     row.some(cell => cell !== '' && cell !== null && cell !== undefined)
@@ -178,7 +292,16 @@ const importProducts = async (fileBuffer, adminId) => {
 
   if (dataRows.length === 0) throw new Error('No data rows found in file');
 
-  const results = { created: 0, updated: 0, skipped: 0, errors: [] };
+  const targetBranches = await resolveImportBranches({ branchId, actorRole, importScope });
+  const results = {
+    created: 0,
+    updated: 0,
+    skipped: 0,
+    errors: [],
+    dryRun,
+    preview: [],
+    importedToBranches: targetBranches.map(branch => ({ id: branch._id, name: branch.name })),
+  };
   const productMap = new Map();
 
   // ── PASS 1: VALIDATE + BUILD MAP ─────────────────────────────────────────
@@ -203,7 +326,7 @@ const importProducts = async (fileBuffer, adminId) => {
     const varietyDesc = String(row[5] || '').trim();
     const pkgSize     = String(row[6] || '').trim();
     const priceKES    = row[7] !== '' ? Number(row[7]) : null;
-    const stock       = row[8] !== '' ? Number(row[8]) : 0;
+    const stock       = row[8] !== '' ? Number(row[8]) : null;
     const threshold   = row[9] !== '' ? Number(row[9]) : 10;
     const quoteOnly   = String(row[10] || '').trim().toUpperCase() === 'TRUE';
     const imageURLs   = parseImageURLs(row[11]); // column L
@@ -263,69 +386,120 @@ const importProducts = async (fileBuffer, adminId) => {
     variety.packaging.push({
       size: pkgSize,
       priceKES: quoteOnly ? null : (isNaN(priceKES) ? null : priceKES),
-      stock: quoteOnly ? null : (isNaN(stock) ? 0 : stock),
+      stock: quoteOnly ? null : (stock === null || isNaN(stock) ? null : stock),
       lowStockThreshold: isNaN(threshold) ? 10 : threshold,
       quoteOnly,
     });
   }
 
   // ── PASS 2: UPSERT TO DATABASE ────────────────────────────────────────────
-  for (const [, productData] of productMap) {
-    try {
-      const varieties = Array.from(productData.varieties.values());
+  for (const branch of targetBranches) {
+    for (const [, productData] of productMap) {
+      try {
+        const varieties = Array.from(productData.varieties.values());
 
-      const payload = {
-        name: productData.name,
-        category: productData.category,
-        description: productData.description || '',
-        isActive: productData.isActive,
-        imageURLs: productData.imageURLs,
-        varieties,
-      };
+        const payload = {
+          name: productData.name,
+          category: productData.category,
+          description: productData.description || '',
+          isActive: productData.isActive,
+          imageURLs: productData.imageURLs,
+          varieties,
+          branchId: branch._id,
+        };
 
-      const escapedName = productData.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const existing = await Product.findOne({
-        name: { $regex: new RegExp(`^${escapedName}$`, 'i') }
-      });
-
-      if (existing) {
-        // Merge image URLs — don't overwrite existing ones
-        const mergedImages = [
-          ...new Set([...existing.imageURLs, ...productData.imageURLs])
-        ];
-        await Product.findByIdAndUpdate(existing._id, {
-          ...payload,
-          imageURLs: mergedImages,
-          updatedAt: new Date()
-        }, { runValidators: true });
-        results.updated++;
-        await activityLogService.log({
-          actorId: adminId, actorRole: 'admin',
-          action: LOG_ACTIONS.PRODUCT_EDITED,
-          targetId: existing._id, targetType: 'Product',
-          detail: { source: 'bulk_import', productName: productData.name },
+        const escapedName = productData.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const existing = await Product.findOne({
+          branchId: branch._id,
+          name: { $regex: new RegExp(`^${escapedName}$`, 'i') }
         });
-      } else {
-        const newProduct = await Product.create({ ...payload, createdBy: adminId });
-        results.created++;
-        await activityLogService.log({
-          actorId: adminId, actorRole: 'admin',
-          action: LOG_ACTIONS.PRODUCT_ADDED,
-          targetId: newProduct._id, targetType: 'Product',
-          detail: { source: 'bulk_import', productName: productData.name },
+
+        const packagingCount = varieties.reduce((total, variety) => total + (variety.packaging?.length || 0), 0);
+        const action = existing ? 'update' : 'create';
+        if (results.preview.length < 40) {
+          results.preview.push({
+            branch: branch.name,
+            productName: productData.name,
+            action,
+            varieties: varieties.length,
+            packagingCount,
+          });
+        }
+
+        if (existing) {
+          results.updated++;
+          if (!dryRun) {
+            const mergedImages = mergeUniqueStrings(existing.imageURLs, productData.imageURLs);
+            const mergedVarieties = buildMergedVarieties(existing.varieties, varieties);
+            await Product.findByIdAndUpdate(existing._id, {
+              ...payload,
+              imageURLs: mergedImages,
+              varieties: mergedVarieties,
+              updatedAt: new Date()
+            }, { runValidators: true });
+            await activityLogService.log({
+              actorId: adminId,
+              actorRole,
+              action: LOG_ACTIONS.PRODUCT_EDITED,
+              branchId: branch._id,
+              targetId: existing._id,
+              targetType: 'Product',
+              detail: {
+                source: 'bulk_import',
+                productName: productData.name,
+                branchName: branch.name,
+              },
+            });
+          }
+        } else {
+          results.created++;
+          if (!dryRun) {
+            const newProduct = await Product.create({ ...payload, createdBy: adminId });
+            await activityLogService.log({
+              actorId: adminId,
+              actorRole,
+              action: LOG_ACTIONS.PRODUCT_ADDED,
+              branchId: branch._id,
+              targetId: newProduct._id,
+              targetType: 'Product',
+              detail: {
+                source: 'bulk_import',
+                productName: productData.name,
+                branchName: branch.name,
+              },
+            });
+          }
+        }
+
+        if (!dryRun) invalidateCache(branch._id);
+      } catch (err) {
+        let message = err.message;
+        if (err.name === 'ValidationError') {
+          message = Object.values(err.errors).map(e => e.message).join('; ');
+        }
+        results.errors.push({
+          product: productData.name,
+          branch: branch.name,
+          message,
         });
+        results.skipped++;
       }
-    } catch (err) {
-      let message = err.message;
-      if (err.name === 'ValidationError') {
-        message = Object.values(err.errors).map(e => e.message).join('; ');
-      }
-      results.errors.push({ product: productData.name, message });
-      results.skipped++;
     }
   }
 
   return results;
 };
 
-module.exports = { exportProducts, importProducts, getTemplate };
+module.exports = {
+  exportProducts,
+  importProducts,
+  getTemplate,
+  __private: {
+    HEADER_ROW,
+    validateHeaders,
+    validateRow,
+    buildMergedVarieties,
+    mergeUniqueStrings,
+    parseImageURLs,
+  }
+};

@@ -1,5 +1,11 @@
 const mongoose = require('mongoose');
-const { ORDER_STATUSES, PAYMENT_METHODS, PAYMENT_STATUSES, DELIVERY_METHODS } = require('../utils/constants');
+const {
+  ORDER_STATUSES,
+  PAYMENT_METHODS,
+  PAYMENT_STATUSES,
+  DELIVERY_METHODS,
+  STOCK_RESERVATION_STATUSES
+} = require('../utils/constants');
 
 const orderItemSchema = new mongoose.Schema({
   productId: { type: mongoose.Schema.Types.ObjectId, ref: 'Product', required: true },
@@ -37,10 +43,17 @@ const orderSchema = new mongoose.Schema({
     default: ORDER_STATUSES.PENDING
   },
   rejectionReason: { type: String, default: null },
+  stockReservationStatus: {
+    type: String,
+    enum: Object.values(STOCK_RESERVATION_STATUSES),
+    default: STOCK_RESERVATION_STATUSES.NONE
+  },
+  stockReservedAt: { type: Date, default: null },
+  stockReleasedAt: { type: Date, default: null },
+  stockConsumedAt: { type: Date, default: null },
   statusHistory: [statusHistorySchema],
   specialInstructions: { type: String, default: null },
-  // Future-proofing fields from UX doc Section D3
-  branchId: { type: mongoose.Schema.Types.ObjectId, default: null },
+  branchId: { type: mongoose.Schema.Types.ObjectId, ref: 'Branch', required: true },
   driverId: { type: mongoose.Schema.Types.ObjectId, default: null },
   deliveryTrackingUrl: { type: String, default: null }
 }, {
@@ -48,6 +61,10 @@ const orderSchema = new mongoose.Schema({
 });
 
 // Indexes
+orderSchema.index({ branchId: 1 });
+orderSchema.index({ branchId: 1, status: 1 });
+orderSchema.index({ branchId: 1, status: 1, stockReservationStatus: 1, createdAt: -1 });
+orderSchema.index({ branchId: 1, createdAt: -1 });
 orderSchema.index({ userId: 1 });
 orderSchema.index({ guestId: 1 });
 orderSchema.index({ status: 1 });

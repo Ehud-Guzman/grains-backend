@@ -9,10 +9,11 @@ const { invalidateCache } = require('./product.service');
 
 // ── HELPER: write stock log entry ─────────────────────────────────────────────
 const writeStockLog = async (
-  { productId, varietyName, packagingSize, changeType, quantityChange, balanceAfter, reason, orderId, supplierId, performedBy },
+  { branchId, productId, varietyName, packagingSize, changeType, quantityChange, balanceAfter, reason, orderId, supplierId, performedBy },
   session = null
 ) => {
   const logData = [{
+    branchId,
     productId,
     varietyName,
     packagingSize,
@@ -34,9 +35,22 @@ const writeStockLog = async (
 };
 
 // ── DEDUCT STOCK ──────────────────────────────────────────────────────────────
-// SRS 5.4 - atomic, idempotent, runs inside MongoDB transaction from order approval
+// SRS 5.4 - atomic, idempotent, runs inside MongoDB transaction
 // Throws if stock would go below 0
-const deductStock = async (productId, varietyName, packagingSize, quantity, orderId, performedBy, session) => {
+const deductStock = async (
+  productId,
+  varietyName,
+  packagingSize,
+  quantity,
+  orderId,
+  performedBy,
+  session,
+  branchId,
+  options = {}
+) => {
+  const changeType = options.changeType || STOCK_CHANGE_TYPES.ORDER_DEDUCTION;
+  const reason = options.reason || `Order ${orderId} approved`;
+
   // findOneAndUpdate with $inc is atomic - prevents race conditions (SRS 5.4 + UX C1)
   const product = await Product.findOneAndUpdate(
     {
@@ -86,13 +100,14 @@ const deductStock = async (productId, varietyName, packagingSize, quantity, orde
   const balanceAfter = packaging?.stock ?? 0;
 
   await writeStockLog({
+    branchId,
     productId,
     varietyName,
     packagingSize,
-    changeType: STOCK_CHANGE_TYPES.ORDER_DEDUCTION,
+    changeType,
     quantityChange: -quantity,
     balanceAfter,
-    reason: `Order ${orderId} approved`,
+    reason,
     orderId,
     performedBy
   }, session);
@@ -105,9 +120,54 @@ const deductStock = async (productId, varietyName, packagingSize, quantity, orde
   return { product, balanceAfter };
 };
 
+// ── RELEASE STOCK ─────────────────────────────────────────────────────────────
+const releaseStock = async (productId, varietyName, packagingSize, quantity, orderId, performedBy, session, branchId) => {
+  const product = await Product.findOneAndUpdate(
+    {
+      _id: productId,
+      'varieties.varietyName': varietyName,
+      'varieties.packaging.size': packagingSize
+    },
+    {
+      $inc: { 'varieties.$[v].packaging.$[p].stock': quantity }
+    },
+    {
+      arrayFilters: [
+        { 'v.varietyName': varietyName },
+        { 'p.size': packagingSize }
+      ],
+      new: true,
+      session
+    }
+  );
+
+  if (!product) {
+    throw new AppError('Product, variety or packaging size not found', 404, 'PRODUCT_NOT_FOUND');
+  }
+
+  const variety = product.varieties.find(v => v.varietyName === varietyName);
+  const packaging = variety?.packaging.find(p => p.size === packagingSize);
+  const balanceAfter = packaging?.stock ?? 0;
+
+  await writeStockLog({
+    branchId,
+    productId,
+    varietyName,
+    packagingSize,
+    changeType: STOCK_CHANGE_TYPES.ORDER_RELEASE,
+    quantityChange: quantity,
+    balanceAfter,
+    reason: `Order ${orderId} stock released`,
+    orderId,
+    performedBy
+  }, session);
+
+  return { product, balanceAfter };
+};
+
 // ── ADD DELIVERY ──────────────────────────────────────────────────────────────
 // SRS 5.4 - supervisor+ adds new stock after a delivery
-const addDelivery = async (productId, varietyName, packagingSize, quantity, reason, supplierId, performedBy) => {
+const addDelivery = async (productId, varietyName, packagingSize, quantity, reason, supplierId, performedBy, branchId) => {
   if (quantity <= 0) throw new AppError('Quantity must be greater than 0', 400, 'INVALID_QUANTITY');
 
   const product = await Product.findOneAndUpdate(
@@ -135,6 +195,7 @@ const addDelivery = async (productId, varietyName, packagingSize, quantity, reas
   const balanceAfter = packaging?.stock ?? 0;
 
   await writeStockLog({
+    branchId,
     productId,
     varietyName,
     packagingSize,
@@ -150,6 +211,7 @@ const addDelivery = async (productId, varietyName, packagingSize, quantity, reas
     actorId: performedBy,
     actorRole: 'supervisor',
     action: LOG_ACTIONS.STOCK_DELIVERY_ADDED,
+    branchId,
     targetId: productId,
     targetType: 'Product',
     detail: { varietyName, packagingSize, quantity, balanceAfter, supplierId }
@@ -161,7 +223,7 @@ const addDelivery = async (productId, varietyName, packagingSize, quantity, reas
 
 // ── MANUAL ADJUSTMENT ─────────────────────────────────────────────────────────
 // SRS 5.4 - supervisor+ manual correction, reason is mandatory
-const manualAdjustment = async (productId, varietyName, packagingSize, newQuantity, reason, performedBy) => {
+const manualAdjustment = async (productId, varietyName, packagingSize, newQuantity, reason, performedBy, branchId) => {
   if (!reason || reason.trim().length < 3) {
     throw new AppError('A reason is required for manual stock adjustments', 400, 'REASON_REQUIRED');
   }
@@ -201,6 +263,7 @@ const manualAdjustment = async (productId, varietyName, packagingSize, newQuanti
   );
 
   await writeStockLog({
+    branchId,
     productId,
     varietyName,
     packagingSize,
@@ -215,6 +278,7 @@ const manualAdjustment = async (productId, varietyName, packagingSize, newQuanti
     actorId: performedBy,
     actorRole: 'supervisor',
     action: LOG_ACTIONS.STOCK_MANUALLY_ADJUSTED,
+    branchId,
     targetId: productId,
     targetType: 'Product',
     detail: { varietyName, packagingSize, before: currentStock, after: newQuantity, reason }
@@ -226,7 +290,7 @@ const manualAdjustment = async (productId, varietyName, packagingSize, newQuanti
 
 // ── BATCH UPDATE ──────────────────────────────────────────────────────────────
 // SRS 5.1 - update multiple products from one screen after delivery
-const batchUpdate = async (updates, performedBy) => {
+const batchUpdate = async (updates, performedBy, branchId) => {
   if (!Array.isArray(updates) || updates.length === 0) {
     throw new AppError('Updates array is required', 400, 'INVALID_INPUT');
   }
@@ -235,7 +299,7 @@ const batchUpdate = async (updates, performedBy) => {
   for (const u of updates) {
     const result = await addDelivery(
       u.productId, u.varietyName, u.packagingSize,
-      u.quantity, u.reason, u.supplierId || null, performedBy
+      u.quantity, u.reason, u.supplierId || null, performedBy, branchId
     );
     results.push(result);
   }
@@ -244,10 +308,10 @@ const batchUpdate = async (updates, performedBy) => {
 
 // ── GET STOCK OVERVIEW ────────────────────────────────────────────────────────
 // All products x varieties x sizes with current stock - SRS 5.4
-const getOverview = async (filters = {}) => {
+const getOverview = async (filters = {}, branchId) => {
   const matchStage = {};
+  if (branchId) matchStage.branchId = branchId;
   if (filters.lowStock === 'true') {
-    // Only products with at least one packaging below threshold
     matchStage['varieties.packaging'] = {
       $elemMatch: { $expr: { $lte: ['$stock', '$lowStockThreshold'] } }
     };
@@ -289,17 +353,18 @@ if (filters.lowStock === 'true') {
 
 // ── GET LOW STOCK ITEMS ───────────────────────────────────────────────────────
 // SRS 5.4 - dashboard alert panel (UX B1)
-const getLowStock = async () => {
-  const rows = await getOverview();
- return rows.filter(r => r.status !== 'in_stock' && !r.quoteOnly);
+const getLowStock = async (branchId) => {
+  const rows = await getOverview({}, branchId);
+  return rows.filter(r => r.status !== 'in_stock' && !r.quoteOnly);
 };
 
 // ── GET STOCK LOGS ────────────────────────────────────────────────────────────
 // SRS 5.4 - movement history per product, paginated
-const getLogs = async (productId, filters = {}, query = {}) => {
+const getLogs = async (productId, filters = {}, query = {}, branchId) => {
   const { page, limit, skip } = paginate(query);
   const matchStage = {};
 
+  if (branchId) matchStage.branchId = branchId;
   if (productId) matchStage.productId = new mongoose.Types.ObjectId(productId);
   if (filters.varietyName) matchStage.varietyName = filters.varietyName;
   if (filters.packagingSize) matchStage.packagingSize = filters.packagingSize;
@@ -328,6 +393,7 @@ const getLogs = async (productId, filters = {}, query = {}) => {
 
 module.exports = {
   deductStock,
+  releaseStock,
   addDelivery,
   manualAdjustment,
   batchUpdate,

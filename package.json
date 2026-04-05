@@ -6,7 +6,9 @@
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js",
-    "prod": "pm2 start ecosystem.config.js"
+    "prod": "pm2 start ecosystem.config.js",
+    "sync:indexes": "node scripts/sync-indexes.js",
+    "test": "node tests/productImportExport.service.test.js"
   },
   "dependencies": {
     "@sentry/node": "^7.81.1",

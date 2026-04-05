@@ -1,10 +1,13 @@
 const orderService = require('../services/order.service');
+const { getDefaultBranchId } = require('../services/defaultBranch.service');
 const { success } = require('../utils/apiResponse');
 
 // POST /api/orders/guest
 const createGuestOrder = async (req, res, next) => {
   try {
-    const order = await orderService.createGuestOrder(req.body);
+    // Use branchId from request body (frontend passes it), or fall back to default branch
+    const branchId = req.body.branchId || await getDefaultBranchId();
+    const order = await orderService.createGuestOrder(req.body, branchId);
     return success(res, { orderRef: order.orderRef, orderId: order._id, total: order.total }, 'Order placed successfully', 201);
   } catch (err) { next(err); }
 };
@@ -24,7 +27,8 @@ const trackOrder = async (req, res, next) => {
 // POST /api/orders - customer auth required
 const createCustomerOrder = async (req, res, next) => {
   try {
-    const order = await orderService.createCustomerOrder(req.body, req.user.id);
+    const branchId = req.body.branchId || req.branchId || await getDefaultBranchId();
+    const order = await orderService.createCustomerOrder(req.body, req.user.id, branchId);
     return success(res, { orderRef: order.orderRef, orderId: order._id, total: order.total }, 'Order placed successfully', 201);
   } catch (err) { next(err); }
 };
@@ -32,7 +36,7 @@ const createCustomerOrder = async (req, res, next) => {
 // GET /api/orders/my - customer auth required
 const getMyOrders = async (req, res, next) => {
   try {
-    const result = await orderService.getMyOrders(req.user.id, req.query);
+    const result = await orderService.getMyOrders(req.user.id, req.query, req.branchId);
     return success(res, result);
   } catch (err) { next(err); }
 };
@@ -40,7 +44,7 @@ const getMyOrders = async (req, res, next) => {
 // PATCH /api/orders/:id/cancel - customer auth required
 const cancelOrder = async (req, res, next) => {
   try {
-    const order = await orderService.cancel(req.params.id, req.user.id);
+    const order = await orderService.cancel(req.params.id, req.user.id, req.branchId);
     return success(res, order, 'Order cancelled');
   } catch (err) { next(err); }
 };

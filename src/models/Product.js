@@ -22,8 +22,7 @@ const productSchema = new mongoose.Schema({
   imageURLs: [{ type: String }],
   isActive: { type: Boolean, default: true },
   varieties: [varietySchema],
-  // Future-proofing fields from UX doc Section D3
-  branchId: { type: mongoose.Schema.Types.ObjectId, default: null },
+  branchId: { type: mongoose.Schema.Types.ObjectId, ref: 'Branch', required: true },
   discountRules: { type: Array, default: [] },
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true }
 }, {
@@ -31,8 +30,11 @@ const productSchema = new mongoose.Schema({
 });
 
 // Indexes
-productSchema.index({ category: 1 });
-productSchema.index({ isActive: 1 });
+productSchema.index({ branchId: 1 });
+productSchema.index({ branchId: 1, category: 1 });
+productSchema.index({ branchId: 1, isActive: 1 });
+productSchema.index({ branchId: 1, isActive: 1, createdAt: -1 });
+productSchema.index({ branchId: 1, isActive: 1, category: 1, createdAt: -1 });
 productSchema.index({ name: 'text', description: 'text' }); // text search
 
 module.exports = mongoose.model('Product', productSchema);

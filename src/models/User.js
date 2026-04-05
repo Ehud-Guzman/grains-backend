@@ -56,6 +56,7 @@ const userSchema = new mongoose.Schema({
   isLocked: { type: Boolean, default: false },
   failedLoginCount: { type: Number, default: 0 },
   lastLoginAt: { type: Date, default: null },
+  branchId: { type: mongoose.Schema.Types.ObjectId, ref: 'Branch', default: null }, // null = superadmin (no branch)
   orderHistory: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Order' }],
   onboarding: {
     type: onboardingSchema,
@@ -69,5 +70,6 @@ const userSchema = new mongoose.Schema({
 userSchema.index({ phone: 1 }, { unique: true });
 userSchema.index({ email: 1 }, { unique: true, sparse: true });
 userSchema.index({ role: 1 });
+userSchema.index({ branchId: 1 });
 
 module.exports = mongoose.model('User', userSchema);

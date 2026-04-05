@@ -6,6 +6,7 @@ const activityLogSchema = new mongoose.Schema({
   action: { type: String, required: true }, // e.g. ORDER_APPROVED, PRODUCT_EDITED
   targetId: { type: mongoose.Schema.Types.ObjectId, default: null },
   targetType: { type: String, default: null }, // 'Order', 'Product', 'User', 'Stock'
+  branchId: { type: mongoose.Schema.Types.ObjectId, ref: 'Branch', default: null }, // null = global/system action
   detail: { type: mongoose.Schema.Types.Mixed, default: {} }, // before/after values
   ip: { type: String, default: null },
   timestamp: { type: Date, default: Date.now }
@@ -14,6 +15,7 @@ const activityLogSchema = new mongoose.Schema({
 });
 
 // Indexes
+activityLogSchema.index({ branchId: 1, timestamp: -1 });
 activityLogSchema.index({ actorId: 1 });
 activityLogSchema.index({ action: 1 });
 activityLogSchema.index({ timestamp: -1 });

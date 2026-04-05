@@ -1,9 +1,11 @@
 const mongoose = require('mongoose');
 
-// Single-document settings store — only one document ever exists (_id: 'app_settings')
-// All fields are optional with sensible defaults
+// Per-branch settings — _id is 'settings_<branchId>'
+// One document per branch, created on first access with sensible defaults.
 const settingsSchema = new mongoose.Schema({
-  _id: { type: String, default: 'app_settings' },
+  _id: { type: String }, // 'settings_<branchId>'
+
+  branchId: { type: mongoose.Schema.Types.ObjectId, ref: 'Branch', required: true },
 
   // ── SHOP INFO ─────────────────────────────────────────────────────────────
   shopName:     { type: String, default: 'Vittorios Grains & Cereals' },
@@ -15,16 +17,38 @@ const settingsSchema = new mongoose.Schema({
   shopWhatsapp: { type: String, default: '' },
 
   // ── ORDER SETTINGS ────────────────────────────────────────────────────────
-  deliveryFee:          { type: Number, default: 0 },    // KES, 0 = free / calculated manually
-  minimumOrderValue:    { type: Number, default: 0 },    // KES, 0 = no minimum
-  autoCancelHours:      { type: Number, default: 0 },    // hours before pending orders auto-cancel, 0 = disabled
+  deliveryFee:          { type: Number, default: 0 },
+  minimumOrderValue:    { type: Number, default: 0 },
+  autoCancelHours:      { type: Number, default: 0 },
   allowGuestOrders:     { type: Boolean, default: true },
   allowCashOnDelivery:  { type: Boolean, default: true },
   allowPayOnPickup:     { type: Boolean, default: true },
   allowMpesa:           { type: Boolean, default: true },
 
+  // ── ORDER WORKFLOW ────────────────────────────────────────────────────────
+  requireOrderApproval:     { type: Boolean, default: false }, // manual approval before confirmed
+  enableOrderHours:         { type: Boolean, default: false }, // restrict when orders can be placed
+  orderAcceptanceStart:     { type: String,  default: '07:00' }, // HH:MM
+  orderAcceptanceEnd:       { type: String,  default: '20:00' }, // HH:MM
+
+  // ── DELIVERY ZONES ────────────────────────────────────────────────────────
+  useDeliveryZones:  { type: Boolean, default: false },
+  deliveryZones:     { type: [{ name: String, fee: { type: Number, default: 0 }, _id: false }], default: [] },
+
+  // ── CATALOG SETTINGS ──────────────────────────────────────────────────────
+  autoHideOutOfStock:  { type: Boolean, default: false },
+  allowProductReviews: { type: Boolean, default: false },
+
+  // ── CUSTOMER ACCOUNT SETTINGS ─────────────────────────────────────────────
+  blockNewRegistrations:    { type: Boolean, default: false },
+  requirePhoneVerification: { type: Boolean, default: false },
+  requireEmailVerification: { type: Boolean, default: false },
+
+  // ── RECEIPT ───────────────────────────────────────────────────────────────
+  receiptFooterNote: { type: String, default: '' },
+
   // ── STOCK SETTINGS ────────────────────────────────────────────────────────
-  defaultLowStockThreshold: { type: Number, default: 10 }, // used when none set on packaging
+  defaultLowStockThreshold: { type: Number, default: 10 },
 
   // ── NOTIFICATION SETTINGS ─────────────────────────────────────────────────
   notifyAdminNewOrder:      { type: Boolean, default: true },
@@ -32,16 +56,22 @@ const settingsSchema = new mongoose.Schema({
   notifyCustomerOnApproval: { type: Boolean, default: true },
   notifyCustomerOnRejection:{ type: Boolean, default: true },
   notifyCustomerOnDelivery: { type: Boolean, default: true },
-  smsEnabled:               { type: Boolean, default: false }, // Phase 2
+  smsEnabled:               { type: Boolean, default: false },
 
   // ── SYSTEM SETTINGS (superadmin only) ────────────────────────────────────
   maintenanceMode:    { type: Boolean, default: false },
   maintenanceMessage: { type: String, default: 'We are currently undergoing maintenance. Please check back soon.' },
+  // Platform-level controls
+  platformLocked:        { type: Boolean, default: false },   // blocks all writes across the branch
+  allowNewAdminAccounts: { type: Boolean, default: true  },   // gate on admin account creation
+  maxProductsPerBranch:  { type: Number,  default: 0     },   // 0 = unlimited
+  maxStaffPerBranch:     { type: Number,  default: 0     },   // 0 = unlimited
+  logRetentionDays:      { type: Number,  default: 90    },   // 0 = keep forever
 
   updatedAt: { type: Date, default: Date.now },
   updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
 }, {
-  _id: false, // use string _id defined above
+  _id: false,
   timestamps: false,
 });
 

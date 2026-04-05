@@ -46,11 +46,13 @@ const getDateRange = (period, from, to) => {
 // ── DASHBOARD KPIs ────────────────────────────────────────────────────────────
 // UX B1 - KPI cards visible immediately on login, cached 60s
 // Orders today, pending orders, revenue today, revenue this month, low stock count
-const getDashboardKPIs = async () => {
+const getDashboardKPIs = async (branchId) => {
   const now = new Date();
   const todayStart = startOfDay(now);
   const todayEnd = endOfDay(now);
   const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+
+  const branchFilter = branchId ? { branchId } : {};
 
   const [
     ordersToday,
@@ -61,26 +63,27 @@ const getDashboardKPIs = async () => {
     recentOrders
   ] = await Promise.all([
     // Orders placed today
-    Order.countDocuments({ createdAt: { $gte: todayStart, $lte: todayEnd } }),
+    Order.countDocuments({ ...branchFilter, createdAt: { $gte: todayStart, $lte: todayEnd } }),
 
     // Pending orders
-    Order.countDocuments({ status: 'pending' }),
+    Order.countDocuments({ ...branchFilter, status: 'pending' }),
 
     // Revenue today (completed orders only)
     Order.aggregate([
-      { $match: { status: 'completed', updatedAt: { $gte: todayStart, $lte: todayEnd } } },
+      { $match: { ...branchFilter, status: 'completed', updatedAt: { $gte: todayStart, $lte: todayEnd } } },
       { $group: { _id: null, total: { $sum: '$total' } } }
     ]),
 
     // Revenue this month
     Order.aggregate([
-      { $match: { status: 'completed', updatedAt: { $gte: monthStart } } },
+      { $match: { ...branchFilter, status: 'completed', updatedAt: { $gte: monthStart } } },
       { $group: { _id: null, total: { $sum: '$total' } } }
     ]),
 
     // Low stock items count
     (async () => {
-      const products = await Product.find({}).lean();
+      const productFilter = branchId ? { branchId } : {};
+      const products = await Product.find(productFilter).lean();
       let count = 0;
       for (const p of products) {
         for (const v of p.varieties) {
@@ -93,7 +96,7 @@ const getDashboardKPIs = async () => {
     })(),
 
     // Recent 10 orders for dashboard panel - UX B1
-    Order.find({})
+    Order.find(branchFilter)
       .populate('userId', 'name phone')
       .populate('guestId', 'name phone')
       .sort({ createdAt: -1 })
@@ -115,13 +118,14 @@ const getDashboardKPIs = async () => {
 // ── SALES REPORT ──────────────────────────────────────────────────────────────
 // SRS 5.7 + UX B5 - daily/weekly/monthly totals, revenue by category
 // Used for line/bar charts on dashboard
-const getSalesReport = async (period, from, to) => {
+const getSalesReport = async (period, from, to, branchId) => {
   const { start, end } = getDateRange(period, from, to);
+  const branchFilter = branchId ? { branchId } : {};
 
   const [summary, byCategory, byDay, orderVolume] = await Promise.all([
     // Overall summary
     Order.aggregate([
-      { $match: { status: 'completed', updatedAt: { $gte: start, $lte: end } } },
+      { $match: { ...branchFilter, status: 'completed', updatedAt: { $gte: start, $lte: end } } },
       {
         $group: {
           _id: null,
@@ -135,7 +139,7 @@ const getSalesReport = async (period, from, to) => {
 
     // Revenue by product category
     Order.aggregate([
-      { $match: { status: 'completed', updatedAt: { $gte: start, $lte: end } } },
+      { $match: { ...branchFilter, status: 'completed', updatedAt: { $gte: start, $lte: end } } },
       { $unwind: '$orderItems' },
       {
         $lookup: {
@@ -159,7 +163,7 @@ const getSalesReport = async (period, from, to) => {
 
     // Revenue by day (for line chart - UX B5)
     Order.aggregate([
-      { $match: { status: 'completed', updatedAt: { $gte: start, $lte: end } } },
+      { $match: { ...branchFilter, status: 'completed', updatedAt: { $gte: start, $lte: end } } },
       {
         $group: {
           _id: {
@@ -190,7 +194,7 @@ const getSalesReport = async (period, from, to) => {
 
     // Order volume by payment method
     Order.aggregate([
-      { $match: { status: 'completed', updatedAt: { $gte: start, $lte: end } } },
+      { $match: { ...branchFilter, status: 'completed', updatedAt: { $gte: start, $lte: end } } },
       {
         $group: {
           _id: '$paymentMethod',
@@ -218,11 +222,12 @@ const getSalesReport = async (period, from, to) => {
 
 // ── BEST SELLERS ──────────────────────────────────────────────────────────────
 // UX B5 - products ranked by units sold and revenue
-const getBestSellers = async (period, from, to, limit = 10) => {
+const getBestSellers = async (period, from, to, limit = 10, branchId) => {
   const { start, end } = getDateRange(period, from, to);
+  const branchFilter = branchId ? { branchId } : {};
 
   const results = await Order.aggregate([
-    { $match: { status: 'completed', createdAt: { $gte: start, $lte: end } } },
+    { $match: { ...branchFilter, status: 'completed', createdAt: { $gte: start, $lte: end } } },
     { $unwind: '$orderItems' },
     {
       $group: {
@@ -258,17 +263,19 @@ const getBestSellers = async (period, from, to, limit = 10) => {
 
 // ── SLOW MOVERS ───────────────────────────────────────────────────────────────
 // UX B5 - products with zero or low order frequency in last 30 days
-const getSlowMovers = async (days = 30) => {
+const getSlowMovers = async (days = 30, branchId) => {
   const cutoff = new Date();
   cutoff.setDate(cutoff.getDate() - days);
+  const branchFilter = branchId ? { branchId } : {};
 
   // Get all active products
-  const allProducts = await Product.find({ isActive: true })
+  const allProducts = await Product.find({ isActive: true, ...branchFilter })
     .select('name category varieties')
     .lean();
 
   // Get products that had orders in the period
   const activeProductIds = await Order.distinct('orderItems.productId', {
+    ...branchFilter,
     status: 'completed',
     createdAt: { $gte: cutoff }
   });
@@ -290,8 +297,10 @@ const getSlowMovers = async (days = 30) => {
 
 // ── STOCK VALUATION ───────────────────────────────────────────────────────────
 // UX B5 - current stock × price per size = estimated stock value
-const getStockValuation = async () => {
-  const products = await Product.find({ isActive: true })
+const getStockValuation = async (branchId) => {
+  const filter = { isActive: true };
+  if (branchId) filter.branchId = branchId;
+  const products = await Product.find(filter)
     .select('name category varieties')
     .lean();
 
@@ -329,12 +338,12 @@ const getStockValuation = async () => {
 
 // ── STOCK MOVEMENT REPORT ─────────────────────────────────────────────────────
 // UX B5 - all stock changes in a date range by product
-const getStockMovementReport = async (period, from, to) => {
+const getStockMovementReport = async (period, from, to, branchId) => {
   const { start, end } = getDateRange(period, from, to);
+  const filter = { timestamp: { $gte: start, $lte: end } };
+  if (branchId) filter.branchId = branchId;
 
-  const logs = await StockLog.find({
-    timestamp: { $gte: start, $lte: end }
-  })
+  const logs = await StockLog.find(filter)
     .populate('productId', 'name category')
     .populate('performedBy', 'name role')
     .sort({ timestamp: -1 })
@@ -356,12 +365,13 @@ const getStockMovementReport = async (period, from, to) => {
 
 // ── CUSTOMER REPORT ───────────────────────────────────────────────────────────
 // UX B5 - repeat buyers, high-value, inactive customers
-const getCustomerReport = async () => {
+const getCustomerReport = async (branchId) => {
   const thirtyDaysAgo = new Date();
   thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+  const branchFilter = branchId ? { branchId } : {};
 
   const stats = await Order.aggregate([
-    { $match: { status: 'completed', userId: { $ne: null } } },
+    { $match: { ...branchFilter, status: 'completed', userId: { $ne: null } } },
     {
       $group: {
         _id: '$userId',
@@ -425,13 +435,14 @@ const getCustomerReport = async () => {
 
 // ── ORDERS BY STATUS REPORT ───────────────────────────────────────────────────
 // UX B5 - count and value of orders at each status stage
-const getOrdersByStatus = async (period, from, to) => {
+const getOrdersByStatus = async (period, from, to, branchId) => {
   const { start, end } = getDateRange(period, from, to);
+  const branchFilter = branchId ? { branchId } : {};
 
   const [byStatus, peakHours, avgOrderValue] = await Promise.all([
     // Orders grouped by status
     Order.aggregate([
-      { $match: { createdAt: { $gte: start, $lte: end } } },
+      { $match: { ...branchFilter, createdAt: { $gte: start, $lte: end } } },
       {
         $group: {
           _id: '$status',
@@ -445,7 +456,7 @@ const getOrdersByStatus = async (period, from, to) => {
 
     // Peak ordering hours - SRS 5.7
     Order.aggregate([
-      { $match: { createdAt: { $gte: start, $lte: end } } },
+      { $match: { ...branchFilter, createdAt: { $gte: start, $lte: end } } },
       {
         $group: {
           _id: { $hour: '$createdAt' },
@@ -458,7 +469,7 @@ const getOrdersByStatus = async (period, from, to) => {
 
     // Average order value
     Order.aggregate([
-      { $match: { status: 'completed', createdAt: { $gte: start, $lte: end } } },
+      { $match: { ...branchFilter, status: 'completed', createdAt: { $gte: start, $lte: end } } },
       { $group: { _id: null, avg: { $avg: '$total' } } }
     ])
   ]);
@@ -491,12 +502,12 @@ const toCSV = (data, columns) => {
 
 // ── EXPORT REPORT ─────────────────────────────────────────────────────────────
 // Returns CSV string for any report type - SRS 5.7
-const exportReport = async (type, params) => {
+const exportReport = async (type, params, branchId) => {
   const { period, from, to } = params;
 
   switch (type) {
     case 'sales': {
-      const data = await getSalesReport(period, from, to);
+      const data = await getSalesReport(period, from, to, branchId);
       const csv = toCSV(data.byDay, [
         { label: 'Date', key: 'date' },
         { label: 'Orders', key: 'orders' },
@@ -506,7 +517,7 @@ const exportReport = async (type, params) => {
     }
 
     case 'best-sellers': {
-      const data = await getBestSellers(period, from, to, 50);
+      const data = await getBestSellers(period, from, to, 50, branchId);
       const csv = toCSV(data.products, [
         { label: 'Product', key: 'productName' },
         { label: 'Variety', key: 'variety' },
@@ -519,7 +530,7 @@ const exportReport = async (type, params) => {
     }
 
     case 'stock-valuation': {
-      const data = await getStockValuation();
+      const data = await getStockValuation(branchId);
       const csv = toCSV(data.rows, [
         { label: 'Product', key: 'productName' },
         { label: 'Category', key: 'category' },
@@ -533,7 +544,7 @@ const exportReport = async (type, params) => {
     }
 
     case 'customers': {
-      const data = await getCustomerReport();
+      const data = await getCustomerReport(branchId);
       const csv = toCSV(data.customers, [
         { label: 'Name', key: 'name' },
         { label: 'Phone', key: 'phone' },
@@ -550,7 +561,7 @@ const exportReport = async (type, params) => {
     }
 
     case 'orders': {
-      const data = await getOrdersByStatus(period, from, to);
+      const data = await getOrdersByStatus(period, from, to, branchId);
       const csv = toCSV(data.byStatus, [
         { label: 'Status', key: '_id' },
         { label: 'Count', key: 'count' },
@@ -561,7 +572,7 @@ const exportReport = async (type, params) => {
     }
 
     case 'stock-movement': {
-      const data = await getStockMovementReport(period, from, to);
+      const data = await getStockMovementReport(period, from, to, branchId);
       const csv = toCSV(data.logs, [
         { label: 'Date', key: 'timestamp' },
         { label: 'Product', key: 'productId.name' },

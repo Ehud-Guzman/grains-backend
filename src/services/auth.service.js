@@ -1,6 +1,7 @@
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
+const Branch = require('../models/Branch');
 const TokenBlacklist = require('../models/TokenBlacklist');
 const { AppError } = require('../middleware/errorHandler.middleware');
 const { ROLES } = require('../utils/constants');
@@ -10,8 +11,8 @@ const MAX_FAILED_LOGINS = 5;
 const BCRYPT_WORK_FACTOR = 12;
 
 // ── GENERATE TOKENS ───────────────────────────────────────────────────────────
-const generateTokens = (user) => {
-  const payload = { id: user._id, role: user.role };
+const generateTokens = (user, branchId = null) => {
+  const payload = { id: user._id, role: user.role, branchId: branchId || null };
 
   const accessToken = jwt.sign(payload, process.env.JWT_ACCESS_SECRET, {
     expiresIn: process.env.JWT_ACCESS_EXPIRY || '15m'
@@ -23,6 +24,17 @@ const generateTokens = (user) => {
 
   return { accessToken, refreshToken };
 };
+
+// ── GENERATE PRE-AUTH TOKEN (short-lived, branch selection step) ──────────────
+const generatePreAuthToken = (userId) => {
+  return jwt.sign(
+    { userId, step: 'branch_selection' },
+    process.env.JWT_ACCESS_SECRET,
+    { expiresIn: '5m' }
+  );
+};
+
+const ADMIN_ROLES = [ROLES.STAFF, ROLES.SUPERVISOR, ROLES.ADMIN, ROLES.SUPERADMIN];
 
 const normalizeOnboarding = (onboarding = {}) => ({
   version: onboarding.version || 1,
@@ -71,6 +83,8 @@ const register = async ({ name, phone, email, password }) => {
 };
 
 // ── LOGIN ─────────────────────────────────────────────────────────────────────
+// Customers get tokens immediately.
+// Staff/Admin/Superadmin get a preAuthToken + branch list for step-2 branch selection.
 const login = async ({ phone, password }, ip) => {
   const user = await User.findOne({ phone });
 
@@ -95,22 +109,119 @@ const login = async ({ phone, password }, ip) => {
     lastLoginAt: new Date()
   });
 
-  const { accessToken, refreshToken } = generateTokens(user);
+  // ── CUSTOMER: immediate tokens, no branch selection needed ────────────────
+  if (!ADMIN_ROLES.includes(user.role)) {
+    const { accessToken, refreshToken } = generateTokens(user, null);
+    await activityLogService.log({ actorId: user._id, actorRole: user.role, action: 'CUSTOMER_LOGIN', ip });
+    return {
+      requiresBranchSelection: false,
+      user: { id: user._id, name: user.name, phone: user.phone, email: user.email, role: user.role, avatarURL: user.avatarURL || null },
+      accessToken,
+      refreshToken
+    };
+  }
 
-  // Log the login event
-  const logAction = [ROLES.STAFF, ROLES.SUPERVISOR, ROLES.ADMIN, ROLES.SUPERADMIN].includes(user.role)
-    ? 'ADMIN_LOGIN'
-    : 'CUSTOMER_LOGIN';
+  // ── ADMIN / STAFF / SUPERVISOR: must select a branch ─────────────────────
+  let branches;
+  if (user.role === ROLES.SUPERADMIN) {
+    // Superadmin sees all active branches
+    branches = await Branch.find({ isActive: true }).select('name slug location phone').lean();
 
-  await activityLogService.log({
-    actorId: user._id,
-    actorRole: user.role,
-    action: logAction,
-    ip
-  });
+    // No branches yet (first-time setup) — let superadmin in without branch selection
+    if (branches.length === 0) {
+      const { accessToken, refreshToken } = generateTokens(user, null);
+      await activityLogService.log({ actorId: user._id, actorRole: user.role, action: 'ADMIN_LOGIN', ip });
+      return {
+        requiresBranchSelection: false,
+        firstTimeSetup: true,
+        user: { id: user._id, name: user.name, phone: user.phone, email: user.email, role: user.role, avatarURL: user.avatarURL || null },
+        accessToken,
+        refreshToken
+      };
+    }
+  } else {
+    // Staff/Admin — must have a branch assigned
+    if (!user.branchId) {
+      throw new AppError('Your account has no branch assigned. Contact your administrator.', 403, 'NO_BRANCH_ASSIGNED');
+    }
+    const branch = await Branch.findById(user.branchId).select('name slug location phone').lean();
+    if (!branch) {
+      throw new AppError('Your assigned branch is inactive. Contact your administrator.', 403, 'BRANCH_INACTIVE');
+    }
+    branches = [branch];
+  }
+
+  const preAuthToken = generatePreAuthToken(user._id);
+
+  await activityLogService.log({ actorId: user._id, actorRole: user.role, action: 'ADMIN_LOGIN', ip });
+
+  return {
+    requiresBranchSelection: true,
+    preAuthToken,
+    branches,
+    user: { id: user._id, name: user.name, phone: user.phone, email: user.email, role: user.role, avatarURL: user.avatarURL || null }
+  };
+};
+
+// ── SELECT BRANCH (step 2 for admin login) ────────────────────────────────────
+const selectBranch = async (preAuthToken, branchId) => {
+  let decoded;
+  try {
+    decoded = jwt.verify(preAuthToken, process.env.JWT_ACCESS_SECRET);
+  } catch {
+    throw new AppError('Session expired. Please log in again.', 401, 'INVALID_PREAUTH_TOKEN');
+  }
+
+  if (decoded.step !== 'branch_selection') {
+    throw new AppError('Invalid token for branch selection', 401, 'INVALID_PREAUTH_TOKEN');
+  }
+
+  const user = await User.findById(decoded.userId);
+  if (!user || user.isLocked) {
+    throw new AppError('User not found or account locked', 401, 'UNAUTHORIZED');
+  }
+
+  // Validate branch access
+  let branch;
+  if (user.role === ROLES.SUPERADMIN) {
+    branch = await Branch.findOne({ _id: branchId, isActive: true });
+    if (!branch) throw new AppError('Branch not found or inactive', 404, 'BRANCH_NOT_FOUND');
+  } else {
+    // Non-superadmin must select their assigned branch
+    if (user.branchId.toString() !== branchId.toString()) {
+      throw new AppError('You can only access your assigned branch', 403, 'FORBIDDEN');
+    }
+    branch = await Branch.findOne({ _id: branchId, isActive: true });
+    if (!branch) throw new AppError('Your branch is currently inactive', 403, 'BRANCH_INACTIVE');
+  }
+
+  const { accessToken, refreshToken } = generateTokens(user, branch._id);
 
   return {
     user: { id: user._id, name: user.name, phone: user.phone, email: user.email, role: user.role, avatarURL: user.avatarURL || null },
+    branch: { id: branch._id, name: branch.name, slug: branch.slug, location: branch.location },
+    accessToken,
+    refreshToken
+  };
+};
+
+// ── SWITCH BRANCH (superadmin only, already logged in) ────────────────────────
+const switchBranch = async (userId, branchId) => {
+  const user = await User.findById(userId);
+  if (!user || user.role !== ROLES.SUPERADMIN) {
+    throw new AppError('Only superadmin can switch branches', 403, 'FORBIDDEN');
+  }
+
+  let branch = null;
+  if (branchId) {
+    branch = await Branch.findOne({ _id: branchId, isActive: true });
+    if (!branch) throw new AppError('Branch not found or inactive', 404, 'BRANCH_NOT_FOUND');
+  }
+
+  const { accessToken, refreshToken } = generateTokens(user, branch?._id || null);
+
+  return {
+    branch: branch ? { id: branch._id, name: branch.name, slug: branch.slug, location: branch.location } : null,
     accessToken,
     refreshToken
   };
@@ -147,8 +258,8 @@ const refreshToken = async (token) => {
     if (err.code !== 11000) throw err;
   }
 
-  // 5. Issue new token pair
-  const { accessToken, refreshToken: newRefreshToken } = generateTokens(user);
+  // 5. Issue new token pair — preserve branchId from old token
+  const { accessToken, refreshToken: newRefreshToken } = generateTokens(user, decoded.branchId || null);
   return { accessToken, refreshToken: newRefreshToken };
 };
 
@@ -349,6 +460,8 @@ const updateOnboarding = async (userId, payload = {}) => {
 module.exports = {
   register,
   login,
+  selectBranch,
+  switchBranch,
   refreshToken,
   logout,
   lockAccount,

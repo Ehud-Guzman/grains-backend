@@ -13,7 +13,8 @@ const verifyToken = (req, res, next) => {
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_ACCESS_SECRET);
-    req.user = { id: decoded.id, role: decoded.role };
+    req.user = { id: decoded.id, role: decoded.role, branchId: decoded.branchId || null };
+    req.branchId = decoded.branchId || null;
     next();
   } catch (err) {
     next(err); // passes to error handler (handles JWT errors)
@@ -33,9 +34,11 @@ const optionalAuth = (req, res, next) => {
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_ACCESS_SECRET);
-    req.user = { id: decoded.id, role: decoded.role };
+    req.user = { id: decoded.id, role: decoded.role, branchId: decoded.branchId || null };
+    req.branchId = decoded.branchId || null;
   } catch {
     req.user = null;
+    req.branchId = null;
   }
 
   next();
