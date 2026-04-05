@@ -39,4 +39,18 @@ const adminLimiter = rateLimit({
   }
 });
 
-module.exports = { publicLimiter, authLimiter, adminLimiter };
+// M-Pesa callback endpoint — tight limit; legitimate Safaricom retries are max 3/callback
+// In production the IP whitelist is the primary guard; this is a second layer
+const callbackLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  // Always return 200 so Safaricom doesn't enter a retry loop on a rate-limit response
+  handler: (req, res) => {
+    console.warn(`[M-PESA] Callback rate limit hit from IP: ${req.ip}`);
+    res.status(200).json({ ResultCode: 0, ResultDesc: 'Accepted' });
+  }
+});
+
+module.exports = { publicLimiter, authLimiter, adminLimiter, callbackLimiter };

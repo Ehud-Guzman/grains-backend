@@ -17,12 +17,18 @@ const {
 } = require('../utils/mpesaHelpers');
 
 // ── INITIATE STK PUSH ─────────────────────────────────────────────────────────
-const initiateStkPush = async (orderId, phone, amount) => {
+const initiateStkPush = async (orderId, phone) => {
   const order = await Order.findById(orderId);
   if (!order) throw new AppError('Order not found', 404, 'ORDER_NOT_FOUND');
 
   if (order.paymentStatus === PAYMENT_STATUSES.PAID) {
     throw new AppError('This order has already been paid', 400, 'ALREADY_PAID');
+  }
+
+  // Always derive amount from the order — never trust client-supplied values
+  const amount = order.total;
+  if (!amount || amount <= 0) {
+    throw new AppError('Order has an invalid total amount', 400, 'INVALID_ORDER_AMOUNT');
   }
 
   const shortcode  = process.env.MPESA_SHORTCODE;
@@ -125,6 +131,24 @@ const handleCallback = async (callbackData) => {
     const metadata = parseCallbackMetadata(CallbackMetadata?.Item || []);
     const mpesaTransactionId = metadata.MpesaReceiptNumber;
     const paidAmount         = metadata.Amount;
+
+    // Verify Safaricom paid the correct amount — reject underpayments
+    if (!paidAmount || Math.ceil(paidAmount) < Math.ceil(payment.amount)) {
+      console.warn(
+        `[M-PESA] Amount mismatch on ${CheckoutRequestID}: expected ${payment.amount}, got ${paidAmount}`
+      );
+      await Payment.findByIdAndUpdate(payment._id, { status: PAYMENT_STATUSES.FAILED });
+      await Order.findByIdAndUpdate(payment.orderId, { paymentStatus: PAYMENT_STATUSES.FAILED });
+      await activityLogService.log({
+        actorId:    payment.orderId,
+        actorRole:  'customer',
+        action:     LOG_ACTIONS.PAYMENT_FAILED,
+        targetId:   payment._id,
+        targetType: 'Payment',
+        detail:     { reason: 'AMOUNT_MISMATCH', expected: payment.amount, received: paidAmount }
+      }).catch(() => {});
+      return { success: false, status: 'failed', resultCode: 'AMOUNT_MISMATCH' };
+    }
 
     await Payment.findByIdAndUpdate(payment._id, {
       status:            PAYMENT_STATUSES.PAID,

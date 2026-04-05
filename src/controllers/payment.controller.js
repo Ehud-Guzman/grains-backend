@@ -13,7 +13,7 @@ const initiate = async (req, res, next) => {
         message: 'orderId and phone are required'
       });
     }
-    const result = await paymentService.initiateStkPush(orderId, phone, req.body.amount);
+    const result = await paymentService.initiateStkPush(orderId, phone);
     return success(res, result, 'STK push sent to your phone');
   } catch (err) { next(err); }
 };

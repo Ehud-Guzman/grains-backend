@@ -2,6 +2,7 @@
 require('dotenv').config();
 const app = require('./src/app');
 const connectDB = require('./src/config/db');
+const { startCleanupJobs } = require('./src/jobs/cleanup.job');
 
 const PORT = process.env.PORT || 5000;
 
@@ -64,6 +65,9 @@ const startServer = async () => {
   try {
     // Connect to MongoDB first — fail fast if DB is unreachable
     await connectDB();
+
+    // Start background jobs (DB must be connected before jobs run)
+    startCleanupJobs();
 
     const server = app.listen(PORT, () => {
       console.log(`

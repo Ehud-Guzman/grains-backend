@@ -19,5 +19,6 @@ activityLogSchema.index({ branchId: 1, timestamp: -1 });
 activityLogSchema.index({ actorId: 1 });
 activityLogSchema.index({ action: 1 });
 activityLogSchema.index({ timestamp: -1 });
+activityLogSchema.index({ action: 1, timestamp: -1 }); // action-filtered queries with date range (e.g. recent LOGIN_FAILED events)
 
 module.exports = mongoose.model('ActivityLog', activityLogSchema);

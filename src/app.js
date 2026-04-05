@@ -11,6 +11,7 @@ require('dotenv').config();
 const { errorHandler } = require('./middleware/errorHandler.middleware');
 const { publicLimiter } = require('./middleware/rateLimit.middleware');
 const { requestTiming } = require('./middleware/requestTiming.middleware');
+const { isRestoreInProgress } = require('./services/backup.service');
 
 // ── MODEL REGISTRATION ────────────────────────────────────────────────────────
 require('./models/Branch');
@@ -120,6 +121,21 @@ app.get('/api/health', (req, res) => {
 
 // ── RATE LIMITING ─────────────────────────────────────────────────────────────
 app.use('/api', publicLimiter);
+
+// ── RESTORE LOCK ──────────────────────────────────────────────────────────────
+// Block all API traffic while a backup restore is running. Checked before any
+// DB query because the database is empty between Phase 1 (delete) and Phase 2
+// (insert). The backup route itself is exempt so the admin can trigger recovery.
+app.use('/api', (req, res, next) => {
+  if (isRestoreInProgress() && !req.path.startsWith('/admin/backups')) {
+    return res.status(503).json({
+      success: false,
+      error: 'RESTORE_IN_PROGRESS',
+      message: 'A system restore is in progress. Please try again in a moment.',
+    });
+  }
+  next();
+});
 
 // ── PUBLIC ROUTES ─────────────────────────────────────────────────────────────
 app.use('/api/auth',     authRoutes);

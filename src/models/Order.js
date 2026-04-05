@@ -55,7 +55,10 @@ const orderSchema = new mongoose.Schema({
   specialInstructions: { type: String, default: null },
   branchId: { type: mongoose.Schema.Types.ObjectId, ref: 'Branch', required: true },
   driverId: { type: mongoose.Schema.Types.ObjectId, default: null },
-  deliveryTrackingUrl: { type: String, default: null }
+  deliveryTrackingUrl: { type: String, default: null },
+  // SHA-256 hash of the one-time tracking token issued to the guest at order creation.
+  // Only guest orders have this set. Never stored or returned in plaintext.
+  trackingTokenHash: { type: String, default: null, select: false }
 }, {
   timestamps: true
 });
@@ -70,5 +73,6 @@ orderSchema.index({ guestId: 1 });
 orderSchema.index({ status: 1 });
 orderSchema.index({ createdAt: -1 });
 orderSchema.index({ orderRef: 1 }, { unique: true });
+orderSchema.index({ branchId: 1, paymentStatus: 1 }); // payment reconciliation queries
 
 module.exports = mongoose.model('Order', orderSchema);

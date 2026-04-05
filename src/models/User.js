@@ -71,5 +71,6 @@ userSchema.index({ phone: 1 }, { unique: true });
 userSchema.index({ email: 1 }, { unique: true, sparse: true });
 userSchema.index({ role: 1 });
 userSchema.index({ branchId: 1 });
+userSchema.index({ branchId: 1, createdAt: -1 }); // branch-scoped new-user reports
 
 module.exports = mongoose.model('User', userSchema);

@@ -22,5 +22,6 @@ const paymentSchema = new mongoose.Schema({
 paymentSchema.index({ orderId: 1 });
 paymentSchema.index({ checkoutRequestId: 1 }, { unique: true, sparse: true });
 paymentSchema.index({ status: 1 });
+paymentSchema.index({ status: 1, createdAt: -1 }); // date-ranged payment reports and reconciliation
 
 module.exports = mongoose.model('Payment', paymentSchema);

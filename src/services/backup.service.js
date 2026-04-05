@@ -29,6 +29,7 @@ const BACKUP_DIR = path.resolve(
     : DEFAULT_BACKUP_DIR
 );
 const MANIFEST_PATH = path.join(BACKUP_DIR, 'manifest.json');
+const RESTORE_MARKER = path.join(BACKUP_DIR, '.restore-in-progress');
 const BACKUP_VERSION = 2;
 const COLLECTIONS = [
   { key: 'branches', label: 'Branch', model: Branch },
@@ -44,6 +45,9 @@ const COLLECTIONS = [
 ];
 
 let storagePrepared = false;
+let restoreInProgress = false;
+
+const isRestoreInProgress = () => restoreInProgress;
 
 const fileExists = async (targetPath) => {
   try {
@@ -79,6 +83,15 @@ const ensureBackupDir = async () => {
   if (storagePrepared) return;
   await fs.mkdir(BACKUP_DIR, { recursive: true });
   await migrateLegacyBackups();
+  // Detect a crash mid-restore: if the marker file exists the previous restore
+  // never finished and the database is likely incomplete.
+  if (await fileExists(RESTORE_MARKER)) {
+    console.error(
+      '[backup] CRITICAL: .restore-in-progress marker found on startup. ' +
+      'A previous restore was interrupted — the database may be empty or incomplete. ' +
+      'Log in and restore from the most recent pre-restore backup immediately.'
+    );
+  }
   storagePrepared = true;
 };
 
@@ -312,13 +325,35 @@ const validateRestoreRequest = ({ file, confirmation }) => {
 };
 
 const restoreCollections = async (snapshot) => {
-  for (const { key, model } of COLLECTIONS) {
+  // Phase 1 — clear everything first so we never end up with a mixed state
+  // (half old data, half restored data) if an insert later fails.
+  for (const { model } of COLLECTIONS) {
     await model.deleteMany({});
+  }
 
-    if (snapshot.data[key].length > 0) {
-      await model.collection.insertMany(snapshot.data[key], { ordered: true });
+  // Phase 2 — insert all collections.
+  // ordered:false lets individual bad documents be skipped rather than aborting
+  // the entire batch. A BulkWriteError is still thrown so we can report failures.
+  const writeErrors = [];
+  for (const { key, model } of COLLECTIONS) {
+    const docs = snapshot.data[key];
+    if (docs.length === 0) continue;
+    try {
+      await model.collection.insertMany(docs, { ordered: false });
+    } catch (err) {
+      if (err.name === 'MongoBulkWriteError') {
+        const inserted = err.result?.insertedCount ?? 0;
+        const failed = docs.length - inserted;
+        if (failed > 0) writeErrors.push({ collection: key, inserted, failed, total: docs.length });
+        // Partial inserts are acceptable; continue to the next collection.
+      } else {
+        // Unexpected driver/network error — abort and let the caller handle it.
+        throw err;
+      }
     }
   }
+
+  return writeErrors;
 };
 
 const restoreBackup = async ({ file, confirmation, actorId, actorRole, ip }) => {
@@ -327,7 +362,34 @@ const restoreBackup = async ({ file, confirmation, actorId, actorRole, ip }) => 
   const snapshot = await decodeBackupBuffer(file.buffer, file.originalname);
   const preRestoreBackup = await createBackup({ actorId, actorRole });
 
-  await restoreCollections(snapshot);
+  // Signal all other requests to back off for the duration of the restore.
+  restoreInProgress = true;
+  // Write a marker file so a crash between Phase 1 and Phase 2 is detectable on restart.
+  try { await fs.writeFile(RESTORE_MARKER, new Date().toISOString(), 'utf8'); } catch { /* non-fatal */ }
+
+  let writeErrors = [];
+  try {
+    writeErrors = await restoreCollections(snapshot);
+  } catch (err) {
+    // All collections were cleared in Phase 1 but a critical insert error occurred.
+    // Surface the pre-restore backup ID so the admin can recover immediately.
+    throw new AppError(
+      `Restore failed while inserting data (${err.message}). ` +
+      `Your previous data was saved as backup "${preRestoreBackup.id}" — restore that to recover.`,
+      500,
+      'RESTORE_FAILED'
+    );
+  } finally {
+    restoreInProgress = false;
+    try { await fs.unlink(RESTORE_MARKER); } catch { /* already gone or never written */ }
+  }
+
+  if (writeErrors.length > 0) {
+    console.warn(
+      '[backup] Restore completed with partial write errors:',
+      writeErrors.map(e => `${e.collection}: ${e.inserted}/${e.total} inserted`).join(', ')
+    );
+  }
 
   await ActivityLog.create({
     actorId,
@@ -343,6 +405,7 @@ const restoreBackup = async ({ file, confirmation, actorId, actorRole, ip }) => 
         key,
         count: snapshot.data[key].length,
       })),
+      ...(writeErrors.length > 0 && { writeErrors }),
     },
     ip: ip || null,
     timestamp: new Date(),
@@ -356,6 +419,7 @@ const restoreBackup = async ({ file, confirmation, actorId, actorRole, ip }) => 
     counts: Object.fromEntries(
       COLLECTIONS.map(({ key }) => [key, snapshot.data[key].length])
     ),
+    ...(writeErrors.length > 0 && { writeErrors }),
   };
 };
 
@@ -375,6 +439,7 @@ const getBackupStorageSummary = async () => {
 
 module.exports = {
   BACKUP_DIR,
+  isRestoreInProgress,
   createBackup,
   listBackups,
   getBackupDownload,

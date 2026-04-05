@@ -8,18 +8,23 @@ const createGuestOrder = async (req, res, next) => {
     // Use branchId from request body (frontend passes it), or fall back to default branch
     const branchId = req.body.branchId || await getDefaultBranchId();
     const order = await orderService.createGuestOrder(req.body, branchId);
-    return success(res, { orderRef: order.orderRef, orderId: order._id, total: order.total }, 'Order placed successfully', 201);
+    return success(res, {
+      orderRef: order.orderRef,
+      orderId: order._id,
+      total: order.total,
+      trackingToken: order.trackingToken  // one-time — frontend must persist this locally
+    }, 'Order placed successfully', 201);
   } catch (err) { next(err); }
 };
 
 // GET /api/orders/track?phone=&ref=
 const trackOrder = async (req, res, next) => {
   try {
-    const { phone, ref } = req.query;
-    if (!phone || !ref) {
-      return res.status(400).json({ success: false, error: 'MISSING_PARAMS', message: 'phone and ref are required' });
+    const { phone, ref, token } = req.query;
+    if (!phone || !ref || !token) {
+      return res.status(400).json({ success: false, error: 'MISSING_PARAMS', message: 'phone, ref, and token are required' });
     }
-    const order = await orderService.trackByRef(phone, ref);
+    const order = await orderService.trackByRef(phone, ref, token);
     return success(res, order);
   } catch (err) { next(err); }
 };

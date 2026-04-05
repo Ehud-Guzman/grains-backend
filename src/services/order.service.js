@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const mongoose = require('mongoose');
 const Order = require('../models/Order');
 const Product = require('../models/Product');
@@ -30,14 +31,13 @@ const orderHasHeldStock = (order) => (
 const validateOrderStock = async (orderItems) => {
   const errors = [];
 
+  // One query for all unique products instead of one query per item
+  const productIds = [...new Set(orderItems.map(i => i.productId))];
+  const products = await Product.find({ _id: { $in: productIds }, isActive: true }).lean();
+  const productsMap = new Map(products.map(p => [p._id.toString(), p]));
+
   for (const item of orderItems) {
-    const product = await Product.findOne(
-      {
-        _id: item.productId,
-        isActive: true,
-        'varieties.varietyName': item.variety
-      }
-    ).lean();
+    const product = productsMap.get(item.productId?.toString());
 
     if (!product) {
       errors.push(`Product "${item.productName}" is no longer available`);
@@ -74,11 +74,17 @@ const buildOrderItems = async (cartItems, options = {}) => {
   const items = [];
   let subtotal = 0;
 
-  for (const item of cartItems) {
-    const query = { _id: item.productId, isActive: true };
-    if (branchId) query.branchId = branchId;
+  // One query for all unique products instead of one query per item.
+  // Deduplicating IDs handles carts with the same product in multiple varieties.
+  const productIds = [...new Set(cartItems.map(i => i.productId))];
+  const query = { _id: { $in: productIds }, isActive: true };
+  if (branchId) query.branchId = branchId;
 
-    const product = await Product.findOne(query, null, { session }).lean();
+  const products = await Product.find(query, null, { session }).lean();
+  const productsMap = new Map(products.map(p => [p._id.toString(), p]));
+
+  for (const item of cartItems) {
+    const product = productsMap.get(item.productId?.toString());
     if (!product) throw new AppError(`Product not found: ${item.productId}`, 404, 'PRODUCT_NOT_FOUND');
 
     const variety = product.varieties.find(v => v.varietyName === item.variety);
@@ -320,6 +326,11 @@ const createGuestOrder = async (orderData, branchId) => {
     }
 
     const orderRef = await generateOrderRef(branchId, session);
+
+    // Generate one-time tracking token for the guest — returned to frontend, stored hashed
+    const trackingToken = crypto.randomBytes(32).toString('hex');
+    const trackingTokenHash = crypto.createHash('sha256').update(trackingToken).digest('hex');
+
     let [order] = await Order.create([{
       orderRef,
       branchId,
@@ -336,6 +347,7 @@ const createGuestOrder = async (orderData, branchId) => {
       status: ORDER_STATUSES.PENDING,
       stockReservationStatus: STOCK_RESERVATION_STATUSES.NONE,
       specialInstructions: orderData.specialInstructions || null,
+      trackingTokenHash,
       statusHistory: [{
         status: ORDER_STATUSES.PENDING,
         changedAt: new Date(),
@@ -358,6 +370,9 @@ const createGuestOrder = async (orderData, branchId) => {
       detail: { orderRef, total: order.total, itemCount: items.length, stockReserved: true }
     });
 
+    // Attach plain token to returned object — only time it is ever available in plaintext
+    order = order.toObject();
+    order.trackingToken = trackingToken;
     return order;
   } catch (err) {
     await session.abortTransaction();
@@ -523,22 +538,39 @@ const getMyOrders = async (userId, query = {}, branchId) => {
 };
 
 // ── TRACK BY REF (GUEST) ──────────────────────────────────────────────────────
-// SRS 5.5 - public order tracking by phone + ref
-const trackByRef = async (phone, orderRef) => {
+// SRS 5.5 - public order tracking by phone + ref + verificationToken
+const trackByRef = async (phone, orderRef, verificationToken) => {
   await autoCancelExpiredPendingOrders();
 
-  // Find guest by phone
+  if (!verificationToken) {
+    throw new AppError('Verification token is required', 400, 'TOKEN_REQUIRED');
+  }
+
   const guest = await Guest.findOne({ phone });
-  if (!guest) throw new AppError('No orders found for this phone number', 404, 'NOT_FOUND');
+  if (!guest) throw new AppError('Order not found', 404, 'NOT_FOUND');
 
-  const order = await Order.findOne({
-    orderRef,
-    guestId: guest._id
-  }).lean();
+  // Include trackingTokenHash in this query (excluded from default projections via select:false)
+  const order = await Order.findOne({ orderRef, guestId: guest._id })
+    .select('+trackingTokenHash')
+    .lean();
 
-  if (!order) throw new AppError('Order not found. Check your reference number.', 404, 'ORDER_NOT_FOUND');
+  if (!order) throw new AppError('Order not found', 404, 'ORDER_NOT_FOUND');
 
-  return order;
+  // Constant-time comparison to prevent timing attacks
+  const expectedHash = order.trackingTokenHash;
+  const providedHash = crypto.createHash('sha256').update(verificationToken).digest('hex');
+  const isValid = expectedHash && crypto.timingSafeEqual(
+    Buffer.from(expectedHash, 'hex'),
+    Buffer.from(providedHash, 'hex')
+  );
+
+  if (!isValid) {
+    throw new AppError('Order not found', 404, 'ORDER_NOT_FOUND');
+  }
+
+  // Strip the hash before returning
+  const { trackingTokenHash: _omit, ...safeOrder } = order;
+  return safeOrder;
 };
 
 // ── VALIDATE STATUS TRANSITION ────────────────────────────────────────────────
