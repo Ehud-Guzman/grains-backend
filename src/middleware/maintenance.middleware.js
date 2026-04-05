@@ -1,8 +1,12 @@
 const settingsService = require('../services/settings.service');
+const { getDefaultBranchId } = require('../services/defaultBranch.service');
 
 const checkMaintenanceMode = async (req, res, next) => {
   try {
-    const settings = await settingsService.getSettings();
+    const branchId = req.branchId || req.body?.branchId || await getDefaultBranchId();
+    if (!branchId) return next(); // no branch configured yet, skip check
+
+    const settings = await settingsService.getSettings(branchId);
 
     if (!settings.maintenanceMode) return next();
 
