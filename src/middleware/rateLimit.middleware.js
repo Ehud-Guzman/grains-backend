@@ -1,9 +1,18 @@
 const rateLimit = require('express-rate-limit');
 
-// Public routes - 100 req/min per IP
+// Key by branchId + IP so branches don't throttle each other.
+// branchId comes from the JWT (set by verifyToken as req.branchId) for
+// authenticated routes, or from ?branchId query param for public routes.
+const keyByBranchAndIp = (req) => {
+  const branchId = req.branchId || req.query?.branchId || 'public';
+  return `${branchId}:${req.ip}`;
+};
+
+// Public routes - 100 req/min per branch+IP
 const publicLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 100,
+  keyGenerator: keyByBranchAndIp,
   standardHeaders: true,
   legacyHeaders: false,
   message: {
@@ -13,10 +22,11 @@ const publicLimiter = rateLimit({
   }
 });
 
-// Auth routes (login/register) - stricter, 10 req/min per IP
+// Auth routes (login/register) - stricter, 10 req/min per branch+IP
 const authLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 10,
+  keyGenerator: keyByBranchAndIp,
   standardHeaders: true,
   legacyHeaders: false,
   message: {
@@ -26,10 +36,11 @@ const authLimiter = rateLimit({
   }
 });
 
-// Authenticated admin routes - 300 req/min per IP
+// Authenticated admin routes - 300 req/min per branch+IP
 const adminLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 300,
+  keyGenerator: keyByBranchAndIp,
   standardHeaders: true,
   legacyHeaders: false,
   message: {

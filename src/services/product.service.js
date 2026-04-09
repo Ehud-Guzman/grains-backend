@@ -303,6 +303,20 @@ const duplicate = async (productId, adminId, branchId) => {
   return copy;
 };
 
+// ── ADD IMAGES TO PRODUCT ─────────────────────────────────────────────────────
+const addImages = async (productId, urls) => {
+  if (!productId || !Array.isArray(urls) || urls.length === 0) {
+    throw new Error('Invalid productId or image URLs');
+  }
+  const product = await Product.findByIdAndUpdate(
+    productId,
+    { $push: { imageURLs: { $each: urls } } },
+    { new: true }
+  );
+  if (!product) throw new Error('Product not found');
+  return product;
+};
+
 module.exports = {
   getAll,
   getById,
@@ -314,5 +328,6 @@ module.exports = {
   toggleActive,
   deleteProduct,
   duplicate,
+  addImages,
   invalidateCache
 };

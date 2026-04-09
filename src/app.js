@@ -1,7 +1,7 @@
 const express = require('express');
+const mongoose = require('mongoose');
 const cors = require('cors');
 const helmet = require('helmet');
-const morgan = require('morgan');
 const mongoSanitize = require('express-mongo-sanitize');
 const xss = require('xss-clean');
 const hpp = require('hpp');
@@ -12,6 +12,7 @@ const { errorHandler } = require('./middleware/errorHandler.middleware');
 const { publicLimiter } = require('./middleware/rateLimit.middleware');
 const { requestTiming } = require('./middleware/requestTiming.middleware');
 const { isRestoreInProgress } = require('./services/backup.service');
+const logger = require('./utils/logger');
 
 // ── MODEL REGISTRATION ────────────────────────────────────────────────────────
 require('./models/Branch');
@@ -21,6 +22,7 @@ require('./models/Product');
 require('./models/Order');
 require('./models/Payment');
 require('./models/StockLog');
+require('./models/StockIntake');
 require('./models/ActivityLog');
 require('./models/OrderCounter');
 require('./models/Settings');
@@ -32,6 +34,7 @@ const productRoutes  = require('./routes/product.routes');
 const orderRoutes    = require('./routes/order.routes');
 const settingsRoutes = require('./routes/settings.routes');
 const paymentRoutes  = require('./routes/payment.routes');
+const driverRoutes   = require('./routes/driver.routes');
 
 // ── ADMIN ROUTES ──────────────────────────────────────────────────────────────
 const adminProductRoutes  = require('./routes/admin/product.routes');
@@ -45,6 +48,8 @@ const adminSettingsRoutes = require('./routes/admin/settings.routes');
 const adminPaymentRoutes  = require('./routes/admin/payment.routes');
 const adminBranchRoutes   = require('./routes/admin/branch.routes');
 const adminBackupRoutes   = require('./routes/admin/backup.routes');
+const adminDriverRoutes       = require('./routes/admin/driver.routes');
+const adminStockIntakeRoutes  = require('./routes/admin/stockIntake.routes');
 
 const app = express();
 
@@ -79,10 +84,27 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
-// ── REQUEST LOGGING ───────────────────────────────────────────────────────────
-if (process.env.NODE_ENV !== 'test') {
-  app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
-}
+// ── REQUEST ID + STRUCTURED ACCESS LOG ───────────────────────────────────────
+// requestId is attached first so every downstream log (including errors) can
+// reference it. The access log fires on response finish so it captures status.
+app.use((req, res, next) => {
+  req.requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+  if (process.env.NODE_ENV !== 'test') {
+    res.on('finish', () => {
+      logger.info('HTTP', {
+        requestId: req.requestId,
+        method:    req.method,
+        url:       req.originalUrl,
+        status:    res.statusCode,
+        branchId:  req.branchId  || req.query?.branchId || null,
+        userId:    req.user?.id  || null,
+      });
+    });
+  }
+
+  next();
+});
 
 app.use(requestTiming);
 
@@ -110,7 +132,16 @@ app.use(hpp({
 }));
 
 // ── HEALTH CHECK ──────────────────────────────────────────────────────────────
-app.get('/api/health', (req, res) => {
+app.get('/api/health', (_req, res) => {
+  const dbState = mongoose.connection.readyState; // 1 = connected
+  if (dbState !== 1) {
+    return res.status(503).json({
+      success: false,
+      message: 'Database unavailable',
+      env: process.env.NODE_ENV,
+      timestamp: new Date().toISOString()
+    });
+  }
   res.json({
     success: true,
     message: 'Grains & Cereals API is running',
@@ -143,6 +174,7 @@ app.use('/api/products', productRoutes);
 app.use('/api/orders',   orderRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/payments', paymentRoutes);
+app.use('/api/driver',   driverRoutes);
 
 // ── ADMIN ROUTES ──────────────────────────────────────────────────────────────
 app.use('/api/admin/products',  adminProductRoutes);
@@ -156,6 +188,8 @@ app.use('/api/admin/settings',  adminSettingsRoutes);
 app.use('/api/admin/payments',  adminPaymentRoutes);
 app.use('/api/admin/branches',  adminBranchRoutes);
 app.use('/api/admin/backups',   adminBackupRoutes);
+app.use('/api/admin/drivers',       adminDriverRoutes);
+app.use('/api/admin/stock-intake',  adminStockIntakeRoutes);
 
 // ── 404 HANDLER ───────────────────────────────────────────────────────────────
 app.use((req, res) => {

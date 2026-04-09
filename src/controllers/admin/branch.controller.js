@@ -1,5 +1,5 @@
 const branchService = require('../../services/branch.service');
-const { success } = require('../../utils/apiResponse');
+const { success, error } = require('../../utils/apiResponse');
 
 const getAll = async (req, res, next) => {
   try {
@@ -47,7 +47,7 @@ const getStaff = async (req, res, next) => {
 const assignUser = async (req, res, next) => {
   try {
     const { userId } = req.body;
-    if (!userId) return res.status(400).json({ success: false, error: 'MISSING_FIELDS', message: 'userId is required' });
+    if (!userId) return error(res, 'userId is required', 'MISSING_FIELDS');
     const user = await branchService.assignUser(userId, req.params.id, req.user.id);
     return success(res, user, 'User assigned to branch');
   } catch (err) { next(err); }

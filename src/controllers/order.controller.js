@@ -1,6 +1,6 @@
 const orderService = require('../services/order.service');
 const { getDefaultBranchId } = require('../services/defaultBranch.service');
-const { success } = require('../utils/apiResponse');
+const { success, error } = require('../utils/apiResponse');
 
 // POST /api/orders/guest
 const createGuestOrder = async (req, res, next) => {
@@ -22,7 +22,7 @@ const trackOrder = async (req, res, next) => {
   try {
     const { phone, ref, token } = req.query;
     if (!phone || !ref || !token) {
-      return res.status(400).json({ success: false, error: 'MISSING_PARAMS', message: 'phone, ref, and token are required' });
+      return error(res, 'phone, ref, and token are required', 'MISSING_PARAMS');
     }
     const order = await orderService.trackByRef(phone, ref, token);
     return success(res, order);

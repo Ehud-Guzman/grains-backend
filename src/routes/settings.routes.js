@@ -6,4 +6,9 @@ const settingsController = require('../controllers/admin/settings.controller');
 // Returns only shop-facing info (name, phone, hours, delivery fee etc)
 router.get('/', settingsController.getPublic);
 
+// GET /api/delivery-fee?lat=X&lng=Y — public
+// Returns calculated delivery fee for the given customer coordinates.
+// Used by checkout page for live fee preview before order submission.
+router.get('/delivery-fee', settingsController.getDeliveryFee);
+
 module.exports = router;

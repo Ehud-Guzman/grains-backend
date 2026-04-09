@@ -9,6 +9,7 @@ const activityLogService = require('./activityLog.service');
 const stockService = require('./stock.service');
 const settingsService = require('./settings.service');
 const generateOrderRef = require('../utils/generateOrderRef');
+const haversine = require('../utils/haversine');
 const {
   LOG_ACTIONS,
   ORDER_STATUSES,
@@ -225,9 +226,44 @@ const assertOrderMatchesSettings = ({ settings, deliveryMethod, paymentMethod, s
   }
 };
 
-const getConfiguredDeliveryFee = (settings, deliveryMethod) => (
-  deliveryMethod === 'delivery' ? (Number(settings.deliveryFee) || 0) : 0
-);
+/**
+ * Calculate the delivery fee for an order.
+ * - deliveryMethod !== 'delivery'  → 0
+ * - mode 'flat'                    → settings.deliveryFee
+ * - mode 'distance'                → Haversine distance → closest band → band fee
+ *   If branch has no coordinates or customer skipped geolocation → fall back to flat fee.
+ *
+ * Returns { fee: Number, distanceKm: Number|null, zoneName: String|null }
+ */
+const calculateDeliveryFee = (settings, deliveryMethod, customerCoords) => {
+  if (deliveryMethod !== 'delivery') return { fee: 0, distanceKm: null, zoneName: null };
+
+  const flatFee = Number(settings.deliveryFee) || 0;
+
+  if (
+    settings.deliveryPricingMode === 'distance' &&
+    settings.deliveryZones?.length > 0 &&
+    settings.branchLat != null && settings.branchLng != null &&
+    customerCoords?.lat != null && customerCoords?.lng != null
+  ) {
+    const distanceKm = haversine(
+      settings.branchLat, settings.branchLng,
+      customerCoords.lat, customerCoords.lng
+    );
+
+    const band = settings.deliveryZones.find(
+      z => distanceKm >= (z.minKm ?? 0) && distanceKm < (z.maxKm ?? 9999)
+    );
+
+    return {
+      fee:        band ? band.fee : flatFee,
+      distanceKm: Math.round(distanceKm * 10) / 10,
+      zoneName:   band ? band.name : null,
+    };
+  }
+
+  return { fee: flatFee, distanceKm: null, zoneName: null };
+};
 
 const autoCancelExpiredPendingOrders = async (branchId) => {
   const now = Date.now();
@@ -311,7 +347,13 @@ const createGuestOrder = async (orderData, branchId) => {
     isGuestOrder: true
   });
 
-  const deliveryFee = getConfiguredDeliveryFee(settings, orderData.deliveryMethod);
+  const { fee: deliveryFee, distanceKm, zoneName } = calculateDeliveryFee(
+    settings, orderData.deliveryMethod, orderData.deliveryCoordinates
+  );
+  const vatEnabled = settings.vatEnabled === true;
+  const vatRate    = vatEnabled ? (Number(settings.vatRate) || 0) : 0;
+  const vatAmount  = vatEnabled ? Math.round(subtotal * vatRate) / 100 : 0;
+
   const session = await mongoose.startSession();
   session.startTransaction();
 
@@ -339,7 +381,10 @@ const createGuestOrder = async (orderData, branchId) => {
       orderItems: items,
       subtotal,
       deliveryFee,
-      total: subtotal + deliveryFee,
+      vatEnabled,
+      vatRate,
+      vatAmount,
+      total: subtotal + deliveryFee + vatAmount,
       deliveryMethod: orderData.deliveryMethod,
       deliveryAddress: orderData.deliveryAddress || null,
       paymentMethod: orderData.paymentMethod,
@@ -348,11 +393,15 @@ const createGuestOrder = async (orderData, branchId) => {
       stockReservationStatus: STOCK_RESERVATION_STATUSES.NONE,
       specialInstructions: orderData.specialInstructions || null,
       trackingTokenHash,
+      deliveryCoordinates: orderData.deliveryCoordinates?.lat
+        ? { lat: orderData.deliveryCoordinates.lat, lng: orderData.deliveryCoordinates.lng }
+        : { lat: null, lng: null },
+      deliveryDistanceKm: distanceKm,
       statusHistory: [{
         status: ORDER_STATUSES.PENDING,
         changedAt: new Date(),
         changedBy: guest._id,
-        note: 'Order placed'
+        note: zoneName ? `Order placed · delivery zone: ${zoneName} (${distanceKm} km)` : 'Order placed'
       }]
     }], { session });
 
@@ -401,7 +450,13 @@ const createCustomerOrder = async (orderData, userId, branchId) => {
     subtotal,
     isGuestOrder: false
   });
-  const deliveryFee = getConfiguredDeliveryFee(settings, orderData.deliveryMethod);
+  const { fee: deliveryFee, distanceKm, zoneName } = calculateDeliveryFee(
+    settings, orderData.deliveryMethod, orderData.deliveryCoordinates
+  );
+  const vatEnabled = settings.vatEnabled === true;
+  const vatRate    = vatEnabled ? (Number(settings.vatRate) || 0) : 0;
+  const vatAmount  = vatEnabled ? Math.round(subtotal * vatRate) / 100 : 0;
+
   const session = await mongoose.startSession();
   session.startTransaction();
 
@@ -415,7 +470,10 @@ const createCustomerOrder = async (orderData, userId, branchId) => {
       orderItems: items,
       subtotal,
       deliveryFee,
-      total: subtotal + deliveryFee,
+      vatEnabled,
+      vatRate,
+      vatAmount,
+      total: subtotal + deliveryFee + vatAmount,
       deliveryMethod: orderData.deliveryMethod,
       deliveryAddress: orderData.deliveryAddress || null,
       paymentMethod: orderData.paymentMethod,
@@ -423,11 +481,15 @@ const createCustomerOrder = async (orderData, userId, branchId) => {
       status: ORDER_STATUSES.PENDING,
       stockReservationStatus: STOCK_RESERVATION_STATUSES.NONE,
       specialInstructions: orderData.specialInstructions || null,
+      deliveryCoordinates: orderData.deliveryCoordinates?.lat
+        ? { lat: orderData.deliveryCoordinates.lat, lng: orderData.deliveryCoordinates.lng }
+        : { lat: null, lng: null },
+      deliveryDistanceKm: distanceKm,
       statusHistory: [{
         status: ORDER_STATUSES.PENDING,
         changedAt: new Date(),
         changedBy: userId,
-        note: 'Order placed'
+        note: zoneName ? `Order placed · delivery zone: ${zoneName} (${distanceKm} km)` : 'Order placed'
       }]
     }], { session });
 
@@ -879,9 +941,61 @@ const getPackingSlip = async (orderId, branchId) => {
   };
 };
 
+// ── ASSIGN DRIVER TO ORDER ────────────────────────────────────────────────────
+// Admin assigns a driver when order is preparing or out_for_delivery.
+// Automatically transitions preparing → out_for_delivery on first assignment.
+const assignDriver = async (orderId, driverId, adminId, branchId) => {
+  const User = require('../models/User');
+  const { ROLES } = require('../utils/constants');
+
+  const order = await Order.findOne({ _id: orderId, branchId });
+  if (!order) throw new AppError('Order not found', 404, 'ORDER_NOT_FOUND');
+
+  if (order.deliveryMethod !== 'delivery') {
+    throw new AppError('Cannot assign a driver to a pickup order', 400, 'NOT_DELIVERY_ORDER');
+  }
+
+  const allowed = [ORDER_STATUSES.PREPARING, ORDER_STATUSES.OUT_FOR_DELIVERY];
+  if (!allowed.includes(order.status)) {
+    throw new AppError(`Driver can only be assigned when order is preparing or out for delivery`, 400, 'INVALID_ORDER_STATUS');
+  }
+
+  // Verify driver belongs to this branch
+  const driver = await User.findOne({ _id: driverId, role: ROLES.DRIVER, branchId });
+  if (!driver) throw new AppError('Driver not found in this branch', 404, 'DRIVER_NOT_FOUND');
+
+  order.driverId = driverId;
+
+  // Auto-advance: preparing → out_for_delivery when driver is first assigned
+  if (order.status === ORDER_STATUSES.PREPARING) {
+    order.status = ORDER_STATUSES.OUT_FOR_DELIVERY;
+    order.statusHistory.push({
+      status: ORDER_STATUSES.OUT_FOR_DELIVERY,
+      changedAt: new Date(),
+      changedBy: adminId,
+      note: `Driver ${driver.name} assigned`
+    });
+  }
+
+  await order.save();
+
+  await activityLogService.log({
+    actorId: adminId,
+    actorRole: 'admin',
+    action: LOG_ACTIONS.DRIVER_ASSIGNED_TO_ORDER,
+    branchId,
+    targetId: order._id,
+    targetType: 'Order',
+    detail: { orderRef: order.orderRef, driverId, driverName: driver.name }
+  });
+
+  return order;
+};
+
 module.exports = {
   createGuestOrder,
   createCustomerOrder,
+  calculateDeliveryFee,
   getById,
   getAll,
   getMyOrders,
@@ -892,5 +1006,6 @@ module.exports = {
   cancel,
   bulkApprove,
   bulkReject,
-  getPackingSlip
+  getPackingSlip,
+  assignDriver
 };

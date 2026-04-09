@@ -3,6 +3,8 @@ const router = express.Router();
 const branchController = require('../../controllers/admin/branch.controller');
 const { verifyToken } = require('../../middleware/auth.middleware');
 const { requireRole } = require('../../middleware/role.middleware');
+const { validate } = require('../../middleware/validate.middleware');
+const { createBranchValidator, updateBranchValidator } = require('../../validators/branch.validator');
 
 // All branch management routes are superadmin-only
 router.use(verifyToken, requireRole('superadmin'));
@@ -14,10 +16,10 @@ router.get('/', branchController.getAll);
 router.get('/:id', branchController.getOne);
 
 // POST /api/admin/branches
-router.post('/', branchController.create);
+router.post('/', createBranchValidator, validate, branchController.create);
 
 // PUT  /api/admin/branches/:id
-router.put('/:id', branchController.update);
+router.put('/:id', updateBranchValidator, validate, branchController.update);
 
 // DELETE /api/admin/branches/:id  (soft-deactivate)
 router.delete('/:id', branchController.deactivate);

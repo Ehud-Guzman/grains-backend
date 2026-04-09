@@ -4,6 +4,7 @@ const { ROLES } = require('../utils/constants');
 // Role hierarchy - higher index = more permissions
 const ROLE_HIERARCHY = [
   ROLES.CUSTOMER,
+  ROLES.DRIVER,
   ROLES.STAFF,
   ROLES.SUPERVISOR,
   ROLES.ADMIN,

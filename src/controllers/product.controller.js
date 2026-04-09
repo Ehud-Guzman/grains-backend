@@ -1,5 +1,4 @@
 const productService = require('../services/product.service');
-const Product = require('../models/Product');
 const { getDefaultBranchId } = require('../services/defaultBranch.service');
 const { success, paginated } = require('../utils/apiResponse');
 
@@ -101,16 +100,7 @@ const deleteProduct = async (req, res, next) => {
 
 // ── ADMIN: ADD IMAGES TO PRODUCT ──────────────────────────────────────────────
 const addImagesToProduct = async (productId, urls) => {
-  if (!productId || !Array.isArray(urls) || urls.length === 0) {
-    throw new Error('Invalid productId or image URLs');
-  }
-  const product = await Product.findByIdAndUpdate(
-    productId,
-    { $push: { imageURLs: { $each: urls } } },
-    { new: true }
-  );
-  if (!product) throw new Error('Product not found');
-  return product;
+  return productService.addImages(productId, urls);
 };
 
 module.exports = {

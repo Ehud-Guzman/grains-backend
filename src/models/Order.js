@@ -31,6 +31,10 @@ const orderSchema = new mongoose.Schema({
   orderItems: [orderItemSchema],
   subtotal: { type: Number, required: true },
   deliveryFee: { type: Number, default: 0 },
+  // VAT snapshot — captured at creation so receipt is always accurate, even if settings change later
+  vatEnabled: { type: Boolean, default: false },
+  vatRate:    { type: Number,  default: 0 },   // e.g. 16 (percent)
+  vatAmount:  { type: Number,  default: 0 },   // calculated amount in KES
   total: { type: Number, required: true },
   deliveryMethod: { type: String, enum: Object.values(DELIVERY_METHODS), required: true },
   deliveryAddress: { type: String, default: null },
@@ -56,6 +60,13 @@ const orderSchema = new mongoose.Schema({
   branchId: { type: mongoose.Schema.Types.ObjectId, ref: 'Branch', required: true },
   driverId: { type: mongoose.Schema.Types.ObjectId, default: null },
   deliveryTrackingUrl: { type: String, default: null },
+  // Customer's GPS coordinates at checkout — stored for driver reference & analytics
+  deliveryCoordinates: {
+    lat: { type: Number, default: null },
+    lng: { type: Number, default: null }
+  },
+  // Haversine distance from branch to customer (km), null for pickup or unknown location
+  deliveryDistanceKm: { type: Number, default: null },
   // SHA-256 hash of the one-time tracking token issued to the guest at order creation.
   // Only guest orders have this set. Never stored or returned in plaintext.
   trackingTokenHash: { type: String, default: null, select: false }

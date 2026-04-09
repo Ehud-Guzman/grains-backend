@@ -1,5 +1,6 @@
 const settingsService = require('../../services/settings.service');
 const { getDefaultBranch } = require('../../services/defaultBranch.service');
+const { calculateDeliveryFee } = require('../../services/order.service');
 const { success } = require('../../utils/apiResponse');
 const { AppError } = require('../../middleware/errorHandler.middleware');
 
@@ -70,4 +71,25 @@ const updateForBranch = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-module.exports = { getPublic, getAll, update, getForBranch, updateForBranch };
+// GET /api/delivery-fee?lat=X&lng=Y  (public — uses default branch settings)
+// Returns calculated fee, distance, and matched zone name for live checkout preview.
+const getDeliveryFee = async (req, res, next) => {
+  try {
+    const lat = parseFloat(req.query.lat);
+    const lng = parseFloat(req.query.lng);
+
+    if (isNaN(lat) || isNaN(lng)) {
+      return next(new AppError('lat and lng query parameters are required', 400, 'INVALID_COORDS'));
+    }
+
+    const defaultBranch = await getDefaultBranch();
+    if (!defaultBranch) return success(res, { fee: 0, distanceKm: null, zoneName: null });
+
+    const settings = await settingsService.getSettings(defaultBranch._id);
+    const result = calculateDeliveryFee(settings, 'delivery', { lat, lng });
+
+    return success(res, result);
+  } catch (err) { next(err); }
+};
+
+module.exports = { getPublic, getDeliveryFee, getAll, update, getForBranch, updateForBranch };

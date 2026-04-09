@@ -8,10 +8,10 @@ const { verifyToken } = require('../middleware/auth.middleware');
 const { validateSafaricomIP } = require('../utils/mpesaHelpers');
 const { publicLimiter, callbackLimiter } = require('../middleware/rateLimit.middleware');
 
-// POST /api/payments/mpesa/initiate — customer must be logged in
+// POST /api/payments/mpesa/initiate — open to guests and logged-in customers
 router.post(
   '/mpesa/initiate',
-  verifyToken,
+  publicLimiter,
   paymentController.initiate
 );
 

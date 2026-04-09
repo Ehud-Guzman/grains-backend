@@ -1,5 +1,5 @@
 const authService = require('../services/auth.service');
-const { success } = require('../utils/apiResponse');
+const { success, error } = require('../utils/apiResponse');
 
 const register = async (req, res, next) => {
   try {
@@ -26,7 +26,7 @@ const selectBranch = async (req, res, next) => {
   try {
     const { preAuthToken, branchId } = req.body;
     if (!preAuthToken || !branchId) {
-      return res.status(400).json({ success: false, error: 'MISSING_FIELDS', message: 'preAuthToken and branchId are required' });
+      return error(res, 'preAuthToken and branchId are required', 'MISSING_FIELDS');
     }
     const result = await authService.selectBranch(preAuthToken, branchId);
     return success(res, result, 'Branch selected');
@@ -49,7 +49,7 @@ const refresh = async (req, res, next) => {
   try {
     const { refreshToken } = req.body;
     if (!refreshToken) {
-      return res.status(400).json({ success: false, error: 'MISSING_TOKEN', message: 'Refresh token required' });
+      return error(res, 'Refresh token required', 'MISSING_TOKEN');
     }
     const result = await authService.refreshToken(refreshToken);
     return success(res, result, 'Token refreshed');
@@ -75,11 +75,7 @@ const changePassword = async (req, res, next) => {
   try {
     const { currentPassword, newPassword } = req.body;
     if (!currentPassword || !newPassword) {
-      return res.status(400).json({
-        success: false,
-        error: 'MISSING_FIELDS',
-        message: 'Current and new password are required'
-      });
+      return error(res, 'Current and new password are required', 'MISSING_FIELDS');
     }
     await authService.changePassword(req.user.id, currentPassword, newPassword);
     return success(res, null, 'Password changed successfully');

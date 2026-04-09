@@ -52,6 +52,17 @@ const getPublicSettings = async (branchId) => {
     allowMpesa:        s.allowMpesa,
     maintenanceMode:   s.maintenanceMode,
     maintenanceMessage: s.maintenanceMessage,
+    // Delivery pricing mode — needed so checkout can decide whether to request geolocation
+    deliveryPricingMode: s.deliveryPricingMode || 'flat',
+    // Expose whether branch has coordinates configured (not the coords themselves)
+    hasDeliveryZones: s.deliveryPricingMode === 'distance' &&
+      s.deliveryZones?.length > 0 &&
+      s.branchLat != null && s.branchLng != null,
+    // Tax & compliance — needed for receipt display and checkout VAT preview
+    vatEnabled: s.vatEnabled === true,
+    vatRate:    Number(s.vatRate)  || 16,
+    kraPin:     s.kraPin || '',
+    receiptFooterNote: s.receiptFooterNote || '',
   };
 };
 

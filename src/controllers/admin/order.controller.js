@@ -62,4 +62,12 @@ const getPackingSlip = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-module.exports = { getAll, getById, approve, reject, updateStatus, bulkApprove, bulkReject, getPackingSlip };
+const assignDriver = async (req, res, next) => {
+  try {
+    const { driverId } = req.body;
+    const order = await orderService.assignDriver(req.params.id, driverId, req.user.id, req.branchId);
+    return success(res, order, 'Driver assigned successfully');
+  } catch (err) { next(err); }
+};
+
+module.exports = { getAll, getById, approve, reject, updateStatus, bulkApprove, bulkReject, getPackingSlip, assignDriver };

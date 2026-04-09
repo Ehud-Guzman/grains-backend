@@ -11,6 +11,7 @@ const settingsSchema = new mongoose.Schema({
   shopName:     { type: String, default: 'Vittorios Grains & Cereals' },
   shopTagline:  { type: String, default: 'Quality grains, delivered fresh' },
   shopPhone:    { type: String, default: '+254 799 031 449' },
+  shopPhones:   { type: [String], default: [] },
   shopEmail:    { type: String, default: 'vittoriostrades@gmail.com' },
   shopHours:    { type: String, default: 'Mon – Sat: 7:00 AM – 7:00 PM' },
   shopLocation: { type: String, default: 'Bungoma, Kenya' },
@@ -31,9 +32,27 @@ const settingsSchema = new mongoose.Schema({
   orderAcceptanceStart:     { type: String,  default: '07:00' }, // HH:MM
   orderAcceptanceEnd:       { type: String,  default: '20:00' }, // HH:MM
 
-  // ── DELIVERY ZONES ────────────────────────────────────────────────────────
-  useDeliveryZones:  { type: Boolean, default: false },
-  deliveryZones:     { type: [{ name: String, fee: { type: Number, default: 0 }, _id: false }], default: [] },
+  // ── DELIVERY PRICING ─────────────────────────────────────────────────────────
+  // 'flat'     — single flat fee (deliveryFee field above)
+  // 'distance' — auto-calc fee from customer GPS coords + distance bands below
+  deliveryPricingMode: { type: String, enum: ['flat', 'distance'], default: 'flat' },
+
+  // Branch / shop GPS coordinates — origin point for Haversine distance calc
+  branchLat: { type: Number, default: null },
+  branchLng: { type: Number, default: null },
+
+  // Distance bands — only active when deliveryPricingMode === 'distance'
+  // minKm inclusive, maxKm exclusive; last band should use a large maxKm (e.g. 9999)
+  deliveryZones: {
+    type: [{
+      name:  { type: String, default: '' },
+      minKm: { type: Number, default: 0    },
+      maxKm: { type: Number, default: 9999 },
+      fee:   { type: Number, default: 0    },
+      _id: false
+    }],
+    default: []
+  },
 
   // ── CATALOG SETTINGS ──────────────────────────────────────────────────────
   autoHideOutOfStock:  { type: Boolean, default: false },
@@ -43,6 +62,11 @@ const settingsSchema = new mongoose.Schema({
   blockNewRegistrations:    { type: Boolean, default: false },
   requirePhoneVerification: { type: Boolean, default: false },
   requireEmailVerification: { type: Boolean, default: false },
+
+  // ── TAX & COMPLIANCE ──────────────────────────────────────────────────────
+  kraPin:     { type: String, default: '', trim: true },  // KRA PIN — printed on every receipt
+  vatEnabled: { type: Boolean, default: false },          // charge VAT on orders
+  vatRate:    { type: Number,  default: 16 },             // Kenya standard rate; stored as percent (e.g. 16 = 16%)
 
   // ── RECEIPT ───────────────────────────────────────────────────────────────
   receiptFooterNote: { type: String, default: '' },

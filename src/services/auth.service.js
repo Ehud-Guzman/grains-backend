@@ -109,13 +109,22 @@ const login = async ({ phone, password }, ip) => {
     lastLoginAt: new Date()
   });
 
-  // ── CUSTOMER: immediate tokens, no branch selection needed ────────────────
+  // ── CUSTOMER / DRIVER: immediate tokens, no branch selection needed ─────────
   if (!ADMIN_ROLES.includes(user.role)) {
-    const { accessToken, refreshToken } = generateTokens(user, null);
+    // Drivers are branch-scoped — embed their branchId so API middleware works
+    const branchId = user.role === ROLES.DRIVER ? (user.branchId || null) : null;
+    const { accessToken, refreshToken } = generateTokens(user, branchId);
     await activityLogService.log({ actorId: user._id, actorRole: user.role, action: 'CUSTOMER_LOGIN', ip });
     return {
       requiresBranchSelection: false,
-      user: { id: user._id, name: user.name, phone: user.phone, email: user.email, role: user.role, avatarURL: user.avatarURL || null },
+      user: {
+        id: user._id, name: user.name, phone: user.phone, email: user.email,
+        role: user.role, avatarURL: user.avatarURL || null,
+        ...(user.role === ROLES.DRIVER && {
+          vehicleInfo: user.vehicleInfo,
+          isAvailableForDelivery: user.isAvailableForDelivery
+        })
+      },
       accessToken,
       refreshToken
     };

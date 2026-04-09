@@ -1,11 +1,21 @@
 const Sentry = require('@sentry/node');
+const logger = require('../utils/logger');
 
 const errorHandler = (err, req, res, next) => {
-  // Log to Sentry in production
-  if (process.env.NODE_ENV === 'production') {
-    Sentry.captureException(err);
-  } else {
-    console.error(`[ERROR] ${err.message}`, err.stack);
+  const requestId = req.requestId || 'unknown';
+  const branchId  = req.branchId || req.user?.branchId || null;
+  const userId    = req.user?.id || null;
+
+  // Always log full stack server-side — never exposed to client
+  logger.error(err.message, { requestId, branchId, userId, err });
+
+  // Also send to Sentry in production
+  if (process.env.NODE_ENV === 'production' && process.env.SENTRY_DSN) {
+    Sentry.withScope(scope => {
+      scope.setTag('requestId', requestId);
+      scope.setTag('branchId', branchId);
+      Sentry.captureException(err);
+    });
   }
 
   // Mongoose validation error

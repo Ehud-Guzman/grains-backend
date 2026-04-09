@@ -50,6 +50,15 @@ router.patch(
   orderController.reject
 );
 
+// PATCH /api/admin/orders/:id/assign-driver
+router.patch(
+  '/:id/assign-driver',
+  requireBusinessRole('supervisor'),
+  [require('express-validator').body('driverId').notEmpty().withMessage('driverId is required')],
+  validate,
+  orderController.assignDriver
+);
+
 // POST /api/admin/orders/bulk-approve
 router.post(
   '/bulk-approve',

@@ -1,5 +1,6 @@
 const { exportProducts, importProducts, getTemplate } = require('../services/productImportExport.service');
 const { AppError } = require('../middleware/errorHandler.middleware');
+const { success } = require('../utils/apiResponse');
 
 // GET /api/admin/products/export
 const exportHandler = async (req, res, next) => {
@@ -50,13 +51,10 @@ const importHandler = async (req, res, next) => {
       dryRun,
     });
 
-    res.status(200).json({
-      success: true,
-      data: results,
-      message: dryRun
-        ? `Dry run complete: ${results.created} to create, ${results.updated} to update, ${results.skipped} skipped across ${results.importedToBranches.length} branch(es)`
-        : `Import complete: ${results.created} created, ${results.updated} updated, ${results.skipped} skipped across ${results.importedToBranches.length} branch(es)`
-    });
+    const message = dryRun
+      ? `Dry run complete: ${results.created} to create, ${results.updated} to update, ${results.skipped} skipped across ${results.importedToBranches.length} branch(es)`
+      : `Import complete: ${results.created} created, ${results.updated} updated, ${results.skipped} skipped across ${results.importedToBranches.length} branch(es)`;
+    return success(res, results, message);
   } catch (err) {
     next(err);
   }

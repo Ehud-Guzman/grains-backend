@@ -1,17 +1,13 @@
 // ── PAYMENT CONTROLLER ────────────────────────────────────────────────────────
 const paymentService = require('../services/payment.service');
-const { success } = require('../utils/apiResponse');
+const { success, error } = require('../utils/apiResponse');
 
 // POST /api/payments/mpesa/initiate — customer auth
 const initiate = async (req, res, next) => {
   try {
     const { orderId, phone } = req.body;
     if (!orderId || !phone) {
-      return res.status(400).json({
-        success: false,
-        error: 'MISSING_FIELDS',
-        message: 'orderId and phone are required'
-      });
+      return error(res, 'orderId and phone are required', 'MISSING_FIELDS');
     }
     const result = await paymentService.initiateStkPush(orderId, phone);
     return success(res, result, 'STK push sent to your phone');

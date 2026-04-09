@@ -51,6 +51,12 @@ const userSchema = new mongoose.Schema({
     enum: Object.values(ROLES).filter(r => r !== 'guest'),
     default: ROLES.CUSTOMER
   },
+  // Driver-specific fields (only populated for role === 'driver')
+  vehicleInfo: {
+    type: { type: String, default: null },   // e.g. 'Motorcycle', 'Pickup', 'Van'
+    plate: { type: String, default: null }   // e.g. 'KCA 123A'
+  },
+  isAvailableForDelivery: { type: Boolean, default: true },
   addresses: [addressSchema],
   notes: { type: String, default: null }, // internal admin notes
   isLocked: { type: Boolean, default: false },
