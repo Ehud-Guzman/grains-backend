@@ -269,7 +269,11 @@ const refreshToken = async (token) => {
 
   // 5. Issue new token pair — preserve branchId from old token
   const { accessToken, refreshToken: newRefreshToken } = generateTokens(user, decoded.branchId || null);
-  return { accessToken, refreshToken: newRefreshToken };
+  return {
+    accessToken,
+    refreshToken: newRefreshToken,
+    user: { id: user._id, name: user.name, phone: user.phone, email: user.email, role: user.role, avatarURL: user.avatarURL || null }
+  };
 };
 
 // ── LOGOUT ────────────────────────────────────────────────────────────────────
