@@ -40,6 +40,7 @@ const getPublicSettings = async (branchId) => {
     shopName:     s.shopName,
     shopTagline:  s.shopTagline,
     shopPhone:    s.shopPhone,
+    shopPhones:   s.shopPhones || [],
     shopEmail:    s.shopEmail,
     shopHours:    s.shopHours,
     shopLocation: s.shopLocation,
