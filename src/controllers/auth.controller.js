@@ -4,7 +4,8 @@ const { success, error } = require('../utils/apiResponse');
 const register = async (req, res, next) => {
   try {
     const { name, phone, email, password } = req.body;
-    const result = await authService.register({ name, phone, email, password });
+    const ip = req.ip || req.headers['x-forwarded-for'];
+    const result = await authService.register({ name, phone, email, password, ip });
     return success(res, result, 'Account created successfully', 201);
   } catch (err) {
     next(err);
@@ -28,7 +29,8 @@ const selectBranch = async (req, res, next) => {
     if (!preAuthToken || !branchId) {
       return error(res, 'preAuthToken and branchId are required', 'MISSING_FIELDS');
     }
-    const result = await authService.selectBranch(preAuthToken, branchId);
+    const ip = req.ip || req.headers['x-forwarded-for'];
+    const result = await authService.selectBranch(preAuthToken, branchId, ip);
     return success(res, result, 'Branch selected');
   } catch (err) {
     next(err);
@@ -51,7 +53,8 @@ const refresh = async (req, res, next) => {
     if (!refreshToken) {
       return error(res, 'Refresh token required', 'MISSING_TOKEN');
     }
-    const result = await authService.refreshToken(refreshToken);
+    const ip = req.ip || req.headers['x-forwarded-for'];
+    const result = await authService.refreshToken(refreshToken, ip);
     return success(res, result, 'Token refreshed');
   } catch (err) {
     next(err);

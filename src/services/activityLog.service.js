@@ -1,4 +1,5 @@
 const ActivityLog = require('../models/ActivityLog');
+const logger = require('../utils/logger');
 
 // Write an audit log entry - called at end of every mutating operation
 const log = async ({ actorId, actorRole, action, branchId = null, targetId = null, targetType = null, detail = {}, ip = null }) => {
@@ -14,6 +15,13 @@ const log = async ({ actorId, actorRole, action, branchId = null, targetId = nul
       ip,
       timestamp: new Date()
     });
+
+    // Echo to console so every audit event is visible in server logs
+    const parts = [`action=${action}`, `actor=${actorId}`, `role=${actorRole}`];
+    if (ip)         parts.push(`ip=${ip}`);
+    if (branchId)   parts.push(`branch=${branchId}`);
+    if (targetType && targetId) parts.push(`target=${targetType}:${targetId}`);
+    logger.info(`[AUDIT] ${parts.join(' | ')}`);
   } catch (err) {
     // Never let logging failures crash the main operation
     console.error(`[ActivityLog] Failed to write log: ${err.message}`);

@@ -32,13 +32,14 @@ const write = (level, message, meta = {}) => {
     }
     process.stdout.write(JSON.stringify(entry) + '\n');
   } else {
+    const ts = new Date().toISOString();
     const prefix = `[${level.toUpperCase()}]`;
     const context = Object.keys(safeMeta).length
       ? ' ' + JSON.stringify(safeMeta, (k, v) => (v instanceof Error ? v.message : v))
       : '';
     // eslint-disable-next-line no-console
     console[level === 'error' ? 'error' : level === 'warn' ? 'warn' : 'log'](
-      `${prefix} ${message}${context}`
+      `${ts} ${prefix} ${message}${context}`
     );
   }
 };

@@ -41,6 +41,11 @@ const settingsSchema = new mongoose.Schema({
   branchLat: { type: Number, default: null },
   branchLng: { type: Number, default: null },
 
+  // Max delivery radius — only active when deliveryPricingMode === 'distance'
+  // Orders from beyond this distance will have delivery disabled; pickup remains available.
+  // null = no limit (deliver anywhere)
+  maxDeliveryKm: { type: Number, default: null },
+
   // Distance bands — only active when deliveryPricingMode === 'distance'
   // minKm inclusive, maxKm exclusive; last band should use a large maxKm (e.g. 9999)
   deliveryZones: {

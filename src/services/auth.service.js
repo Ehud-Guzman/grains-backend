@@ -4,7 +4,7 @@ const User = require('../models/User');
 const Branch = require('../models/Branch');
 const TokenBlacklist = require('../models/TokenBlacklist');
 const { AppError } = require('../middleware/errorHandler.middleware');
-const { ROLES } = require('../utils/constants');
+const { ROLES, LOG_ACTIONS } = require('../utils/constants');
 const activityLogService = require('./activityLog.service');
 
 const MAX_FAILED_LOGINS = 5;
@@ -50,7 +50,7 @@ const normalizeOnboarding = (onboarding = {}) => ({
 });
 
 // ── REGISTER ──────────────────────────────────────────────────────────────────
-const register = async ({ name, phone, email, password }) => {
+const register = async ({ name, phone, email, password, ip = null }) => {
   const existing = await User.findOne({ phone });
   if (existing) {
     throw new AppError('An account with this phone number already exists', 409, 'PHONE_TAKEN');
@@ -74,6 +74,15 @@ const register = async ({ name, phone, email, password }) => {
   });
 
   const { accessToken, refreshToken } = generateTokens(user);
+
+  await activityLogService.log({
+    actorId: user._id,
+    actorRole: user.role,
+    action: LOG_ACTIONS.CUSTOMER_REGISTERED,
+    targetId: user._id,
+    targetType: 'User',
+    ip
+  }).catch(() => {});
 
   return {
     user: { id: user._id, name: user.name, phone: user.phone, email: user.email, role: user.role, avatarURL: user.avatarURL || null },
@@ -100,6 +109,13 @@ const login = async ({ phone, password }, ip) => {
 
   if (!isMatch) {
     await incrementFailedLogin(user._id);
+    await activityLogService.log({
+      actorId: user._id,
+      actorRole: user.role,
+      action: LOG_ACTIONS.FAILED_LOGIN,
+      ip,
+      detail: { phone: user.phone }
+    }).catch(() => {});
     throw new AppError('Invalid phone number or password', 401, 'INVALID_CREDENTIALS');
   }
 
@@ -173,7 +189,7 @@ const login = async ({ phone, password }, ip) => {
 };
 
 // ── SELECT BRANCH (step 2 for admin login) ────────────────────────────────────
-const selectBranch = async (preAuthToken, branchId) => {
+const selectBranch = async (preAuthToken, branchId, ip = null) => {
   let decoded;
   try {
     decoded = jwt.verify(preAuthToken, process.env.JWT_ACCESS_SECRET);
@@ -206,6 +222,15 @@ const selectBranch = async (preAuthToken, branchId) => {
 
   const { accessToken, refreshToken } = generateTokens(user, branch._id);
 
+  await activityLogService.log({
+    actorId: user._id,
+    actorRole: user.role,
+    action: LOG_ACTIONS.ADMIN_BRANCH_SELECTED,
+    branchId: branch._id,
+    ip,
+    detail: { branchName: branch.name }
+  }).catch(() => {});
+
   return {
     user: { id: user._id, name: user.name, phone: user.phone, email: user.email, role: user.role, avatarURL: user.avatarURL || null },
     branch: { id: branch._id, name: branch.name, slug: branch.slug, location: branch.location },
@@ -237,7 +262,7 @@ const switchBranch = async (userId, branchId) => {
 };
 
 // ── REFRESH ───────────────────────────────────────────────────────────────────
-const refreshToken = async (token) => {
+const refreshToken = async (token, ip = null) => {
   // 1. Check blacklist first — fast fail if already invalidated
   const blacklisted = await TokenBlacklist.findOne({ token });
   if (blacklisted) {
@@ -269,6 +294,15 @@ const refreshToken = async (token) => {
 
   // 5. Issue new token pair — preserve branchId from old token
   const { accessToken, refreshToken: newRefreshToken } = generateTokens(user, decoded.branchId || null);
+
+  await activityLogService.log({
+    actorId: user._id,
+    actorRole: user.role,
+    action: LOG_ACTIONS.TOKEN_REFRESHED,
+    branchId: decoded.branchId || null,
+    ip
+  }).catch(() => {});
+
   return {
     accessToken,
     refreshToken: newRefreshToken,
@@ -293,14 +327,11 @@ const logout = async (token, userId, role) => {
 
   // Log the logout event
   if (userId) {
-    const logAction = [ROLES.STAFF, ROLES.SUPERVISOR, ROLES.ADMIN, ROLES.SUPERADMIN].includes(role)
-      ? 'ADMIN_LOGOUT'
-      : 'CUSTOMER_LOGIN'; // customers don't have a CUSTOMER_LOGOUT constant yet — use existing
-
+    const logAction = ADMIN_ROLES.includes(role) ? LOG_ACTIONS.ADMIN_LOGOUT : LOG_ACTIONS.CUSTOMER_LOGOUT;
     await activityLogService.log({
       actorId: userId,
       actorRole: role,
-      action: 'ADMIN_LOGOUT' // covers all roles for now
+      action: logAction
     }).catch(() => {}); // non-blocking — logout should always succeed
   }
 
@@ -322,7 +353,22 @@ const incrementFailedLogin = async (userId) => {
 
 // ── LOCK ACCOUNT ──────────────────────────────────────────────────────────────
 const lockAccount = async (userId) => {
-  await User.findByIdAndUpdate(userId, { isLocked: true });
+  const user = await User.findByIdAndUpdate(userId, { isLocked: true }, { new: true });
+  if (user) {
+    const action = ADMIN_ROLES.includes(user.role)
+      ? LOG_ACTIONS.ADMIN_ACCOUNT_LOCKED
+      : user.role === ROLES.DRIVER
+        ? LOG_ACTIONS.DRIVER_ACCOUNT_LOCKED
+        : LOG_ACTIONS.CUSTOMER_ACCOUNT_LOCKED;
+    await activityLogService.log({
+      actorId: userId,
+      actorRole: user.role,
+      action,
+      targetId: userId,
+      targetType: 'User',
+      detail: { reason: 'Too many failed login attempts' }
+    }).catch(() => {});
+  }
 };
 
 // ── UNLOCK ACCOUNT ────────────────────────────────────────────────────────────

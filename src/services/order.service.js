@@ -228,15 +228,16 @@ const assertOrderMatchesSettings = ({ settings, deliveryMethod, paymentMethod, s
 
 /**
  * Calculate the delivery fee for an order.
- * - deliveryMethod !== 'delivery'  → 0
- * - mode 'flat'                    → settings.deliveryFee
+ * - deliveryMethod !== 'delivery'  → fee 0, deliveryAvailable: true (N/A)
+ * - mode 'flat'                    → settings.deliveryFee, deliveryAvailable: true
  * - mode 'distance'                → Haversine distance → closest band → band fee
  *   If branch has no coordinates or customer skipped geolocation → fall back to flat fee.
+ *   If distance > settings.maxDeliveryKm → deliveryAvailable: false (pickup only)
  *
- * Returns { fee: Number, distanceKm: Number|null, zoneName: String|null }
+ * Returns { fee, distanceKm, zoneName, deliveryAvailable }
  */
 const calculateDeliveryFee = (settings, deliveryMethod, customerCoords) => {
-  if (deliveryMethod !== 'delivery') return { fee: 0, distanceKm: null, zoneName: null };
+  if (deliveryMethod !== 'delivery') return { fee: 0, distanceKm: null, zoneName: null, deliveryAvailable: true };
 
   const flatFee = Number(settings.deliveryFee) || 0;
 
@@ -251,18 +252,36 @@ const calculateDeliveryFee = (settings, deliveryMethod, customerCoords) => {
       customerCoords.lat, customerCoords.lng
     );
 
-    const band = settings.deliveryZones.find(
-      z => distanceKm >= (z.minKm ?? 0) && distanceKm < (z.maxKm ?? 9999)
-    );
+    // Block delivery beyond max radius if configured
+    if (settings.maxDeliveryKm != null && distanceKm > settings.maxDeliveryKm) {
+      return {
+        fee:              0,
+        distanceKm:       Math.round(distanceKm * 10) / 10,
+        zoneName:         null,
+        deliveryAvailable: false,
+      };
+    }
+
+    // Sort ascending so cheaper bands are checked first.
+    // Lower bound: inclusive only for the first band (minKm === 0), exclusive otherwise.
+    // Upper bound: always inclusive — "up to X km" includes X km.
+    // This means each boundary point belongs to exactly ONE band (the cheaper one).
+    const sortedZones = [...settings.deliveryZones].sort((a, b) => (a.minKm ?? 0) - (b.minKm ?? 0));
+    const band = sortedZones.find(z => {
+      const min = z.minKm ?? 0;
+      const max = z.maxKm ?? 9999;
+      return (min === 0 ? distanceKm >= 0 : distanceKm > min) && distanceKm <= max;
+    });
 
     return {
-      fee:        band ? band.fee : flatFee,
-      distanceKm: Math.round(distanceKm * 10) / 10,
-      zoneName:   band ? band.name : null,
+      fee:              band ? band.fee : flatFee,
+      distanceKm:       Math.round(distanceKm * 10) / 10,
+      zoneName:         band ? band.name : null,
+      deliveryAvailable: true,
     };
   }
 
-  return { fee: flatFee, distanceKm: null, zoneName: null };
+  return { fee: flatFee, distanceKm: null, zoneName: null, deliveryAvailable: true };
 };
 
 const autoCancelExpiredPendingOrders = async (branchId) => {
@@ -347,9 +366,15 @@ const createGuestOrder = async (orderData, branchId) => {
     isGuestOrder: true
   });
 
-  const { fee: deliveryFee, distanceKm, zoneName } = calculateDeliveryFee(
+  const { fee: deliveryFee, distanceKm, zoneName, deliveryAvailable } = calculateDeliveryFee(
     settings, orderData.deliveryMethod, orderData.deliveryCoordinates
   );
+  if (!deliveryAvailable) {
+    throw new AppError(
+      'Delivery is not available to your location. Please choose pickup instead.',
+      400, 'DELIVERY_OUT_OF_RANGE'
+    );
+  }
   const vatEnabled = settings.vatEnabled === true;
   const vatRate    = vatEnabled ? (Number(settings.vatRate) || 0) : 0;
   const vatAmount  = vatEnabled ? Math.round(subtotal * vatRate) / 100 : 0;
@@ -450,9 +475,15 @@ const createCustomerOrder = async (orderData, userId, branchId) => {
     subtotal,
     isGuestOrder: false
   });
-  const { fee: deliveryFee, distanceKm, zoneName } = calculateDeliveryFee(
+  const { fee: deliveryFee, distanceKm, zoneName, deliveryAvailable } = calculateDeliveryFee(
     settings, orderData.deliveryMethod, orderData.deliveryCoordinates
   );
+  if (!deliveryAvailable) {
+    throw new AppError(
+      'Delivery is not available to your location. Please choose pickup instead.',
+      400, 'DELIVERY_OUT_OF_RANGE'
+    );
+  }
   const vatEnabled = settings.vatEnabled === true;
   const vatRate    = vatEnabled ? (Number(settings.vatRate) || 0) : 0;
   const vatAmount  = vatEnabled ? Math.round(subtotal * vatRate) / 100 : 0;
