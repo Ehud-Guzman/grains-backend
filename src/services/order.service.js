@@ -6,6 +6,7 @@ const Guest = require('../models/Guest');
 const User = require('../models/User');
 const { AppError } = require('../middleware/errorHandler.middleware');
 const activityLogService = require('./activityLog.service');
+const notificationService = require('./notification.service');
 const stockService = require('./stock.service');
 const settingsService = require('./settings.service');
 const generateOrderRef = require('../utils/generateOrderRef');
@@ -444,6 +445,10 @@ const createGuestOrder = async (orderData, branchId) => {
       detail: { orderRef, total: order.total, itemCount: items.length, stockReserved: true }
     });
 
+    notificationService.dispatchOrderPlaced(order, branchId).catch(err =>
+      console.error('[notification] guest order placed:', err.message)
+    );
+
     // Attach plain token to returned object — only time it is ever available in plaintext
     order = order.toObject();
     order.trackingToken = trackingToken;
@@ -537,6 +542,10 @@ const createCustomerOrder = async (orderData, userId, branchId) => {
       targetType: 'Order',
       detail: { orderRef, total: order.total, itemCount: items.length, stockReserved: true }
     });
+
+    notificationService.dispatchOrderPlaced(order, branchId).catch(err =>
+      console.error('[notification] customer order placed:', err.message)
+    );
 
     return order;
   } catch (err) {
@@ -737,6 +746,10 @@ const approve = async (orderId, adminId, branchId) => {
       detail: { orderRef: order.orderRef }
     });
 
+    notificationService.dispatchOrderApproved(order, order.branchId).catch(err =>
+      console.error('[notification] order approved:', err.message)
+    );
+
     return order;
 
   } catch (err) {
@@ -789,6 +802,10 @@ const reject = async (orderId, adminId, reason, branchId) => {
       targetType: 'Order',
       detail: { orderRef: order.orderRef, reason, stockReleased: true }
     });
+
+    notificationService.dispatchOrderRejected(order, order.branchId).catch(err =>
+      console.error('[notification] order rejected:', err.message)
+    );
 
     return order;
   } catch (err) {
@@ -843,6 +860,12 @@ const updateStatus = async (orderId, newStatus, adminId, note = null, branchId) 
         stockReleased: newStatus === ORDER_STATUSES.CANCELLED
       }
     });
+
+    if (newStatus === ORDER_STATUSES.OUT_FOR_DELIVERY) {
+      notificationService.dispatchOrderDispatched(order, order.branchId).catch(err =>
+        console.error('[notification] order dispatched:', err.message)
+      );
+    }
 
     return order;
   } catch (err) {
@@ -1019,6 +1042,13 @@ const assignDriver = async (orderId, driverId, adminId, branchId) => {
     targetType: 'Order',
     detail: { orderRef: order.orderRef, driverId, driverName: driver.name }
   });
+
+  // If the driver assignment auto-advanced the order to out_for_delivery, notify customer
+  if (order.status === ORDER_STATUSES.OUT_FOR_DELIVERY) {
+    notificationService.dispatchOrderDispatched(order, branchId).catch(err =>
+      console.error('[notification] driver assigned dispatch:', err.message)
+    );
+  }
 
   return order;
 };

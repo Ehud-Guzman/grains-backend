@@ -1,3 +1,4 @@
+const nodemailer = require('nodemailer');
 const settingsService = require('../../services/settings.service');
 const { getDefaultBranch } = require('../../services/defaultBranch.service');
 const { calculateDeliveryFee } = require('../../services/order.service');
@@ -92,4 +93,37 @@ const getDeliveryFee = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-module.exports = { getPublic, getDeliveryFee, getAll, update, getForBranch, updateForBranch };
+// POST /api/admin/settings/test-email
+// Sends a test email directly using the current .env config — bypasses all settings toggles.
+// Use this to verify Brevo credentials work before testing the full order flow.
+const testEmail = async (req, res, next) => {
+  try {
+    if (!process.env.BREVO_SMTP_USER || !process.env.BREVO_SMTP_KEY) {
+      throw new AppError('BREVO_SMTP_USER or BREVO_SMTP_KEY not set in .env', 500, 'EMAIL_NOT_CONFIGURED');
+    }
+
+    const transporter = nodemailer.createTransport({
+      host: 'smtp-relay.brevo.com',
+      port: 587,
+      secure: false,
+      auth: {
+        user: process.env.BREVO_SMTP_USER,
+        pass: process.env.BREVO_SMTP_KEY,
+      },
+    });
+
+    const to = req.body.to || req.user.email;
+    if (!to) throw new AppError('Provide a "to" email in the request body', 400, 'EMAIL_REQUIRED');
+
+    await transporter.sendMail({
+      from: `"${process.env.EMAIL_FROM_NAME || 'Vittorios Grains'}" <${process.env.EMAIL_FROM || process.env.BREVO_SMTP_USER}>`,
+      to,
+      subject: 'Test Email — Grains System',
+      html: '<p>This is a test email from your Grains System. If you can read this, Brevo is configured correctly.</p>',
+    });
+
+    return success(res, { to }, 'Test email sent successfully');
+  } catch (err) { next(err); }
+};
+
+module.exports = { getPublic, getDeliveryFee, getAll, update, getForBranch, updateForBranch, testEmail };

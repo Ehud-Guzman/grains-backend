@@ -86,6 +86,7 @@ const settingsSchema = new mongoose.Schema({
   notifyCustomerOnRejection:{ type: Boolean, default: true },
   notifyCustomerOnDelivery: { type: Boolean, default: true },
   smsEnabled:               { type: Boolean, default: false },
+  emailEnabled:             { type: Boolean, default: false },
 
   // ── SYSTEM SETTINGS (superadmin only) ────────────────────────────────────
   maintenanceMode:    { type: Boolean, default: false },

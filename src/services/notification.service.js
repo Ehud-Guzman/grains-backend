@@ -1,3 +1,290 @@
-// TODO: Phase 2 - implement this service
-// Follow layered architecture: all DB queries live here, call activityLog.service.js after every mutation
-module.exports = {};
+const nodemailer = require('nodemailer');
+const AfricasTalking = require('africastalking');
+const settingsService = require('./settings.service');
+const User = require('../models/User');
+const Guest = require('../models/Guest');
+
+// ── INITIALISE PROVIDERS ──────────────────────────────────────────────────────
+
+// Brevo SMTP transporter — created once, reused for all emails
+let emailTransporter = null;
+if (process.env.BREVO_SMTP_USER && process.env.BREVO_SMTP_KEY) {
+  emailTransporter = nodemailer.createTransport({
+    host: 'smtp-relay.brevo.com',
+    port: 587,
+    secure: false,
+    auth: {
+      user: process.env.BREVO_SMTP_USER,
+      pass: process.env.BREVO_SMTP_KEY,
+    },
+  });
+}
+
+let atSMS = null;
+if (process.env.AT_API_KEY && process.env.AT_USERNAME) {
+  const at = AfricasTalking({
+    apiKey: process.env.AT_API_KEY,
+    username: process.env.AT_USERNAME,
+  });
+  atSMS = at.SMS;
+}
+
+// ── LOW-LEVEL SENDERS ─────────────────────────────────────────────────────────
+
+// Normalise Kenyan phone numbers to E.164 format required by Africa's Talking
+const normalisePhone = (phone) => {
+  if (!phone) return '';
+  const cleaned = phone.replace(/[\s\-()]/g, '');
+  if (cleaned.startsWith('+')) return cleaned;
+  if (cleaned.startsWith('0')) return '+254' + cleaned.slice(1);
+  if (cleaned.startsWith('254')) return '+' + cleaned;
+  return cleaned;
+};
+
+const sendSMS = async (to, message) => {
+  if (!atSMS) {
+    console.warn('[SMS] Africa\'s Talking not configured — check AT_USERNAME and AT_API_KEY in .env');
+    return;
+  }
+  const phone = normalisePhone(to);
+  if (!phone) return;
+  const opts = { to: [phone], message };
+  if (process.env.AT_SENDER_ID) opts.from = process.env.AT_SENDER_ID;
+  await atSMS.send(opts);
+};
+
+const sendEmail = async ({ to, subject, html }) => {
+  if (!emailTransporter) {
+    console.warn('[Email] Brevo not configured — check BREVO_SMTP_USER and BREVO_SMTP_KEY in .env');
+    return;
+  }
+  if (!to) return;
+  await emailTransporter.sendMail({
+    from: `"${process.env.EMAIL_FROM_NAME || 'Vittorios Grains & Cereals'}" <${process.env.EMAIL_FROM || 'orders@grainscereals.co.ke'}>`,
+    to,
+    subject,
+    html,
+  });
+};
+
+// ── CONTACT RESOLVER ──────────────────────────────────────────────────────────
+
+// Returns { name, phone, email } for the customer on the order (guest or registered).
+const getOrderContact = async (order) => {
+  if (order.userId) {
+    const user = await User.findById(order.userId, 'name phone email').lean();
+    if (!user) return null;
+    return { name: user.name, phone: user.phone, email: user.email || null };
+  }
+  if (order.guestId) {
+    const guest = await Guest.findById(order.guestId, 'name phone').lean();
+    if (!guest) return null;
+    return { name: guest.name, phone: guest.phone, email: null };
+  }
+  return null;
+};
+
+// ── EMAIL TEMPLATE ────────────────────────────────────────────────────────────
+
+const emailShell = (shopName, shopLocation, body) => `
+<!DOCTYPE html><html>
+<head><meta charset="utf-8"><style>
+  body{font-family:Arial,sans-serif;color:#333;background:#f4f4f4;margin:0;padding:0}
+  .wrap{max-width:560px;margin:32px auto;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.08)}
+  .hd{background:#1a5c38;color:#fff;padding:22px 32px}
+  .hd h1{margin:0;font-size:19px;font-weight:700}
+  .bd{padding:28px 32px;line-height:1.6}
+  .ft{background:#f0f0f0;padding:14px 32px;font-size:12px;color:#888}
+  .ref{font-weight:700;color:#1a5c38}
+  table.items{width:100%;border-collapse:collapse;margin:14px 0}
+  table.items th{text-align:left;font-size:11px;color:#888;border-bottom:1px solid #eee;padding:5px 0}
+  table.items td{padding:6px 0;font-size:13px;border-bottom:1px solid #f5f5f5}
+  .total-row{font-weight:700;font-size:15px;margin-top:14px}
+  .badge{display:inline-block;padding:3px 11px;border-radius:20px;font-size:12px;font-weight:700}
+  .green{background:#d1fae5;color:#065f46}
+  .red{background:#fee2e2;color:#991b1b}
+  .blue{background:#dbeafe;color:#1e40af}
+</style></head>
+<body>
+<div class="wrap">
+  <div class="hd"><h1>${shopName}</h1></div>
+  <div class="bd">${body}</div>
+  <div class="ft">${shopName} &middot; ${shopLocation}</div>
+</div>
+</body></html>
+`;
+
+const itemsTable = (orderItems = []) => {
+  if (!orderItems.length) return '';
+  const rows = orderItems.map(i =>
+    `<tr>
+      <td>${i.productName} &mdash; ${i.variety} (${i.packaging})</td>
+      <td style="text-align:center">${i.quantity}</td>
+      <td style="text-align:right">KES ${(i.unitPrice * i.quantity).toLocaleString()}</td>
+    </tr>`
+  ).join('');
+  return `
+    <table class="items">
+      <tr><th>Item</th><th style="text-align:center">Qty</th><th style="text-align:right">Price</th></tr>
+      ${rows}
+    </table>
+  `;
+};
+
+// ── EVENT DISPATCHERS ─────────────────────────────────────────────────────────
+
+// 1. Order placed — confirmation to customer
+const dispatchOrderPlaced = async (order, branchId) => {
+  try {
+    const [settings, contact] = await Promise.all([
+      settingsService.getSettings(branchId),
+      getOrderContact(order),
+    ]);
+    if (!contact) return;
+
+    const shop = settings.shopName || 'Vittorios Grains & Cereals';
+    const loc  = settings.shopLocation || 'Kenya';
+    const ref  = order.orderRef;
+    const total = `KES ${Number(order.total || 0).toLocaleString()}`;
+
+    if (settings.smsEnabled && contact.phone) {
+      await sendSMS(contact.phone,
+        `Hi ${contact.name}, your order ${ref} (${total}) has been received! We will confirm it shortly. – ${shop}`
+      );
+    }
+
+    if (settings.emailEnabled && contact.email) {
+      await sendEmail({
+        to: contact.email,
+        subject: `Order Received – ${ref}`,
+        html: emailShell(shop, loc, `
+          <p>Hi <strong>${contact.name}</strong>,</p>
+          <p>We have received your order <span class="ref">${ref}</span> and it is pending confirmation.</p>
+          ${itemsTable(order.orderItems)}
+          <p class="total-row">Total: ${total}</p>
+          <p>We will notify you as soon as it is confirmed. Thank you for shopping with us!</p>
+        `),
+      });
+    }
+  } catch (err) {
+    console.error('[notification] dispatchOrderPlaced:', err.message);
+  }
+};
+
+// 2. Order approved
+const dispatchOrderApproved = async (order, branchId) => {
+  try {
+    const [settings, contact] = await Promise.all([
+      settingsService.getSettings(branchId),
+      getOrderContact(order),
+    ]);
+    if (!contact || !settings.notifyCustomerOnApproval) return;
+
+    const shop  = settings.shopName || 'Vittorios Grains & Cereals';
+    const loc   = settings.shopLocation || 'Kenya';
+    const ref   = order.orderRef;
+    const total = `KES ${Number(order.total || 0).toLocaleString()}`;
+
+    if (settings.smsEnabled && contact.phone) {
+      await sendSMS(contact.phone,
+        `Hi ${contact.name}, your order ${ref} (${total}) has been CONFIRMED! We are preparing it now. – ${shop}`
+      );
+    }
+
+    if (settings.emailEnabled && contact.email) {
+      await sendEmail({
+        to: contact.email,
+        subject: `Order Confirmed – ${ref}`,
+        html: emailShell(shop, loc, `
+          <p>Hi <strong>${contact.name}</strong>,</p>
+          <p>Your order <span class="ref">${ref}</span> has been <span class="badge green">Confirmed</span>.</p>
+          ${itemsTable(order.orderItems)}
+          <p class="total-row">Total: ${total}</p>
+          <p>We are now preparing your order and will notify you when it is on its way.</p>
+        `),
+      });
+    }
+  } catch (err) {
+    console.error('[notification] dispatchOrderApproved:', err.message);
+  }
+};
+
+// 3. Order rejected
+const dispatchOrderRejected = async (order, branchId) => {
+  try {
+    const [settings, contact] = await Promise.all([
+      settingsService.getSettings(branchId),
+      getOrderContact(order),
+    ]);
+    if (!contact || !settings.notifyCustomerOnRejection) return;
+
+    const shop   = settings.shopName || 'Vittorios Grains & Cereals';
+    const loc    = settings.shopLocation || 'Kenya';
+    const ref    = order.orderRef;
+    const reason = order.rejectionReason || 'Please contact us for more information.';
+    const phone  = settings.shopPhone || '';
+
+    if (settings.smsEnabled && contact.phone) {
+      await sendSMS(contact.phone,
+        `Hi ${contact.name}, your order ${ref} was not approved. Reason: ${reason}. Contact us on ${phone} for assistance. – ${shop}`
+      );
+    }
+
+    if (settings.emailEnabled && contact.email) {
+      await sendEmail({
+        to: contact.email,
+        subject: `Order Update – ${ref}`,
+        html: emailShell(shop, loc, `
+          <p>Hi <strong>${contact.name}</strong>,</p>
+          <p>We regret to inform you that your order <span class="ref">${ref}</span> has been <span class="badge red">Declined</span>.</p>
+          <p><strong>Reason:</strong> ${reason}</p>
+          ${phone ? `<p>If you have questions, please contact us on <strong>${phone}</strong>.</p>` : ''}
+        `),
+      });
+    }
+  } catch (err) {
+    console.error('[notification] dispatchOrderRejected:', err.message);
+  }
+};
+
+// 4. Order out for delivery
+const dispatchOrderDispatched = async (order, branchId) => {
+  try {
+    const [settings, contact] = await Promise.all([
+      settingsService.getSettings(branchId),
+      getOrderContact(order),
+    ]);
+    if (!contact || !settings.notifyCustomerOnDelivery) return;
+
+    const shop = settings.shopName || 'Vittorios Grains & Cereals';
+    const loc  = settings.shopLocation || 'Kenya';
+    const ref  = order.orderRef;
+
+    if (settings.smsEnabled && contact.phone) {
+      await sendSMS(contact.phone,
+        `Hi ${contact.name}, your order ${ref} is OUT FOR DELIVERY! Please be available to receive it. – ${shop}`
+      );
+    }
+
+    if (settings.emailEnabled && contact.email) {
+      await sendEmail({
+        to: contact.email,
+        subject: `Your Order is On Its Way – ${ref}`,
+        html: emailShell(shop, loc, `
+          <p>Hi <strong>${contact.name}</strong>,</p>
+          <p>Your order <span class="ref">${ref}</span> is now <span class="badge blue">Out for Delivery</span>!</p>
+          <p>Please be available to receive your order. Thank you for choosing ${shop}!</p>
+        `),
+      });
+    }
+  } catch (err) {
+    console.error('[notification] dispatchOrderDispatched:', err.message);
+  }
+};
+
+module.exports = {
+  dispatchOrderPlaced,
+  dispatchOrderApproved,
+  dispatchOrderRejected,
+  dispatchOrderDispatched,
+};

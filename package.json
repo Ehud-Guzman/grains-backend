@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@sentry/node": "^7.81.1",
+    "africastalking": "^0.7.9",
     "axios": "^1.13.6",
     "bcryptjs": "^2.4.3",
     "cloudinary": "^1.41.3",
@@ -29,6 +30,7 @@
     "morgan": "^1.10.0",
     "multer": "^2.1.1",
     "multer-storage-cloudinary": "^4.0.0",
+    "nodemailer": "^8.0.5",
     "xlsx": "^0.18.5",
     "xss-clean": "^0.1.4"
   },

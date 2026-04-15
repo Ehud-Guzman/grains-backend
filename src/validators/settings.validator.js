@@ -68,6 +68,7 @@ const updateSettingsValidator = [
   body('notifyCustomerOnRejection').optional().isBoolean().withMessage('notifyCustomerOnRejection must be a boolean'),
   body('notifyCustomerOnDelivery').optional().isBoolean().withMessage('notifyCustomerOnDelivery must be a boolean'),
   body('smsEnabled').optional().isBoolean().withMessage('smsEnabled must be a boolean'),
+  body('emailEnabled').optional().isBoolean().withMessage('emailEnabled must be a boolean'),
 
   // Superadmin-only (service strips these for non-superadmins, but still validate shape)
   body('maintenanceMode').optional().isBoolean().withMessage('maintenanceMode must be a boolean'),
