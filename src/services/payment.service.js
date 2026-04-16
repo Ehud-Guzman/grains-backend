@@ -6,7 +6,7 @@ const axios = require('axios');
 const Payment = require('../models/Payment');
 const Order   = require('../models/Order');
 const { AppError } = require('../middleware/errorHandler.middleware');
-const { PAYMENT_STATUSES, PAYMENT_METHODS, LOG_ACTIONS } = require('../utils/constants');
+const { PAYMENT_STATUSES, PAYMENT_METHODS, LOG_ACTIONS, ROLES } = require('../utils/constants');
 const activityLogService = require('./activityLog.service');
 const { getDarajaToken, getUrls } = require('../config/mpesa.config');
 const {
@@ -23,6 +23,19 @@ const initiateStkPush = async (orderId, phone) => {
 
   if (order.paymentStatus === PAYMENT_STATUSES.PAID) {
     throw new AppError('This order has already been paid', 400, 'ALREADY_PAID');
+  }
+
+  // Block STK push spam — if a pending payment already exists for this order, reject.
+  // The frontend should poll /status instead of re-initiating.
+  if (order.paymentId) {
+    const existing = await Payment.findById(order.paymentId).select('status');
+    if (existing && existing.status === PAYMENT_STATUSES.PENDING) {
+      throw new AppError(
+        'A payment is already in progress for this order. Please wait for it to complete.',
+        400,
+        'PAYMENT_IN_PROGRESS'
+      );
+    }
   }
 
   // Always derive amount from the order — never trust client-supplied values
@@ -204,27 +217,70 @@ const handleCallback = async (callbackData) => {
 
 // ── CHECK PAYMENT STATUS ──────────────────────────────────────────────────────
 // Used by frontend polling every 5 seconds after STK push
-const checkPaymentStatus = async (orderId) => {
-  const order = await Order.findById(orderId).select('paymentStatus paymentId orderRef total');
+const ADMIN_ROLES = [ROLES.STAFF, ROLES.SUPERVISOR, ROLES.ADMIN, ROLES.SUPERADMIN];
+
+const checkPaymentStatus = async (orderId, requestingUser) => {
+  const order = await Order.findById(orderId).select('paymentStatus paymentId orderRef total userId');
   if (!order) throw new AppError('Order not found', 404, 'ORDER_NOT_FOUND');
+
+  // Ownership check — only the order owner or admin-tier roles may poll payment status.
+  // Return 404 (not 403) to avoid leaking whether the order ID exists at all.
+  if (!ADMIN_ROLES.includes(requestingUser.role)) {
+    if (!order.userId || order.userId.toString() !== requestingUser.id.toString()) {
+      throw new AppError('Order not found', 404, 'ORDER_NOT_FOUND');
+    }
+  }
 
   const payment = order.paymentId
     ? await Payment.findById(order.paymentId).select('status mpesaTransactionId mpesaPhone amount')
     : null;
 
   return {
-    orderId:           order._id,
-    orderRef:          order.orderRef,
-    paymentStatus:     order.paymentStatus,
-    total:             order.total,
+    orderId:            order._id,
+    orderRef:           order.orderRef,
+    paymentStatus:      order.paymentStatus,
+    total:              order.total,
     mpesaTransactionId: payment?.mpesaTransactionId || null,
-    mpesaPhone:        payment?.mpesaPhone || null
+    mpesaPhone:         payment?.mpesaPhone || null
   };
 };
 
 // ── MANUAL PAYMENT CONFIRMATION ───────────────────────────────────────────────
-// Admin fallback when M-Pesa callback was lost
+// Admin fallback when M-Pesa callback was lost.
+// Requires a real M-Pesa receipt number — format validated and uniqueness enforced.
+const MPESA_RECEIPT_REGEX = /^[A-Z0-9]{10}$/;
+
 const manualConfirmPayment = async (orderId, adminId, transactionRef) => {
+  // Require a non-empty transaction reference
+  if (!transactionRef || typeof transactionRef !== 'string' || !transactionRef.trim()) {
+    throw new AppError(
+      'M-Pesa transaction reference is required for manual confirmation',
+      400,
+      'TRANSACTION_REF_REQUIRED'
+    );
+  }
+
+  const ref = transactionRef.trim().toUpperCase();
+
+  // Validate M-Pesa receipt format: exactly 10 uppercase alphanumeric characters (e.g. QDK14KSHD7)
+  if (!MPESA_RECEIPT_REGEX.test(ref)) {
+    throw new AppError(
+      'Invalid M-Pesa transaction reference. Expected 10 uppercase alphanumeric characters (e.g. QDK14KSHD7)',
+      400,
+      'INVALID_TRANSACTION_REF'
+    );
+  }
+
+  // Prevent reuse — a receipt number must map to exactly one order
+  const duplicate = await Payment.findOne({ mpesaTransactionId: ref });
+  if (duplicate) {
+    throw new AppError(
+      'This M-Pesa transaction reference has already been used on another payment',
+      409,
+      'DUPLICATE_TRANSACTION_REF'
+    );
+  }
+
   const order = await Order.findById(orderId);
   if (!order) throw new AppError('Order not found', 404, 'ORDER_NOT_FOUND');
 
@@ -239,10 +295,10 @@ const manualConfirmPayment = async (orderId, adminId, transactionRef) => {
 
   if (payment) {
     await Payment.findByIdAndUpdate(payment._id, {
-      status:            PAYMENT_STATUSES.PAID,
-      mpesaTransactionId: transactionRef || null,
-      confirmedBy:       adminId,
-      paidAt:            new Date()
+      status:             PAYMENT_STATUSES.PAID,
+      mpesaTransactionId: ref,
+      confirmedBy:        adminId,
+      paidAt:             new Date()
     });
   } else {
     payment = await Payment.create({
@@ -251,7 +307,7 @@ const manualConfirmPayment = async (orderId, adminId, transactionRef) => {
       amount:             order.total,
       currency:           'KES',
       status:             PAYMENT_STATUSES.PAID,
-      mpesaTransactionId: transactionRef || null,
+      mpesaTransactionId: ref,
       confirmedBy:        adminId,
       paidAt:             new Date()
     });
@@ -268,7 +324,7 @@ const manualConfirmPayment = async (orderId, adminId, transactionRef) => {
     action:     LOG_ACTIONS.PAYMENT_MANUALLY_CONFIRMED,
     targetId:   payment._id,
     targetType: 'Payment',
-    detail:     { orderId, transactionRef }
+    detail:     { orderId, transactionRef: ref }
   });
 
   return payment;

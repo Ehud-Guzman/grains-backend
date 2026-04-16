@@ -6,16 +6,14 @@ const Guest = require('../models/Guest');
 
 // ── INITIALISE PROVIDERS ──────────────────────────────────────────────────────
 
-// Brevo SMTP transporter — created once, reused for all emails
+// Gmail SMTP transporter — created once, reused for all emails
 let emailTransporter = null;
-if (process.env.BREVO_SMTP_USER && process.env.BREVO_SMTP_KEY) {
+if (process.env.GMAIL_USER && process.env.GMAIL_APP_PASSWORD) {
   emailTransporter = nodemailer.createTransport({
-    host: 'smtp-relay.brevo.com',
-    port: 587,
-    secure: false,
+    service: 'gmail',
     auth: {
-      user: process.env.BREVO_SMTP_USER,
-      pass: process.env.BREVO_SMTP_KEY,
+      user: process.env.GMAIL_USER,
+      pass: process.env.GMAIL_APP_PASSWORD,
     },
   });
 }
@@ -55,7 +53,7 @@ const sendSMS = async (to, message) => {
 
 const sendEmail = async ({ to, subject, html }) => {
   if (!emailTransporter) {
-    console.warn('[Email] Brevo not configured — check BREVO_SMTP_USER and BREVO_SMTP_KEY in .env');
+    console.warn('[Email] Gmail not configured — check GMAIL_USER and GMAIL_APP_PASSWORD in .env');
     return;
   }
   if (!to) return;

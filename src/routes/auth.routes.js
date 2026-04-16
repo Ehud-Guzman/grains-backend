@@ -36,7 +36,7 @@ router.post('/register', authLimiter, registerValidator, validate, authControlle
 router.post('/login', authLimiter, loginValidator, validate, authController.login);
 
 // POST /api/auth/refresh
-router.post('/refresh', refreshValidator, validate, authController.refresh);
+router.post('/refresh', authLimiter, refreshValidator, validate, authController.refresh);
 
 // POST /api/auth/select-branch — step 2 of admin login (exchange preAuthToken + branchId for full tokens)
 router.post('/select-branch', authLimiter, authController.selectBranch);

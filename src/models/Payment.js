@@ -21,6 +21,7 @@ const paymentSchema = new mongoose.Schema({
 // Indexes
 paymentSchema.index({ orderId: 1 });
 paymentSchema.index({ checkoutRequestId: 1 }, { unique: true, sparse: true });
+paymentSchema.index({ mpesaTransactionId: 1 }, { unique: true, sparse: true }); // prevent duplicate receipt reuse
 paymentSchema.index({ status: 1 });
 paymentSchema.index({ status: 1, createdAt: -1 }); // date-ranged payment reports and reconciliation
 

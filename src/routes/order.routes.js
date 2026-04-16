@@ -6,6 +6,7 @@ const { checkMaintenanceMode } = require('../middleware/maintenance.middleware')
 const { requireRole } = require('../middleware/role.middleware');
 const { validate } = require('../middleware/validate.middleware');
 const { guestOrderValidator, customerOrderValidator } = require('../validators/order.validator');
+const { publicLimiter } = require('../middleware/rateLimit.middleware');
 
 // ── PUBLIC ────────────────────────────────────────────────────────────────────
 
@@ -13,7 +14,7 @@ const { guestOrderValidator, customerOrderValidator } = require('../validators/o
 router.post('/guest', checkMaintenanceMode, guestOrderValidator, validate, orderController.createGuestOrder);
 
 // GET /api/orders/track?phone=&ref=
-router.get('/track', orderController.trackOrder);
+router.get('/track', publicLimiter, orderController.trackOrder);
 
 // ── CUSTOMER AUTH REQUIRED ────────────────────────────────────────────────────
 

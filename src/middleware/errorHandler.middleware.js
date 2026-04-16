@@ -28,13 +28,12 @@ const errorHandler = (err, req, res, next) => {
     });
   }
 
-  // Mongoose duplicate key error
+  // Mongoose duplicate key error — generic message prevents field-level enumeration
   if (err.code === 11000) {
-    const field = Object.keys(err.keyValue)[0];
     return res.status(409).json({
       success: false,
       error: 'DUPLICATE_ERROR',
-      message: `${field} already exists`
+      message: 'This value is already in use'
     });
   }
 

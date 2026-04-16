@@ -29,7 +29,7 @@ const callback = async (req, res) => {
 // GET /api/payments/status/:orderId — customer polls this after STK push
 const getStatus = async (req, res, next) => {
   try {
-    const result = await paymentService.checkPaymentStatus(req.params.orderId);
+    const result = await paymentService.checkPaymentStatus(req.params.orderId, req.user);
     return success(res, result);
   } catch (err) { next(err); }
 };
