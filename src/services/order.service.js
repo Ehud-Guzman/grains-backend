@@ -1068,5 +1068,6 @@ module.exports = {
   bulkApprove,
   bulkReject,
   getPackingSlip,
-  assignDriver
+  assignDriver,
+  autoCancelExpiredPendingOrders,
 };

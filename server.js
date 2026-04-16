@@ -2,8 +2,9 @@
 require('dotenv').config();
 const app = require('./src/app');
 const connectDB = require('./src/config/db');
-const { startCleanupJobs } = require('./src/jobs/cleanup.job');
-const { startKeepAlive }  = require('./src/jobs/keepAlive.job');
+const { startCleanupJobs }   = require('./src/jobs/cleanup.job');
+const { startKeepAlive }     = require('./src/jobs/keepAlive.job');
+const { startAutoCancelJob } = require('./src/jobs/autoCancel.job');
 
 const PORT = process.env.PORT || 5000;
 
@@ -42,6 +43,27 @@ if (process.env.JWT_ACCESS_SECRET === process.env.JWT_REFRESH_SECRET) {
   process.exit(1);
 }
 
+// ── PRODUCTION SAFETY WARNINGS ────────────────────────────────────────────────
+// These do not crash the server — they warn loudly so you notice in the logs.
+if (process.env.NODE_ENV === 'production') {
+  if (process.env.MPESA_ENV === 'sandbox' || !process.env.MPESA_ENV) {
+    console.warn('[STARTUP WARNING] MPESA_ENV is set to sandbox — real payments will NOT be processed.');
+  }
+
+  if (process.env.AT_USERNAME === 'sandbox' || !process.env.AT_USERNAME) {
+    console.warn('[STARTUP WARNING] AT_USERNAME is "sandbox" — SMS messages will NOT be delivered to real phones.');
+  }
+
+  const frontendUrl = process.env.FRONTEND_URL || '';
+  if (frontendUrl.includes('localhost') || frontendUrl.includes('127.0.0.1')) {
+    console.warn(`[STARTUP WARNING] FRONTEND_URL is set to "${frontendUrl}" in production — CORS will block real browser requests.`);
+  }
+
+  if (!process.env.SENTRY_DSN) {
+    console.warn('[STARTUP WARNING] SENTRY_DSN is not set — unhandled errors in production will not be tracked.');
+  }
+}
+
 // ── UNCAUGHT EXCEPTION HANDLER ────────────────────────────────────────────────
 // Synchronous errors that were never caught anywhere
 // PM2 will automatically restart the process after exit
@@ -69,6 +91,7 @@ const startServer = async () => {
 
     // Start background jobs (DB must be connected before jobs run)
     startCleanupJobs();
+    startAutoCancelJob();
     startKeepAlive();
 
     const server = app.listen(PORT, () => {

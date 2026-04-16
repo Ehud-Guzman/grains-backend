@@ -116,6 +116,18 @@ app.use(express.urlencoded({ extended: true, limit: '10kb' }));
 // ── TRUST PROXY ───────────────────────────────────────────────────────────────
 app.set('trust proxy', 1);
 
+// ── HTTPS REDIRECT ────────────────────────────────────────────────────────────
+// Render terminates TLS at the load balancer and forwards via HTTP internally.
+// x-forwarded-proto carries the original scheme — redirect plain HTTP callers.
+if (process.env.NODE_ENV === 'production') {
+  app.use((req, res, next) => {
+    if (req.headers['x-forwarded-proto'] !== 'https') {
+      return res.redirect(301, `https://${req.headers.host}${req.url}`);
+    }
+    next();
+  });
+}
+
 // ── NOSQL INJECTION PROTECTION ────────────────────────────────────────────────
 app.use(mongoSanitize({
   replaceWith: '_',
