@@ -12,6 +12,7 @@ const { errorHandler } = require('./middleware/errorHandler.middleware');
 const { publicLimiter } = require('./middleware/rateLimit.middleware');
 const { requestTiming } = require('./middleware/requestTiming.middleware');
 const { isRestoreInProgress } = require('./services/backup.service');
+const alertService = require('./services/alert.service');
 const logger = require('./utils/logger');
 
 // ── MODEL REGISTRATION ────────────────────────────────────────────────────────
@@ -120,6 +121,11 @@ app.use(mongoSanitize({
   replaceWith: '_',
   onSanitize: ({ req, key }) => {
     console.warn(`[SECURITY] Sanitized NoSQL injection attempt on key: ${key} from IP: ${req.ip}`);
+    alertService.sendAlert(
+      'NOSQL_INJECTION',
+      { IP: req.ip, Key: key, Route: `${req.method} ${req.originalUrl}`, 'User ID': req.user?.id || 'unauthenticated' },
+      req.ip
+    ).catch(() => {});
   }
 }));
 

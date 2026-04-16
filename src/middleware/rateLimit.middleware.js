@@ -1,4 +1,5 @@
 const rateLimit = require('express-rate-limit');
+const alertService = require('../services/alert.service');
 
 // Key by branchId + IP so branches don't throttle each other.
 // branchId comes from the JWT (set by verifyToken as req.branchId) for
@@ -29,10 +30,17 @@ const authLimiter = rateLimit({
   keyGenerator: keyByBranchAndIp,
   standardHeaders: true,
   legacyHeaders: false,
-  message: {
-    success: false,
-    error: 'RATE_LIMIT_EXCEEDED',
-    message: 'Too many login attempts, please try again in a minute'
+  handler: (req, res, _next, options) => {
+    alertService.sendAlert(
+      'AUTH_RATE_LIMIT',
+      { IP: req.ip, Route: `${req.method} ${req.originalUrl}`, Attempts: `>${options.max} in 1 min`, 'User agent': req.headers['user-agent'] || 'unknown' },
+      req.ip
+    ).catch(() => {});
+    res.status(options.statusCode).json({
+      success: false,
+      error: 'RATE_LIMIT_EXCEEDED',
+      message: 'Too many login attempts, please try again in a minute'
+    });
   }
 });
 

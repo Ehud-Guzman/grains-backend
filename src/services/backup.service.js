@@ -5,6 +5,7 @@ const crypto = require('crypto');
 const { promisify } = require('util');
 const { EJSON, ObjectId } = require('bson');
 const { AppError } = require('../middleware/errorHandler.middleware');
+const alertService = require('./alert.service');
 const Branch = require('../models/Branch');
 const User = require('../models/User');
 const Settings = require('../models/Settings');
@@ -410,6 +411,19 @@ const restoreBackup = async ({ file, confirmation, actorId, actorRole, ip }) => 
     ip: ip || null,
     timestamp: new Date(),
   });
+
+  alertService.sendAlert(
+    'BACKUP_RESTORED',
+    {
+      'Actor ID': String(actorId),
+      'Actor role': actorRole,
+      'Restored file': file.originalname || 'uploaded-backup',
+      'Snapshot date': snapshot.meta.snapshotAt || 'unknown',
+      'Pre-restore backup': preRestoreBackup.id,
+      IP: ip || 'unknown',
+    },
+    String(actorId)
+  ).catch(() => {});
 
   return {
     restoredAt: new Date().toISOString(),

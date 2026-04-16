@@ -1,5 +1,6 @@
 const Sentry = require('@sentry/node');
 const logger = require('../utils/logger');
+const alertService = require('../services/alert.service');
 
 const errorHandler = (err, req, res, next) => {
   const requestId = req.requestId || 'unknown';
@@ -58,6 +59,21 @@ const errorHandler = (err, req, res, next) => {
   const statusCode = err.statusCode || 500;
   const errorCode = err.errorCode || 'SERVER_ERROR';
   const message = statusCode === 500 ? 'An unexpected error occurred' : err.message;
+
+  // Alert on unexpected server errors (5xx) — counter-throttled to avoid noise
+  if (statusCode >= 500) {
+    alertService.sendAlert(
+      'SERVER_ERROR',
+      {
+        Route: `${req.method} ${req.originalUrl}`,
+        'Error code': errorCode,
+        Message: err.message || 'No message',
+        'Error count': `>=${3} in 5 min window`,
+        'Request ID': requestId,
+      },
+      'global'
+    ).catch(() => {});
+  }
 
   return res.status(statusCode).json({
     success: false,

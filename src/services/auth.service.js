@@ -6,6 +6,7 @@ const TokenBlacklist = require('../models/TokenBlacklist');
 const { AppError } = require('../middleware/errorHandler.middleware');
 const { ROLES, LOG_ACTIONS } = require('../utils/constants');
 const activityLogService = require('./activityLog.service');
+const alertService = require('./alert.service');
 
 const MAX_FAILED_LOGINS = 5;
 const BCRYPT_WORK_FACTOR = 12;
@@ -108,7 +109,7 @@ const login = async ({ phone, password }, ip) => {
   const isMatch = await bcrypt.compare(password, user.passwordHash);
 
   if (!isMatch) {
-    await incrementFailedLogin(user._id);
+    await incrementFailedLogin(user._id, ip);
     await activityLogService.log({
       actorId: user._id,
       actorRole: user.role,
@@ -339,12 +340,27 @@ const logout = async (token, userId, role) => {
 };
 
 // ── INCREMENT FAILED LOGIN ────────────────────────────────────────────────────
-const incrementFailedLogin = async (userId) => {
+const incrementFailedLogin = async (userId, ip = null) => {
   const user = await User.findByIdAndUpdate(
     userId,
     { $inc: { failedLoginCount: 1 } },
     { new: true }
   );
+
+  // Alert after 3 failures (early warning — account hasn't locked yet)
+  const ALERT_THRESHOLD = 3;
+  if (user.failedLoginCount === ALERT_THRESHOLD) {
+    alertService.sendAlert(
+      'BRUTE_FORCE_LOGIN',
+      {
+        Phone: user.phone,
+        Role: user.role,
+        'Failed attempts': `${user.failedLoginCount} (locks at ${MAX_FAILED_LOGINS})`,
+        IP: ip || 'unknown',
+      },
+      `${ip || 'unknown'}:${user.phone}`
+    ).catch(() => {});
+  }
 
   if (user.failedLoginCount >= MAX_FAILED_LOGINS) {
     await lockAccount(userId);
@@ -368,6 +384,12 @@ const lockAccount = async (userId) => {
       targetType: 'User',
       detail: { reason: 'Too many failed login attempts' }
     }).catch(() => {});
+
+    alertService.sendAlert(
+      'ACCOUNT_LOCKED',
+      { Phone: user.phone, Role: user.role, Reason: 'Too many failed login attempts', 'User ID': String(userId) },
+      String(userId)
+    ).catch(() => {});
   }
 };
 
