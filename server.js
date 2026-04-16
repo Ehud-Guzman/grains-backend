@@ -3,6 +3,7 @@ require('dotenv').config();
 const app = require('./src/app');
 const connectDB = require('./src/config/db');
 const { startCleanupJobs } = require('./src/jobs/cleanup.job');
+const { startKeepAlive }  = require('./src/jobs/keepAlive.job');
 
 const PORT = process.env.PORT || 5000;
 
@@ -68,6 +69,7 @@ const startServer = async () => {
 
     // Start background jobs (DB must be connected before jobs run)
     startCleanupJobs();
+    startKeepAlive();
 
     const server = app.listen(PORT, () => {
       console.log(`
