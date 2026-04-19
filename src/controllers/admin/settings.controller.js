@@ -24,7 +24,7 @@ const getPublic = async (req, res, next) => {
     }
 
     const settings = await settingsService.getPublicSettings(defaultBranch._id);
-    return success(res, { ...settings, branchId: defaultBranch._id, branchName: defaultBranch.name });
+    return success(res, { ...settings, branchName: defaultBranch.name });
   } catch (err) { next(err); }
 };
 
@@ -126,4 +126,18 @@ const testEmail = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-module.exports = { getPublic, getDeliveryFee, getAll, update, getForBranch, updateForBranch, testEmail };
+// GET /api/settings/receipt  (requires auth — any role)
+const getReceiptConfig = async (req, res, next) => {
+  try {
+    let branchId = req.branchId;
+    if (!branchId) {
+      const defaultBranch = await getDefaultBranch();
+      if (!defaultBranch) return success(res, { kraPin: '', receiptFooterNote: '' });
+      branchId = defaultBranch._id;
+    }
+    const s = await settingsService.getSettings(branchId);
+    return success(res, { kraPin: s.kraPin || '', receiptFooterNote: s.receiptFooterNote || '' });
+  } catch (err) { next(err); }
+};
+
+module.exports = { getPublic, getDeliveryFee, getAll, update, getForBranch, updateForBranch, testEmail, getReceiptConfig };

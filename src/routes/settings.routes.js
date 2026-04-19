@@ -1,14 +1,15 @@
 const express = require('express');
 const router = express.Router();
 const settingsController = require('../controllers/admin/settings.controller');
+const { verifyToken } = require('../middleware/auth.middleware');
 
 // GET /api/settings — public, no auth required
-// Returns only shop-facing info (name, phone, hours, delivery fee etc)
 router.get('/', settingsController.getPublic);
 
-// GET /api/delivery-fee?lat=X&lng=Y — public
-// Returns calculated delivery fee for the given customer coordinates.
-// Used by checkout page for live fee preview before order submission.
+// GET /api/settings/receipt — requires auth; returns kraPin + receiptFooterNote for receipt rendering
+router.get('/receipt', verifyToken, settingsController.getReceiptConfig);
+
+// GET /api/settings/delivery-fee?lat=X&lng=Y — public
 router.get('/delivery-fee', settingsController.getDeliveryFee);
 
 module.exports = router;

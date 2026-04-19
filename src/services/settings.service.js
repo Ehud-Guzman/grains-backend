@@ -59,11 +59,10 @@ const getPublicSettings = async (branchId) => {
     hasDeliveryZones: s.deliveryPricingMode === 'distance' &&
       s.deliveryZones?.length > 0 &&
       s.branchLat != null && s.branchLng != null,
-    // Tax & compliance — needed for receipt display and checkout VAT preview
+    // Tax — vatEnabled/vatRate needed for checkout VAT preview
     vatEnabled: s.vatEnabled === true,
     vatRate:    Number(s.vatRate)  || 16,
-    kraPin:     s.kraPin || '',
-    receiptFooterNote: s.receiptFooterNote || '',
+    // kraPin and receiptFooterNote are omitted — fetched via authenticated /api/settings/receipt
   };
 };
 
