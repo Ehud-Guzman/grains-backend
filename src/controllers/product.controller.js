@@ -21,7 +21,8 @@ const getAll = async (req, res, next) => {
 const getById = async (req, res, next) => {
   try {
     const branchId = req.query.branchId || req.branchId || await getDefaultBranchId();
-    const product = await productService.getById(req.params.id, branchId);
+    // req.user is only set when an auth middleware (verifyToken/requireMinRole) ran before this
+    const product = await productService.getById(req.params.id, branchId, false, !!req.user);
     return success(res, product);
   } catch (err) { next(err); }
 };

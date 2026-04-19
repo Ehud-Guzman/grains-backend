@@ -7,6 +7,18 @@ const { paginate, buildPaginationMeta } = require('../utils/paginate');
 const { normalizeImageUrls } = require('../utils/imageUrl');
 const { deleteImages } = require('./upload.service');
 
+// Removes inventory fields from packaging before sending to unauthenticated callers
+const stripStockFields = (product) => {
+  if (!product?.varieties) return product;
+  return {
+    ...product,
+    varieties: product.varieties.map(v => ({
+      ...v,
+      packaging: (v.packaging || []).map(({ stock, lowStockThreshold, ...rest }) => rest)
+    }))
+  };
+};
+
 // ── CACHE ─────────────────────────────────────────────────────────────────────
 // Per-branch cache: branchId => { data, time }
 const _cache = new Map();
@@ -65,13 +77,13 @@ const getAll = async (filters = {}, query = {}, branchId) => {
   ]);
 
   return {
-    products,
+    products: products.map(stripStockFields),
     pagination: buildPaginationMeta(page, limit, total)
   };
 };
 
 // ── PUBLIC: GET SINGLE PRODUCT ────────────────────────────────────────────────
-const getById = async (productId, branchId, includeInactive = false) => {
+const getById = async (productId, branchId, includeInactive = false, includeStock = false) => {
   const query = { _id: productId };
   if (branchId) query.branchId = branchId;
   if (!includeInactive) query.isActive = true;
@@ -79,7 +91,7 @@ const getById = async (productId, branchId, includeInactive = false) => {
   const product = await Product.findOne(query).lean();
   if (!product) throw new AppError('Product not found', 404, 'PRODUCT_NOT_FOUND');
 
-  return product;
+  return includeStock ? product : stripStockFields(product);
 };
 
 // ── PUBLIC: GET CATEGORIES ────────────────────────────────────────────────────
