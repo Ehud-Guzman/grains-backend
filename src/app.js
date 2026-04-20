@@ -3,7 +3,6 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 const helmet = require('helmet');
 const mongoSanitize = require('express-mongo-sanitize');
-const xss = require('xss-clean');
 const hpp = require('hpp');
 const Sentry = require('@sentry/node');
 require('dotenv').config();
@@ -62,6 +61,11 @@ if (process.env.NODE_ENV === 'production' && process.env.SENTRY_DSN) {
 
 // ── SECURITY HEADERS ──────────────────────────────────────────────────────────
 app.use(helmet({
+  hsts: {
+    maxAge: 63072000,
+    includeSubDomains: true,
+    preload: true
+  },
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
@@ -142,7 +146,29 @@ app.use(mongoSanitize({
 }));
 
 // ── XSS PROTECTION ────────────────────────────────────────────────────────────
-app.use(xss());
+// xss-clean only encodes < but not > — apply full escaping manually
+function escapeHtml(value) {
+  if (typeof value !== 'string') return value;
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#x27;');
+}
+function deepEscape(obj) {
+  if (Array.isArray(obj)) return obj.map(deepEscape);
+  if (obj && typeof obj === 'object') {
+    return Object.fromEntries(Object.entries(obj).map(([k, v]) => [k, deepEscape(v)]));
+  }
+  return escapeHtml(obj);
+}
+app.use((req, _res, next) => {
+  if (req.body) req.body = deepEscape(req.body);
+  if (req.query) req.query = deepEscape(req.query);
+  if (req.params) req.params = deepEscape(req.params);
+  next();
+});
 
 // ── HTTP PARAMETER POLLUTION PROTECTION ──────────────────────────────────────
 app.use(hpp({

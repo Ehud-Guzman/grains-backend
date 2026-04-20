@@ -627,9 +627,12 @@ const getMyOrders = async (userId, query = {}, branchId) => {
   // Customers can see their orders across all branches (shared accounts)
   const filter = { userId };
 
+  const CUSTOMER_ORDER_FIELDS = 'orderRef orderItems subtotal deliveryFee vatEnabled vatRate vatAmount total deliveryMethod deliveryAddress paymentMethod paymentStatus status rejectionReason specialInstructions branchId createdAt updatedAt statusHistory';
+
   const [total, orders] = await Promise.all([
     Order.countDocuments(filter),
     Order.find(filter)
+      .select(CUSTOMER_ORDER_FIELDS)
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit)
