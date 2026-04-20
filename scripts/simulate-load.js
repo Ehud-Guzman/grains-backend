@@ -27,6 +27,20 @@
 
 const axios = require('axios');
 
+const fs   = require('fs');
+const path = require('path');
+
+// Persisted test accounts so we never hit the auth rate limit on repeated runs
+const STATE_FILE = path.join(__dirname, 'simulate-load.state.json');
+
+function loadState() {
+  try { return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')); } catch { return {}; }
+}
+
+function saveState(data) {
+  try { fs.writeFileSync(STATE_FILE, JSON.stringify(data, null, 2)); } catch (_) {}
+}
+
 // ─── CLI args ─────────────────────────────────────────────────────────────────
 
 function parseArgs(argv) {
@@ -108,10 +122,13 @@ async function api(method, path, data, token) {
   const t0 = Date.now();
   try {
     const res = await http({ method, url: path, data: data || undefined, headers });
+    const raw = res.data;
+    // Unwrap the standard { success, data, message } envelope used throughout this API
+    const body = (raw && raw.data !== undefined) ? raw.data : raw;
     return {
       ok: res.status >= 200 && res.status < 300,
       status: res.status,
-      body: res.data,
+      body,
       ms: Date.now() - t0,
     };
   } catch (err) {
@@ -145,13 +162,13 @@ const PRODUCT_QUERIES = [
 ];
 
 // Phone counter — starts at a random offset from 0722000000
-let _phoneN = 722000000 + Math.floor(Math.random() * 500000);
+// Use timestamp mod as seed so each script run starts in a different range.
+// 99 million possible numbers — collisions across runs are extremely rare.
+let _phoneSeq = Math.floor(Date.now() / 1000) % 99000000;
 
 function nextPhone() {
-  _phoneN += Math.floor(Math.random() * 9) + 1;
-  // Produce 0722XXXXXX format
-  const digits = String(_phoneN).slice(-8).padStart(8, '0');
-  return `072${digits}`;
+  _phoneSeq = (_phoneSeq + Math.floor(Math.random() * 999) + 1) % 99000000;
+  return '07' + String(_phoneSeq).padStart(8, '0');
 }
 
 function rnd(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
@@ -226,7 +243,7 @@ function printStats() {
 async function adminLogin() {
   const r1 = await api('POST', '/auth/login', { phone: CFG.adminPhone, password: CFG.adminPass });
   if (!r1.ok) {
-    console.error('[auth] Login response:', r1.status, JSON.stringify(r1.body));
+    console.error('[auth] Login failed:', r1.status, r1.body?.message || r1.err);
     return false;
   }
 
@@ -237,21 +254,23 @@ async function adminLogin() {
       preAuthToken: r1.body.preAuthToken,
     });
     if (!r2.ok) {
-      console.error('[auth] Branch selection failed:', r2.body?.message, '— is --branch-id correct?');
+      console.error('[auth] Branch selection failed:', r2.status, r2.body?.message);
       return false;
     }
     token = r2.body.accessToken;
     refresh = r2.body.refreshToken;
   } else {
-    // Superadmin or already has branch context
     token = r1.body.accessToken;
     refresh = r1.body.refreshToken;
   }
 
-  if (!token) return false;
+  if (!token) {
+    console.error('[auth] No token in response — check branch-id or admin role');
+    return false;
+  }
   S.admin.token = token;
   S.admin.refreshToken = refresh;
-  S.admin.expiry = Date.now() + 12 * 60 * 1000; // refresh 3 min before expiry
+  S.admin.expiry = Date.now() + 12 * 60 * 1000;
   return true;
 }
 
@@ -303,13 +322,14 @@ async function bootstrap() {
   console.log('[boot] Admin authenticated ✓');
 
   console.log('[boot] Fetching products...');
-  const pr = await api('GET', '/products?limit=100');
+  // Use admin endpoint so branch context (from JWT) is applied correctly
+  const pr = await api('GET', '/admin/products?limit=100&isActive=true', null, S.admin.token);
   if (pr.ok) {
-    const raw = pr.body.products || pr.body.data?.products || [];
+    const raw = pr.body.products || (Array.isArray(pr.body) ? pr.body : []);
     S.products = raw.filter(p => Array.isArray(p.varieties) && p.varieties.length > 0);
     console.log(`[boot] ${S.products.length} products loaded ✓`);
   } else {
-    console.warn('[boot] Could not fetch products — order scenarios will be skipped');
+    console.warn('[boot] Could not fetch products:', pr.status, pr.body?.message, '— order scenarios will be skipped');
   }
 
   // Driver setup
@@ -352,27 +372,48 @@ async function bootstrap() {
     }
   }
 
-  // Pre-create a pool of customers so order scenarios have accounts to use
-  console.log('[boot] Creating initial customer pool...');
-  const customerCount = Math.min(12, Math.max(5, CFG.concurrency * 2));
-  for (let i = 0; i < customerCount; i++) {
-    const phone = nextPhone();
-    const password = newPass();
-    const r = await api('POST', '/auth/register', {
-      name: rnd(NAMES),
-      phone,
-      password,
-    });
-    if (r.ok && r.body.accessToken) {
-      S.customers.push({
-        phone, password,
-        token: r.body.accessToken,
-        refreshToken: r.body.refreshToken,
-        expiry: Date.now() + 12 * 60 * 1000,
-      });
+  // ── Customer pool ──────────────────────────────────────────────────────────
+  // Load credentials saved from previous runs so we don't re-register every time
+  // (the auth endpoint has a 10 req/min rate limit — registering many customers
+  //  each run would blow through it immediately).
+  const saved = loadState();
+  const wantCustomers = Math.min(10, Math.max(5, CFG.concurrency));
+
+  if (saved.customers?.length) {
+    console.log(`[boot] Re-logging in ${saved.customers.length} saved customers...`);
+    for (const c of saved.customers) {
+      const r = await api('POST', '/auth/login', { phone: c.phone, password: c.password });
+      if (r.ok && r.body.accessToken) {
+        S.customers.push({ ...c, token: r.body.accessToken, refreshToken: r.body.refreshToken, expiry: Date.now() + 12 * 60 * 1000 });
+      }
+    }
+    console.log(`[boot] ${S.customers.length}/${saved.customers.length} customers re-authenticated ✓`);
+  }
+
+  if (S.customers.length < wantCustomers) {
+    const need = wantCustomers - S.customers.length;
+    console.log(`[boot] Creating ${need} new customers (spaced 7s apart to respect auth rate limit)...`);
+    for (let i = 0; i < need; i++) {
+      if (i > 0) await new Promise(r => setTimeout(r, 7000)); // 10/min limit → 1 per 6s
+      let r, phone, password;
+      for (let attempt = 0; attempt < 5; attempt++) {
+        phone = nextPhone();
+        password = newPass();
+        r = await api('POST', '/auth/register', { name: rnd(NAMES), phone, password });
+        if (r.status !== 409) break;
+      }
+      if (r.ok && r.body.accessToken) {
+        S.customers.push({ phone, password, token: r.body.accessToken, refreshToken: r.body.refreshToken, expiry: Date.now() + 12 * 60 * 1000 });
+        console.log(`[boot] Customer ${S.customers.length}/${wantCustomers} created (${phone}) ✓`);
+      } else {
+        console.warn(`[boot] Customer creation failed: ${r.status} ${r.body?.message}`);
+      }
     }
   }
-  console.log(`[boot] ${S.customers.length} test customers ready ✓`);
+
+  // Save credentials so next run skips registration entirely
+  saveState({ customers: S.customers.map(c => ({ phone: c.phone, password: c.password })) });
+  console.log(`[boot] ${S.customers.length} customers ready ✓ (saved to simulate-load.state.json)`);
 }
 
 // ─── Order item builder ───────────────────────────────────────────────────────

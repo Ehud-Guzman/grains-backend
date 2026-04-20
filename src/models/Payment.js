@@ -20,8 +20,10 @@ const paymentSchema = new mongoose.Schema({
 
 // Indexes
 paymentSchema.index({ orderId: 1 });
-paymentSchema.index({ checkoutRequestId: 1 }, { unique: true, sparse: true });
-paymentSchema.index({ mpesaTransactionId: 1 }, { unique: true, sparse: true }); // prevent duplicate receipt reuse
+// partialFilterExpression (not sparse) because MongoDB's sparse still indexes
+// explicit null values — partial filter skips them cleanly.
+paymentSchema.index({ checkoutRequestId: 1 },   { unique: true, partialFilterExpression: { checkoutRequestId:   { $type: 'string' } } });
+paymentSchema.index({ mpesaTransactionId: 1 },  { unique: true, partialFilterExpression: { mpesaTransactionId:  { $type: 'string' } } });
 paymentSchema.index({ status: 1 });
 paymentSchema.index({ status: 1, createdAt: -1 }); // date-ranged payment reports and reconciliation
 

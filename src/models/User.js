@@ -74,7 +74,7 @@ const userSchema = new mongoose.Schema({
 
 // Indexes
 userSchema.index({ phone: 1 }, { unique: true });
-userSchema.index({ email: 1 }, { unique: true, sparse: true });
+userSchema.index({ email: 1 }, { unique: true, partialFilterExpression: { email: { $type: 'string' } } });
 userSchema.index({ role: 1 });
 userSchema.index({ branchId: 1 });
 userSchema.index({ branchId: 1, createdAt: -1 }); // branch-scoped new-user reports
