@@ -36,4 +36,10 @@ router.post(
   customerController.addNote
 );
 
+// PATCH /api/admin/customers/:id/lock
+router.patch('/:id/lock', requireBusinessRole('supervisor'), customerController.lockAccount);
+
+// PATCH /api/admin/customers/:id/unlock
+router.patch('/:id/unlock', requireBusinessRole('supervisor'), customerController.unlockAccount);
+
 module.exports = router;

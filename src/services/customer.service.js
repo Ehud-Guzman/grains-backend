@@ -159,4 +159,45 @@ const getSegments = async () => {
   };
 };
 
-module.exports = { getAll, getProfile, addNote, getSegments, getOrderStats };
+// ── LOCK / UNLOCK CUSTOMER ────────────────────────────────────────────────────
+const lockCustomer = async (userId, adminId, adminRole) => {
+  const user = await User.findOne({ _id: userId, role: 'customer' });
+  if (!user) throw new AppError('Customer not found', 404, 'USER_NOT_FOUND');
+  if (user.isLocked) throw new AppError('Account is already locked', 400, 'ALREADY_LOCKED');
+
+  user.isLocked = true;
+  await user.save();
+
+  await activityLogService.log({
+    actorId: adminId,
+    actorRole: adminRole,
+    action: 'CUSTOMER_ACCOUNT_LOCKED',
+    targetId: userId,
+    targetType: 'User',
+    detail: { name: user.name, phone: user.phone, reason: 'Manual lock by admin' }
+  });
+
+  return { id: user._id, name: user.name, isLocked: true };
+};
+
+const unlockCustomer = async (userId, adminId, adminRole) => {
+  const user = await User.findOneAndUpdate(
+    { _id: userId, role: 'customer' },
+    { isLocked: false, failedLoginCount: 0 },
+    { new: true }
+  );
+  if (!user) throw new AppError('Customer not found', 404, 'USER_NOT_FOUND');
+
+  await activityLogService.log({
+    actorId: adminId,
+    actorRole: adminRole,
+    action: 'CUSTOMER_ACCOUNT_UNLOCKED',
+    targetId: userId,
+    targetType: 'User',
+    detail: { name: user.name, phone: user.phone }
+  });
+
+  return { id: user._id, name: user.name, isLocked: false };
+};
+
+module.exports = { getAll, getProfile, addNote, getSegments, getOrderStats, lockCustomer, unlockCustomer };

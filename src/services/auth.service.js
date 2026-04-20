@@ -378,7 +378,7 @@ const lockAccount = async (userId) => {
         : LOG_ACTIONS.CUSTOMER_ACCOUNT_LOCKED;
     await activityLogService.log({
       actorId: userId,
-      actorRole: user.role,
+      actorRole: 'system',
       action,
       targetId: userId,
       targetType: 'User',

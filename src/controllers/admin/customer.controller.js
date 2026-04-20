@@ -1,6 +1,20 @@
 const customerService = require('../../services/customer.service');
 const { success } = require('../../utils/apiResponse');
 
+const lockAccount = async (req, res, next) => {
+  try {
+    const result = await customerService.lockCustomer(req.params.id, req.user.id, req.user.role);
+    return success(res, result, 'Customer account locked');
+  } catch (err) { next(err); }
+};
+
+const unlockAccount = async (req, res, next) => {
+  try {
+    const result = await customerService.unlockCustomer(req.params.id, req.user.id, req.user.role);
+    return success(res, result, 'Customer account unlocked');
+  } catch (err) { next(err); }
+};
+
 const getAll = async (req, res, next) => {
   try {
     const result = await customerService.getAll(req.query, req.query);
@@ -29,4 +43,4 @@ const getSegments = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-module.exports = { getAll, getProfile, addNote, getSegments };
+module.exports = { getAll, getProfile, addNote, getSegments, lockAccount, unlockAccount };
