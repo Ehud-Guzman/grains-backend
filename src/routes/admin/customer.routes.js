@@ -37,9 +37,10 @@ router.post(
 );
 
 // PATCH /api/admin/customers/:id/lock
-router.patch('/:id/lock', requireBusinessRole('supervisor'), customerController.lockAccount);
+// Uses requireMinRole (not requireBusinessRole) — customers are global, not branch-scoped
+router.patch('/:id/lock', requireMinRole('supervisor'), customerController.lockAccount);
 
 // PATCH /api/admin/customers/:id/unlock
-router.patch('/:id/unlock', requireBusinessRole('supervisor'), customerController.unlockAccount);
+router.patch('/:id/unlock', requireMinRole('supervisor'), customerController.unlockAccount);
 
 module.exports = router;
