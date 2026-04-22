@@ -1,5 +1,22 @@
 node_modules/
-.env
 dist/
+
+# Environment files — never commit secrets
+.env
+.env.local
+.env.*.local
+
+# Logs
 *.log
+logs/
+
+# Runtime / generated state
+*.state.json
+uploads/
+
+# Claude Code settings
+.claude/
+
+# OS artefacts
 .DS_Store
+Thumbs.db

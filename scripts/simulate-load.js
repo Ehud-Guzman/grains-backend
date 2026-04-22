@@ -548,13 +548,9 @@ async function sc_customerOrder() {
     specialInstructions: Math.random() > 0.8 ? 'Please call on arrival' : undefined,
   }, c.token);
 
-  if (r.ok) {
-    const o = r.body.order || r.body.data?.order;
-    if (o) {
-      S.pendingOrders.push({ orderId: o._id, orderRef: o.orderRef, phone: c.phone });
-      // Cap list size to avoid unbounded memory growth
-      if (S.pendingOrders.length > 200) S.pendingOrders.shift();
-    }
+  if (r.ok && r.body.orderId) {
+    S.pendingOrders.push({ orderId: r.body.orderId, orderRef: r.body.orderRef, phone: c.phone });
+    if (S.pendingOrders.length > 200) S.pendingOrders.shift();
   }
   return r.ok;
 }
@@ -575,12 +571,9 @@ async function sc_guestOrder() {
     paymentMethod: Math.random() > 0.55 ? 'mpesa' : (delivery ? 'delivery' : 'pickup'),
   });
 
-  if (r.ok) {
-    const o = r.body.order || r.body.data?.order;
-    if (o) {
-      S.pendingOrders.push({ orderId: o._id, orderRef: o.orderRef, phone, isGuest: true });
-      if (S.pendingOrders.length > 200) S.pendingOrders.shift();
-    }
+  if (r.ok && r.body.orderId) {
+    S.pendingOrders.push({ orderId: r.body.orderId, orderRef: r.body.orderRef, phone, isGuest: true });
+    if (S.pendingOrders.length > 200) S.pendingOrders.shift();
   }
   return r.ok;
 }
@@ -725,7 +718,7 @@ async function sc_driverToggleAvailability() {
   if (!S.driver.token) return false;
   // Drivers are mostly available; go unavailable occasionally
   const r = await api('PATCH', '/driver/availability',
-    { isAvailable: Math.random() > 0.15 }, S.driver.token);
+    { available: Math.random() > 0.15 }, S.driver.token);
   return r.ok;
 }
 
