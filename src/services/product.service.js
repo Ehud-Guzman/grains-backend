@@ -7,14 +7,19 @@ const { paginate, buildPaginationMeta } = require('../utils/paginate');
 const { normalizeImageUrls } = require('../utils/imageUrl');
 const { deleteImages } = require('./upload.service');
 
-// Removes inventory fields from packaging before sending to unauthenticated callers
+// Masks exact stock counts before sending to public callers.
+// Preserves enough info for badges: 0 = out, 1 = low, 2 = in stock.
 const stripStockFields = (product) => {
   if (!product?.varieties) return product;
   return {
     ...product,
     varieties: product.varieties.map(v => ({
       ...v,
-      packaging: (v.packaging || []).map(({ stock, lowStockThreshold, ...rest }) => rest)
+      packaging: (v.packaging || []).map(({ stock, lowStockThreshold, ...rest }) => ({
+        ...rest,
+        stock: stock <= 0 ? 0 : stock <= (lowStockThreshold ?? 10) ? 1 : 2,
+        lowStockThreshold: 1
+      }))
     }))
   };
 };

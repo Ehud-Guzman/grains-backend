@@ -61,7 +61,7 @@ const initiateStkPush = async (orderId, phone) => {
     BusinessShortCode: shortcode,
     Password:          password,
     Timestamp:         timestamp,
-    TransactionType:   'CustomerPayBillOnline',
+    TransactionType:   process.env.MPESA_TRANSACTION_TYPE || 'CustomerPayBillOnline',
     Amount:            Math.ceil(amount), // M-Pesa requires whole numbers
     PartyA:            formattedPhone,
     PartyB:            shortcode,
