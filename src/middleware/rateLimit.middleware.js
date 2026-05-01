@@ -72,4 +72,19 @@ const callbackLimiter = rateLimit({
   }
 });
 
-module.exports = { publicLimiter, authLimiter, adminLimiter, callbackLimiter };
+// STK Push initiation — tighter than publicLimiter to prevent drain attacks
+// (attacker triggering repeated STK pushes on a victim's phone number)
+const stkLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 5,
+  keyGenerator: keyByBranchAndIp,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    error: 'RATE_LIMIT_EXCEEDED',
+    message: 'Too many payment requests, please try again in a minute'
+  }
+});
+
+module.exports = { publicLimiter, authLimiter, adminLimiter, callbackLimiter, stkLimiter };

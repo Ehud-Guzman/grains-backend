@@ -134,7 +134,7 @@ const getDriverStats = async (driverId, branchId) => {
 };
 
 // ── LOCK / UNLOCK ─────────────────────────────────────────────────────────────
-const lockDriver = async (driverId, adminId, branchId) => {
+const lockDriver = async (driverId, adminId, branchId, actorRole = ROLES.ADMIN) => {
   const driver = await User.findOne({ _id: driverId, role: ROLES.DRIVER, branchId });
   if (!driver) throw new AppError('Driver not found', 404, 'DRIVER_NOT_FOUND');
 
@@ -142,7 +142,7 @@ const lockDriver = async (driverId, adminId, branchId) => {
   await driver.save();
 
   await activityLogService.log({
-    actorId: adminId, actorRole: ROLES.ADMIN,
+    actorId: adminId, actorRole,
     action: LOG_ACTIONS.DRIVER_ACCOUNT_LOCKED,
     branchId, targetId: driverId, targetType: 'User',
     detail: { name: driver.name }
@@ -151,7 +151,7 @@ const lockDriver = async (driverId, adminId, branchId) => {
   return { id: driver._id, name: driver.name, isLocked: true };
 };
 
-const unlockDriver = async (driverId, adminId, branchId) => {
+const unlockDriver = async (driverId, adminId, branchId, actorRole = ROLES.ADMIN) => {
   const driver = await User.findOneAndUpdate(
     { _id: driverId, role: ROLES.DRIVER, branchId },
     { isLocked: false, failedLoginCount: 0 },
@@ -160,7 +160,7 @@ const unlockDriver = async (driverId, adminId, branchId) => {
   if (!driver) throw new AppError('Driver not found', 404, 'DRIVER_NOT_FOUND');
 
   await activityLogService.log({
-    actorId: adminId, actorRole: ROLES.ADMIN,
+    actorId: adminId, actorRole,
     action: LOG_ACTIONS.DRIVER_ACCOUNT_UNLOCKED,
     branchId, targetId: driverId, targetType: 'User',
     detail: { name: driver.name }

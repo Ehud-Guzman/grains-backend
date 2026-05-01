@@ -43,14 +43,14 @@ const getStats = async (req, res, next) => {
 
 const lockAccount = async (req, res, next) => {
   try {
-    const result = await driverService.lockDriver(req.params.id, req.user.id, req.branchId);
+    const result = await driverService.lockDriver(req.params.id, req.user.id, req.branchId, req.user.role);
     return success(res, result, 'Driver account locked');
   } catch (err) { next(err); }
 };
 
 const unlockAccount = async (req, res, next) => {
   try {
-    const result = await driverService.unlockDriver(req.params.id, req.user.id, req.branchId);
+    const result = await driverService.unlockDriver(req.params.id, req.user.id, req.branchId, req.user.role);
     return success(res, result, 'Driver account unlocked');
   } catch (err) { next(err); }
 };

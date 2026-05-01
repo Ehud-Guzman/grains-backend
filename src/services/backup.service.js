@@ -8,11 +8,13 @@ const { AppError } = require('../middleware/errorHandler.middleware');
 const alertService = require('./alert.service');
 const Branch = require('../models/Branch');
 const User = require('../models/User');
+const Guest = require('../models/Guest');
 const Settings = require('../models/Settings');
 const Product = require('../models/Product');
 const Order = require('../models/Order');
 const Payment = require('../models/Payment');
 const StockLog = require('../models/StockLog');
+const StockIntake = require('../models/StockIntake');
 const ActivityLog = require('../models/ActivityLog');
 const OrderCounter = require('../models/OrderCounter');
 const TokenBlacklist = require('../models/TokenBlacklist');
@@ -33,15 +35,17 @@ const MANIFEST_PATH = path.join(BACKUP_DIR, 'manifest.json');
 const RESTORE_MARKER = path.join(BACKUP_DIR, '.restore-in-progress');
 const BACKUP_VERSION = 2;
 const COLLECTIONS = [
-  { key: 'branches', label: 'Branch', model: Branch },
-  { key: 'users', label: 'User', model: User },
-  { key: 'settings', label: 'Settings', model: Settings },
-  { key: 'products', label: 'Product', model: Product },
-  { key: 'orders', label: 'Order', model: Order },
-  { key: 'payments', label: 'Payment', model: Payment },
-  { key: 'stockLogs', label: 'StockLog', model: StockLog },
-  { key: 'activityLogs', label: 'ActivityLog', model: ActivityLog },
-  { key: 'orderCounters', label: 'OrderCounter', model: OrderCounter },
+  { key: 'branches',        label: 'Branch',         model: Branch },
+  { key: 'users',           label: 'User',           model: User },
+  { key: 'guests',          label: 'Guest',          model: Guest },
+  { key: 'settings',        label: 'Settings',       model: Settings },
+  { key: 'products',        label: 'Product',        model: Product },
+  { key: 'orders',          label: 'Order',          model: Order },
+  { key: 'payments',        label: 'Payment',        model: Payment },
+  { key: 'stockLogs',       label: 'StockLog',       model: StockLog },
+  { key: 'stockIntakes',    label: 'StockIntake',    model: StockIntake },
+  { key: 'activityLogs',    label: 'ActivityLog',    model: ActivityLog },
+  { key: 'orderCounters',   label: 'OrderCounter',   model: OrderCounter },
   { key: 'tokenBlacklists', label: 'TokenBlacklist', model: TokenBlacklist },
 ];
 

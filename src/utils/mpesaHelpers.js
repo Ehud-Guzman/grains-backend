@@ -35,16 +35,16 @@ const generatePassword = (shortcode, passkey, timestamp) => {
   return Buffer.from(`${shortcode}${passkey}${timestamp}`).toString('base64');
 };
 
-// Validate that a callback is coming from Safaricom's IPs
-// In development/sandbox — allow all IPs
+// Validate that a callback is coming from Safaricom's IPs.
+// Uses only req.ip — trust proxy is set to 1, so Express resolves the correct
+// client IP from X-Forwarded-For via Render's load balancer. Reading the raw
+// header as a fallback would allow an attacker to spoof it.
+// In development/sandbox — allow all IPs.
 const validateSafaricomIP = (req) => {
   if (process.env.MPESA_ENV !== 'production') return true;
 
-  const ip = req.ip ||
-    req.headers['x-forwarded-for']?.split(',')[0]?.trim() ||
-    req.connection?.remoteAddress;
-
-  const isValid = SAFARICOM_IPS.some(allowedIP => ip?.includes(allowedIP));
+  const ip = req.ip;
+  const isValid = !!ip && SAFARICOM_IPS.some(allowedIP => ip.includes(allowedIP));
 
   if (!isValid) {
     console.warn(`[M-PESA] Callback from unrecognized IP: ${ip}`);

@@ -33,9 +33,10 @@ const loginValidator = [
     .notEmpty().withMessage('Password is required')
 ];
 
+// refreshToken can arrive as an HttpOnly cookie (browser) or body field (API clients).
+// The controller reads both; we just skip body validation so cookies-only requests pass.
 const refreshValidator = [
-  body('refreshToken')
-    .notEmpty().withMessage('Refresh token is required')
+  body('refreshToken').optional()
 ];
 
 module.exports = { registerValidator, loginValidator, refreshValidator };

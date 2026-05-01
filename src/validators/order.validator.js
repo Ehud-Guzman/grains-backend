@@ -10,14 +10,16 @@ const orderItemsValidator = [
 
   body('orderItems.*.variety')
     .trim()
-    .notEmpty().withMessage('Variety is required for each item'),
+    .notEmpty().withMessage('Variety is required for each item')
+    .isLength({ max: 200 }).withMessage('Variety name cannot exceed 200 characters'),
 
   body('orderItems.*.packaging')
     .trim()
-    .notEmpty().withMessage('Packaging size is required for each item'),
+    .notEmpty().withMessage('Packaging size is required for each item')
+    .isLength({ max: 100 }).withMessage('Packaging size cannot exceed 100 characters'),
 
   body('orderItems.*.quantity')
-    .isInt({ min: 1 }).withMessage('Quantity must be at least 1')
+    .isInt({ min: 1, max: 10000 }).withMessage('Quantity must be between 1 and 10,000')
 ];
 
 const guestOrderValidator = [
@@ -37,7 +39,13 @@ const guestOrderValidator = [
   body('deliveryAddress')
     .if(body('deliveryMethod').equals('delivery'))
     .trim()
-    .notEmpty().withMessage('Delivery address is required when delivery method is delivery'),
+    .notEmpty().withMessage('Delivery address is required when delivery method is delivery')
+    .isLength({ max: 1000 }).withMessage('Delivery address cannot exceed 1000 characters'),
+
+  body('specialInstructions')
+    .optional({ nullable: true, checkFalsy: true })
+    .trim()
+    .isLength({ max: 500 }).withMessage('Special instructions cannot exceed 500 characters'),
 
   body('paymentMethod')
     .isIn(['mpesa', 'pickup', 'delivery']).withMessage('Invalid payment method'),
@@ -52,7 +60,13 @@ const customerOrderValidator = [
   body('deliveryAddress')
     .if(body('deliveryMethod').equals('delivery'))
     .trim()
-    .notEmpty().withMessage('Delivery address is required when delivery method is delivery'),
+    .notEmpty().withMessage('Delivery address is required when delivery method is delivery')
+    .isLength({ max: 1000 }).withMessage('Delivery address cannot exceed 1000 characters'),
+
+  body('specialInstructions')
+    .optional({ nullable: true, checkFalsy: true })
+    .trim()
+    .isLength({ max: 500 }).withMessage('Special instructions cannot exceed 500 characters'),
 
   body('paymentMethod')
     .isIn(['mpesa', 'pickup', 'delivery']).withMessage('Invalid payment method'),

@@ -31,7 +31,7 @@ const getProfile = async (req, res, next) => {
 
 const addNote = async (req, res, next) => {
   try {
-    const result = await customerService.addNote(req.params.id, req.body.note, req.user.id);
+    const result = await customerService.addNote(req.params.id, req.body.note, req.user.id, req.user.role);
     return success(res, result, 'Note added');
   } catch (err) { next(err); }
 };

@@ -143,7 +143,7 @@ const lockAdminAccount = async (userId, superAdminId) => {
   return { id: user._id, name: user.name, isLocked: true };
 };
 
-const unlockAdminAccount = async (userId, superAdminId) => {
+const unlockAdminAccount = async (userId, adminId, actorRole = ROLES.SUPERADMIN) => {
   const user = await User.findByIdAndUpdate(
     userId,
     { isLocked: false, failedLoginCount: 0 },
@@ -153,8 +153,8 @@ const unlockAdminAccount = async (userId, superAdminId) => {
   if (!user) throw new AppError('User not found', 404, 'USER_NOT_FOUND');
 
   await activityLogService.log({
-    actorId: superAdminId,
-    actorRole: ROLES.SUPERADMIN,
+    actorId: adminId,
+    actorRole,
     action: LOG_ACTIONS.CUSTOMER_ACCOUNT_UNLOCKED,
     targetId: userId,
     targetType: 'User',

@@ -103,7 +103,13 @@ const login = async ({ phone, password }, ip) => {
   }
 
   if (user.isLocked) {
-    throw new AppError('This account has been locked due to too many failed login attempts. Please contact support.', 423, 'ACCOUNT_LOCKED');
+    // Return a generic 401 to avoid confirming which phones are registered
+    await activityLogService.log({
+      actorId: user._id, actorRole: user.role,
+      action: LOG_ACTIONS.FAILED_LOGIN, ip,
+      detail: { phone: user.phone, reason: 'ACCOUNT_LOCKED' }
+    }).catch(() => {});
+    throw new AppError('Invalid phone number or password', 401, 'INVALID_CREDENTIALS');
   }
 
   const isMatch = await bcrypt.compare(password, user.passwordHash);
@@ -202,6 +208,18 @@ const selectBranch = async (preAuthToken, branchId, ip = null) => {
     throw new AppError('Invalid token for branch selection', 401, 'INVALID_PREAUTH_TOKEN');
   }
 
+  // Prevent reuse — blacklist the preAuthToken immediately so it can't select a second branch
+  try {
+    const expiresAt = new Date(decoded.exp * 1000);
+    await TokenBlacklist.create({ token: preAuthToken, userId: decoded.userId, expiresAt });
+  } catch (err) {
+    if (err.code === 11000) {
+      // Duplicate key = already consumed — reject to prevent replay
+      throw new AppError('Session already used. Please log in again.', 401, 'INVALID_PREAUTH_TOKEN');
+    }
+    throw err;
+  }
+
   const user = await User.findById(decoded.userId);
   if (!user || user.isLocked) {
     throw new AppError('User not found or account locked', 401, 'UNAUTHORIZED');
@@ -241,7 +259,7 @@ const selectBranch = async (preAuthToken, branchId, ip = null) => {
 };
 
 // ── SWITCH BRANCH (superadmin only, already logged in) ────────────────────────
-const switchBranch = async (userId, branchId) => {
+const switchBranch = async (userId, branchId, oldRefreshToken = null) => {
   const user = await User.findById(userId);
   if (!user || user.role !== ROLES.SUPERADMIN) {
     throw new AppError('Only superadmin can switch branches', 403, 'FORBIDDEN');
@@ -251,6 +269,22 @@ const switchBranch = async (userId, branchId) => {
   if (branchId) {
     branch = await Branch.findOne({ _id: branchId, isActive: true });
     if (!branch) throw new AppError('Branch not found or inactive', 404, 'BRANCH_NOT_FOUND');
+  }
+
+  // Revoke the old refresh token so it can't be used after the branch context changes
+  if (oldRefreshToken) {
+    try {
+      const decoded = jwt.decode(oldRefreshToken);
+      if (decoded?.exp) {
+        await TokenBlacklist.create({
+          token: oldRefreshToken,
+          userId: user._id,
+          expiresAt: new Date(decoded.exp * 1000)
+        });
+      }
+    } catch {
+      // Non-fatal — proceed with issuing new tokens
+    }
   }
 
   const { accessToken, refreshToken } = generateTokens(user, branch?._id || null);
@@ -394,7 +428,7 @@ const lockAccount = async (userId) => {
 };
 
 // ── UNLOCK ACCOUNT ────────────────────────────────────────────────────────────
-const unlockAccount = async (userId, adminId) => {
+const unlockAccount = async (userId, adminId, actorRole = ROLES.ADMIN) => {
   const user = await User.findByIdAndUpdate(
     userId,
     { isLocked: false, failedLoginCount: 0 },
@@ -407,7 +441,7 @@ const unlockAccount = async (userId, adminId) => {
 
   await activityLogService.log({
     actorId: adminId,
-    actorRole: ROLES.ADMIN,
+    actorRole,
     action: 'CUSTOMER_ACCOUNT_UNLOCKED',
     targetId: userId,
     targetType: 'User'
@@ -416,16 +450,30 @@ const unlockAccount = async (userId, adminId) => {
   return user;
 };
 
+const PASSWORD_STRENGTH_RE = {
+  minLength:  /.{8,}/,
+  uppercase:  /[A-Z]/,
+  digit:      /[0-9]/,
+};
+
+const validatePasswordStrength = (password) => {
+  if (!PASSWORD_STRENGTH_RE.minLength.test(password))
+    throw new AppError('Password must be at least 8 characters', 400, 'PASSWORD_TOO_SHORT');
+  if (!PASSWORD_STRENGTH_RE.uppercase.test(password))
+    throw new AppError('Password must contain at least one uppercase letter', 400, 'PASSWORD_TOO_WEAK');
+  if (!PASSWORD_STRENGTH_RE.digit.test(password))
+    throw new AppError('Password must contain at least one number', 400, 'PASSWORD_TOO_WEAK');
+};
+
 // ── CHANGE PASSWORD ───────────────────────────────────────────────────────────
-const changePassword = async (userId, currentPassword, newPassword) => {
+const changePassword = async (userId, currentPassword, newPassword, ip = null) => {
   const user = await User.findById(userId);
   if (!user) throw new AppError('User not found', 404, 'USER_NOT_FOUND');
 
   const isMatch = await bcrypt.compare(currentPassword, user.passwordHash);
   if (!isMatch) throw new AppError('Current password is incorrect', 400, 'WRONG_PASSWORD');
 
-  if (newPassword.length < 8)
-    throw new AppError('New password must be at least 8 characters', 400, 'PASSWORD_TOO_SHORT');
+  validatePasswordStrength(newPassword);
 
   if (currentPassword === newPassword)
     throw new AppError('New password must be different from current password', 400, 'SAME_PASSWORD');
@@ -439,6 +487,7 @@ const changePassword = async (userId, currentPassword, newPassword) => {
     action: 'PASSWORD_CHANGED',
     targetId: userId,
     targetType: 'User',
+    ip,
     detail: {}
   });
 
@@ -454,7 +503,7 @@ const getProfile = async (userId) => {
 };
 
 // ── UPDATE PROFILE ────────────────────────────────────────────────────────────
-const updateProfile = async (userId, { name, email, addresses }) => {
+const updateProfile = async (userId, { name, email, addresses }, ip = null) => {
   if (email) {
     const existing = await User.findOne({ email, _id: { $ne: userId } });
     if (existing) throw new AppError('Email already in use', 409, 'EMAIL_TAKEN');
@@ -478,6 +527,7 @@ const updateProfile = async (userId, { name, email, addresses }) => {
     action: 'PROFILE_UPDATED',
     targetId: userId,
     targetType: 'User',
+    ip,
     detail: {}
   });
 

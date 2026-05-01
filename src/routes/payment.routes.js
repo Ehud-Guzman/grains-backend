@@ -6,12 +6,13 @@ const router = express.Router();
 const paymentController = require('../controllers/payment.controller');
 const { verifyToken } = require('../middleware/auth.middleware');
 const { validateSafaricomIP } = require('../utils/mpesaHelpers');
-const { publicLimiter, callbackLimiter } = require('../middleware/rateLimit.middleware');
+const { callbackLimiter, stkLimiter } = require('../middleware/rateLimit.middleware');
 
 // POST /api/payments/mpesa/initiate — open to guests and logged-in customers
+// stkLimiter (5/min) is tighter than the global publicLimiter (100/min) to prevent drain attacks
 router.post(
   '/mpesa/initiate',
-  publicLimiter,
+  stkLimiter,
   paymentController.initiate
 );
 

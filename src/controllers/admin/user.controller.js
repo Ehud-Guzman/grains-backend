@@ -32,7 +32,7 @@ const lockAccount = async (req, res, next) => {
 
 const unlockAccount = async (req, res, next) => {
   try {
-    const result = await userService.unlockAdminAccount(req.params.id, req.user.id);
+    const result = await userService.unlockAdminAccount(req.params.id, req.user.id, req.user.role);
     return success(res, result, 'Account unlocked');
   } catch (err) { next(err); }
 };

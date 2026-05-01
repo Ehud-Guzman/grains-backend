@@ -4,6 +4,7 @@ const cors = require('cors');
 const helmet = require('helmet');
 const mongoSanitize = require('express-mongo-sanitize');
 const hpp = require('hpp');
+const cookieParser = require('cookie-parser');
 const Sentry = require('@sentry/node');
 require('dotenv').config();
 
@@ -75,7 +76,8 @@ app.use(helmet({
       connectSrc: ["'self'"],
       fontSrc:    ["'self'"],
       objectSrc:  ["'none'"],
-      upgradeInsecureRequests: process.env.NODE_ENV === 'production' ? [] : null
+      upgradeInsecureRequests: process.env.NODE_ENV === 'production' ? [] : null,
+      reportUri:  ['/api/csp-report']
     }
   },
   crossOriginEmbedderPolicy: false
@@ -113,6 +115,9 @@ app.use((req, res, next) => {
 
 app.use(requestTiming);
 
+// ── COOKIE PARSING ────────────────────────────────────────────────────────────
+app.use(cookieParser());
+
 // ── BODY PARSING ──────────────────────────────────────────────────────────────
 app.use(express.json({ limit: '10kb' }));
 app.use(express.urlencoded({ extended: true, limit: '10kb' }));
@@ -145,31 +150,6 @@ app.use(mongoSanitize({
   }
 }));
 
-// ── XSS PROTECTION ────────────────────────────────────────────────────────────
-// xss-clean only encodes < but not > — apply full escaping manually
-function escapeHtml(value) {
-  if (typeof value !== 'string') return value;
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#x27;');
-}
-function deepEscape(obj) {
-  if (Array.isArray(obj)) return obj.map(deepEscape);
-  if (obj && typeof obj === 'object') {
-    return Object.fromEntries(Object.entries(obj).map(([k, v]) => [k, deepEscape(v)]));
-  }
-  return escapeHtml(obj);
-}
-app.use((req, _res, next) => {
-  if (req.body) req.body = deepEscape(req.body);
-  if (req.query) req.query = deepEscape(req.query);
-  if (req.params) req.params = deepEscape(req.params);
-  next();
-});
-
 // ── HTTP PARAMETER POLLUTION PROTECTION ──────────────────────────────────────
 app.use(hpp({
   whitelist: ['category', 'status', 'packagingSize']
@@ -182,16 +162,22 @@ app.get('/api/health', (_req, res) => {
     return res.status(503).json({
       success: false,
       message: 'Database unavailable',
-      env: process.env.NODE_ENV,
       timestamp: new Date().toISOString()
     });
   }
   res.json({
     success: true,
     message: 'Grains & Cereals API is running',
-    env: process.env.NODE_ENV,
     timestamp: new Date().toISOString()
   });
+});
+
+// ── CSP VIOLATION REPORTS ─────────────────────────────────────────────────────
+app.post('/api/csp-report', express.json({ type: 'application/csp-report', limit: '4kb' }), (req, res) => {
+  if (req.body?.['csp-report']) {
+    logger.warn('CSP_VIOLATION', { report: req.body['csp-report'] });
+  }
+  res.status(204).end();
 });
 
 // ── RATE LIMITING ─────────────────────────────────────────────────────────────

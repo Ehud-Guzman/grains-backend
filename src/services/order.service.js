@@ -20,9 +20,6 @@ const {
 } = require('../utils/constants');
 const { paginate, buildPaginationMeta } = require('../utils/paginate');
 
-let autoCancelLastRunAt = 0;
-const AUTO_CANCEL_CHECK_INTERVAL_MS = 60 * 1000;
-
 const orderHasHeldStock = (order) => (
   [STOCK_RESERVATION_STATUSES.HELD, STOCK_RESERVATION_STATUSES.CONSUMED]
     .includes(order.stockReservationStatus || STOCK_RESERVATION_STATUSES.NONE)
@@ -143,9 +140,7 @@ const reserveOrderStock = async (order, actorId, actorRole, session) => {
   order.stockReservedAt = new Date();
   order.stockReleasedAt = null;
   order.stockConsumedAt = null;
-  order.statusHistory[0].note = actorRole === 'guest'
-    ? 'Order placed and stock reserved'
-    : 'Order placed and stock reserved';
+  order.statusHistory[0].note = 'Order placed and stock reserved';
   await order.save({ session });
 };
 
@@ -285,17 +280,15 @@ const calculateDeliveryFee = (settings, deliveryMethod, customerCoords) => {
   return { fee: flatFee, distanceKm: null, zoneName: null, deliveryAvailable: true };
 };
 
+// Called by autoCancel.job.js every 5 minutes — do NOT call per-request;
+// the per-instance module variable anti-pattern was removed (see audit M3).
 const autoCancelExpiredPendingOrders = async (branchId) => {
-  const now = Date.now();
-  if (now - autoCancelLastRunAt < AUTO_CANCEL_CHECK_INTERVAL_MS) return;
-  autoCancelLastRunAt = now;
-
   if (!branchId) return; // skip auto-cancel in global (no-branch) context
 
   const settings = await settingsService.getSettings(branchId);
   if (!settings.autoCancelHours || settings.autoCancelHours <= 0) return;
 
-  const cutoff = new Date(now - (settings.autoCancelHours * 60 * 60 * 1000));
+  const cutoff = new Date(Date.now() - (settings.autoCancelHours * 60 * 60 * 1000));
   const expiredOrders = await Order.find({
     branchId,
     status: ORDER_STATUSES.PENDING,
@@ -354,7 +347,7 @@ const autoCancelExpiredPendingOrders = async (branchId) => {
 // SRS 5.2 + 5.5 - no login required
 const createGuestOrder = async (orderData, branchId) => {
   if (!branchId) throw new AppError('Branch context required to place an order', 400, 'BRANCH_REQUIRED');
-  await autoCancelExpiredPendingOrders(branchId);
+  // Auto-cancel is handled by autoCancel.job.js — no per-request call needed
   const settings = await settingsService.getSettings(branchId);
   assertShopCanAcceptOrders(settings);
 
@@ -465,7 +458,7 @@ const createGuestOrder = async (orderData, branchId) => {
 // SRS 5.2 - registered customer order
 const createCustomerOrder = async (orderData, userId, branchId) => {
   if (!branchId) throw new AppError('Branch context required to place an order', 400, 'BRANCH_REQUIRED');
-  await autoCancelExpiredPendingOrders(branchId);
+  // Auto-cancel is handled by autoCancel.job.js — no per-request call needed
 
   const user = await User.findById(userId);
   if (!user) throw new AppError('User not found', 404, 'USER_NOT_FOUND');
@@ -558,7 +551,7 @@ const createCustomerOrder = async (orderData, userId, branchId) => {
 
 // ── GET SINGLE ORDER ──────────────────────────────────────────────────────────
 const getById = async (orderId, branchId) => {
-  await autoCancelExpiredPendingOrders(branchId);
+  // Auto-cancel is handled by autoCancel.job.js — no per-request call needed
 
   const query = { _id: orderId };
   if (branchId) query.branchId = branchId;
@@ -576,7 +569,7 @@ const getById = async (orderId, branchId) => {
 // ── GET ALL ORDERS (ADMIN) ────────────────────────────────────────────────────
 // SRS 5.2 admin capabilities + SRS 5.9 filtering
 const getAll = async (filters = {}, query = {}, branchId) => {
-  await autoCancelExpiredPendingOrders(branchId);
+  // Auto-cancel is handled by autoCancel.job.js — no per-request call needed
 
   const { page, limit, skip } = paginate(query);
   const matchStage = {};
@@ -621,7 +614,7 @@ const getAll = async (filters = {}, query = {}, branchId) => {
 
 // ── GET MY ORDERS (CUSTOMER) ──────────────────────────────────────────────────
 const getMyOrders = async (userId, query = {}, branchId) => {
-  await autoCancelExpiredPendingOrders(branchId);
+  // Auto-cancel is handled by autoCancel.job.js — no per-request call needed
 
   const { page, limit, skip } = paginate(query);
   // Customers can see their orders across all branches (shared accounts)
@@ -645,7 +638,7 @@ const getMyOrders = async (userId, query = {}, branchId) => {
 // ── TRACK BY REF (GUEST) ──────────────────────────────────────────────────────
 // SRS 5.5 - public order tracking by phone + ref + verificationToken
 const trackByRef = async (phone, orderRef, verificationToken) => {
-  await autoCancelExpiredPendingOrders();
+  // Auto-cancel is handled by autoCancel.job.js — no per-request call needed
 
   if (!verificationToken) {
     throw new AppError('Verification token is required', 400, 'TOKEN_REQUIRED');
@@ -694,7 +687,7 @@ const validateTransition = (currentStatus, newStatus) => {
 // ── APPROVE ORDER ─────────────────────────────────────────────────────────────
 // SRS 5.2 - supervisor+, deducts stock atomically inside MongoDB transaction
 const approve = async (orderId, adminId, branchId) => {
-  await autoCancelExpiredPendingOrders(branchId);
+  // Auto-cancel is handled by autoCancel.job.js — no per-request call needed
 
   const session = await mongoose.startSession();
   session.startTransaction();
@@ -766,7 +759,7 @@ const approve = async (orderId, adminId, branchId) => {
 // ── REJECT ORDER ──────────────────────────────────────────────────────────────
 // SRS 5.2 - reason is mandatory
 const reject = async (orderId, adminId, reason, branchId) => {
-  await autoCancelExpiredPendingOrders(branchId);
+  // Auto-cancel is handled by autoCancel.job.js — no per-request call needed
 
   if (!reason || reason.trim().length < 3) {
     throw new AppError('A rejection reason is required', 400, 'REASON_REQUIRED');
@@ -822,7 +815,7 @@ const reject = async (orderId, adminId, reason, branchId) => {
 // ── UPDATE STATUS ─────────────────────────────────────────────────────────────
 // SRS 5.2 - staff+ moves order through the pipeline
 const updateStatus = async (orderId, newStatus, adminId, note = null, branchId) => {
-  await autoCancelExpiredPendingOrders(branchId);
+  // Auto-cancel is handled by autoCancel.job.js — no per-request call needed
   const session = await mongoose.startSession();
   session.startTransaction();
 
@@ -882,7 +875,7 @@ const updateStatus = async (orderId, newStatus, adminId, note = null, branchId) 
 // ── CANCEL ORDER ──────────────────────────────────────────────────────────────
 // SRS 5.2 - customer can cancel only if still pending
 const cancel = async (orderId, userId, branchId) => {
-  await autoCancelExpiredPendingOrders(branchId);
+  // Auto-cancel is handled by autoCancel.job.js — no per-request call needed
   const session = await mongoose.startSession();
   session.startTransaction();
 
@@ -967,7 +960,7 @@ const bulkReject = async (orderIds, adminId, reason, branchId) => {
 // ── PACKING SLIP DATA ─────────────────────────────────────────────────────────
 // SRS 5.2 - returns formatted data for print layout
 const getPackingSlip = async (orderId, branchId) => {
-  await autoCancelExpiredPendingOrders(branchId);
+  // Auto-cancel is handled by autoCancel.job.js — no per-request call needed
 
   const query = { _id: orderId };
   if (branchId) query.branchId = branchId;

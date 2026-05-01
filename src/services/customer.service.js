@@ -99,7 +99,7 @@ const getProfile = async (userId) => {
 
 // ── ADD INTERNAL NOTE ─────────────────────────────────────────────────────────
 // SRS 5.5 - admin-only notes on customer profile, append-only
-const addNote = async (userId, note, adminId) => {
+const addNote = async (userId, note, adminId, adminRole) => {
   const user = await User.findById(userId);
   if (!user) throw new AppError('Customer not found', 404, 'USER_NOT_FOUND');
 
@@ -112,7 +112,7 @@ const addNote = async (userId, note, adminId) => {
 
   await activityLogService.log({
     actorId: adminId,
-    actorRole: 'supervisor',
+    actorRole: adminRole,
     action: 'CUSTOMER_NOTE_ADDED',
     targetId: userId,
     targetType: 'User',
