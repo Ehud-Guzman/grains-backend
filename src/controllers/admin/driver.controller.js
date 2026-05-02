@@ -21,7 +21,8 @@ const create = async (req, res, next) => {
     const driver = await driverService.createDriver(
       { name, phone, email, password, vehicleType, vehiclePlate },
       req.user.id,
-      req.branchId
+      req.branchId,
+      req.user.role
     );
     return success(res, driver, 'Driver account created', 201);
   } catch (err) { next(err); }
@@ -57,7 +58,7 @@ const unlockAccount = async (req, res, next) => {
 
 const resetPassword = async (req, res, next) => {
   try {
-    const result = await driverService.resetDriverPassword(req.params.id, req.body.password, req.user.id, req.branchId);
+    const result = await driverService.resetDriverPassword(req.params.id, req.body.password, req.user.id, req.branchId, req.user.role);
     return success(res, result, 'Password reset successfully');
   } catch (err) { next(err); }
 };

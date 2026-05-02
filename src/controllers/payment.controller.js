@@ -41,7 +41,8 @@ const manualConfirm = async (req, res, next) => {
     const result = await paymentService.manualConfirmPayment(
       req.params.orderId,
       req.user.id,
-      transactionRef
+      transactionRef,
+      req.user.role
     );
     return success(res, result, 'Payment confirmed manually');
   } catch (err) { next(err); }

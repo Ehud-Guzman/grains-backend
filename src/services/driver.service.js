@@ -45,7 +45,7 @@ const getDriverById = async (driverId, branchId) => {
 };
 
 // ── CREATE DRIVER ACCOUNT ─────────────────────────────────────────────────────
-const createDriver = async ({ name, phone, email, password, vehicleType, vehiclePlate }, adminId, branchId) => {
+const createDriver = async ({ name, phone, email, password, vehicleType, vehiclePlate }, adminId, branchId, actorRole = ROLES.ADMIN) => {
   const existing = await User.findOne({ phone });
   if (existing) throw new AppError('An account with this phone number already exists', 409, 'PHONE_TAKEN');
 
@@ -72,7 +72,7 @@ const createDriver = async ({ name, phone, email, password, vehicleType, vehicle
 
   await activityLogService.log({
     actorId: adminId,
-    actorRole: ROLES.ADMIN,
+    actorRole,
     action: LOG_ACTIONS.DRIVER_CREATED,
     branchId,
     targetId: driver._id,
@@ -170,7 +170,7 @@ const unlockDriver = async (driverId, adminId, branchId, actorRole = ROLES.ADMIN
 };
 
 // ── RESET PASSWORD ────────────────────────────────────────────────────────────
-const resetDriverPassword = async (driverId, newPassword, adminId, branchId) => {
+const resetDriverPassword = async (driverId, newPassword, adminId, branchId, actorRole = ROLES.ADMIN) => {
   if (!newPassword || newPassword.length < 8) {
     throw new AppError('Password must be at least 8 characters', 400, 'INVALID_PASSWORD');
   }
@@ -184,7 +184,7 @@ const resetDriverPassword = async (driverId, newPassword, adminId, branchId) => 
   if (!driver) throw new AppError('Driver not found', 404, 'DRIVER_NOT_FOUND');
 
   await activityLogService.log({
-    actorId: adminId, actorRole: ROLES.ADMIN,
+    actorId: adminId, actorRole,
     action: LOG_ACTIONS.DRIVER_PASSWORD_RESET,
     branchId, targetId: driverId, targetType: 'User',
     detail: { name: driver.name }

@@ -1,4 +1,18 @@
-const { body } = require('express-validator');
+const { body, check } = require('express-validator');
+
+const deliveryCoordinatesValidator =
+  check('deliveryCoordinates')
+    .optional({ nullable: true })
+    .custom((val) => {
+      if (val === null || val === undefined) return true;
+      if (typeof val !== 'object') throw new Error('deliveryCoordinates must be an object');
+      const { lat, lng } = val;
+      if (typeof lat !== 'number' || typeof lng !== 'number')
+        throw new Error('deliveryCoordinates.lat and .lng must be numbers');
+      if (lat < -90 || lat > 90)   throw new Error('Invalid latitude (must be -90 to 90)');
+      if (lng < -180 || lng > 180) throw new Error('Invalid longitude (must be -180 to 180)');
+      return true;
+    });
 
 const orderItemsValidator = [
   body('orderItems')
@@ -50,6 +64,7 @@ const guestOrderValidator = [
   body('paymentMethod')
     .isIn(['mpesa', 'pickup', 'delivery']).withMessage('Invalid payment method'),
 
+  deliveryCoordinatesValidator,
   ...orderItemsValidator
 ];
 
@@ -71,6 +86,7 @@ const customerOrderValidator = [
   body('paymentMethod')
     .isIn(['mpesa', 'pickup', 'delivery']).withMessage('Invalid payment method'),
 
+  deliveryCoordinatesValidator,
   ...orderItemsValidator
 ];
 

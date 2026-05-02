@@ -62,7 +62,7 @@ const getAllAdmin = async (req, res, next) => {
 // ── ADMIN: CREATE PRODUCT ─────────────────────────────────────────────────────
 const create = async (req, res, next) => {
   try {
-    const product = await productService.create(req.body, req.user.id, req.branchId);
+    const product = await productService.create(req.body, req.user.id, req.branchId, req.user.role);
     return success(res, product, 'Product created', 201);
   } catch (err) { next(err); }
 };
@@ -70,7 +70,7 @@ const create = async (req, res, next) => {
 // ── ADMIN: UPDATE PRODUCT ─────────────────────────────────────────────────────
 const update = async (req, res, next) => {
   try {
-    const product = await productService.update(req.params.id, req.body, req.user.id, req.branchId);
+    const product = await productService.update(req.params.id, req.body, req.user.id, req.branchId, req.user.role);
     return success(res, product, 'Product updated');
   } catch (err) { next(err); }
 };
@@ -78,7 +78,7 @@ const update = async (req, res, next) => {
 // ── ADMIN: TOGGLE ACTIVE ──────────────────────────────────────────────────────
 const toggleActive = async (req, res, next) => {
   try {
-    const product = await productService.toggleActive(req.params.id, req.user.id, req.branchId);
+    const product = await productService.toggleActive(req.params.id, req.user.id, req.branchId, req.user.role);
     return success(res, product, product.isActive ? 'Product activated' : 'Product deactivated');
   } catch (err) { next(err); }
 };
@@ -86,7 +86,7 @@ const toggleActive = async (req, res, next) => {
 // ── ADMIN: DUPLICATE PRODUCT ──────────────────────────────────────────────────
 const duplicate = async (req, res, next) => {
   try {
-    const product = await productService.duplicate(req.params.id, req.user.id, req.branchId);
+    const product = await productService.duplicate(req.params.id, req.user.id, req.branchId, req.user.role);
     return success(res, product, 'Product duplicated', 201);
   } catch (err) { next(err); }
 };
@@ -94,7 +94,7 @@ const duplicate = async (req, res, next) => {
 // ── ADMIN: DELETE PRODUCT ─────────────────────────────────────────────────────
 const deleteProduct = async (req, res, next) => {
   try {
-    await productService.deleteProduct(req.params.id, req.user.id, req.branchId);
+    await productService.deleteProduct(req.params.id, req.user.id, req.branchId, req.user.role);
     return success(res, null, 'Product deleted');
   } catch (err) { next(err); }
 };

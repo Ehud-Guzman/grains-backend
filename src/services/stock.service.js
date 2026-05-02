@@ -167,7 +167,7 @@ const releaseStock = async (productId, varietyName, packagingSize, quantity, ord
 
 // ── ADD DELIVERY ──────────────────────────────────────────────────────────────
 // SRS 5.4 - supervisor+ adds new stock after a delivery
-const addDelivery = async (productId, varietyName, packagingSize, quantity, reason, supplierId, performedBy, branchId) => {
+const addDelivery = async (productId, varietyName, packagingSize, quantity, reason, supplierId, performedBy, branchId, actorRole = 'supervisor') => {
   if (quantity <= 0) throw new AppError('Quantity must be greater than 0', 400, 'INVALID_QUANTITY');
 
   const product = await Product.findOneAndUpdate(
@@ -209,7 +209,7 @@ const addDelivery = async (productId, varietyName, packagingSize, quantity, reas
 
   await activityLogService.log({
     actorId: performedBy,
-    actorRole: 'supervisor',
+    actorRole,
     action: LOG_ACTIONS.STOCK_DELIVERY_ADDED,
     branchId,
     targetId: productId,
@@ -223,7 +223,7 @@ const addDelivery = async (productId, varietyName, packagingSize, quantity, reas
 
 // ── MANUAL ADJUSTMENT ─────────────────────────────────────────────────────────
 // SRS 5.4 - supervisor+ manual correction, reason is mandatory
-const manualAdjustment = async (productId, varietyName, packagingSize, newQuantity, reason, performedBy, branchId) => {
+const manualAdjustment = async (productId, varietyName, packagingSize, newQuantity, reason, performedBy, branchId, actorRole = 'supervisor') => {
   if (!reason || reason.trim().length < 3) {
     throw new AppError('A reason is required for manual stock adjustments', 400, 'REASON_REQUIRED');
   }
@@ -276,7 +276,7 @@ const manualAdjustment = async (productId, varietyName, packagingSize, newQuanti
 
   await activityLogService.log({
     actorId: performedBy,
-    actorRole: 'supervisor',
+    actorRole,
     action: LOG_ACTIONS.STOCK_MANUALLY_ADJUSTED,
     branchId,
     targetId: productId,

@@ -18,24 +18,25 @@ const {
 
 // ── INITIATE STK PUSH ─────────────────────────────────────────────────────────
 const initiateStkPush = async (orderId, phone) => {
-  const order = await Order.findById(orderId);
-  if (!order) throw new AppError('Order not found', 404, 'ORDER_NOT_FOUND');
+  // Atomic guard: flip paymentStatus → PENDING only if the order is not already
+  // PAID or PENDING. This prevents two concurrent requests both passing the check
+  // and issuing two STK pushes to the customer's phone.
+  const order = await Order.findOneAndUpdate(
+    { _id: orderId, paymentStatus: { $nin: [PAYMENT_STATUSES.PAID, PAYMENT_STATUSES.PENDING] } },
+    { $set: { paymentStatus: PAYMENT_STATUSES.PENDING } },
+    { new: true }
+  );
 
-  if (order.paymentStatus === PAYMENT_STATUSES.PAID) {
-    throw new AppError('This order has already been paid', 400, 'ALREADY_PAID');
-  }
-
-  // Block STK push spam — if a pending payment already exists for this order, reject.
-  // The frontend should poll /status instead of re-initiating.
-  if (order.paymentId) {
-    const existing = await Payment.findById(order.paymentId).select('status');
-    if (existing && existing.status === PAYMENT_STATUSES.PENDING) {
-      throw new AppError(
-        'A payment is already in progress for this order. Please wait for it to complete.',
-        400,
-        'PAYMENT_IN_PROGRESS'
-      );
-    }
+  if (!order) {
+    const existing = await Order.findById(orderId).select('paymentStatus').lean();
+    if (!existing) throw new AppError('Order not found', 404, 'ORDER_NOT_FOUND');
+    if (existing.paymentStatus === PAYMENT_STATUSES.PAID)
+      throw new AppError('This order has already been paid', 400, 'ALREADY_PAID');
+    throw new AppError(
+      'A payment is already in progress for this order. Please wait for it to complete.',
+      400,
+      'PAYMENT_IN_PROGRESS'
+    );
   }
 
   // Always derive amount from the order — never trust client-supplied values
@@ -81,6 +82,8 @@ const initiateStkPush = async (orderId, phone) => {
       timeout: 30000
     });
   } catch (err) {
+    // Reset paymentStatus so the customer can retry
+    await Order.findByIdAndUpdate(orderId, { paymentStatus: PAYMENT_STATUSES.FAILED }).catch(() => {});
     const msg = err.response?.data?.errorMessage || err.message;
     console.error('[M-PESA] STK push failed:', msg);
     throw new AppError(`M-Pesa request failed: ${msg}`, 502, 'MPESA_REQUEST_FAILED');
@@ -89,6 +92,7 @@ const initiateStkPush = async (orderId, phone) => {
   const { CheckoutRequestID, MerchantRequestID, ResponseCode, ResponseDescription } = darajaResponse.data;
 
   if (ResponseCode !== '0') {
+    await Order.findByIdAndUpdate(orderId, { paymentStatus: PAYMENT_STATUSES.FAILED }).catch(() => {});
     throw new AppError(`M-Pesa rejected the request: ${ResponseDescription}`, 502, 'MPESA_REJECTED');
   }
 
@@ -103,11 +107,8 @@ const initiateStkPush = async (orderId, phone) => {
     status:            PAYMENT_STATUSES.PENDING
   });
 
-  // Link payment to order
-  await Order.findByIdAndUpdate(orderId, {
-    paymentId:     payment._id,
-    paymentStatus: PAYMENT_STATUSES.PENDING
-  });
+  // Link payment to order (paymentStatus already set to PENDING by the atomic guard above)
+  await Order.findByIdAndUpdate(orderId, { paymentId: payment._id });
 
   return {
     checkoutRequestId: CheckoutRequestID,
@@ -250,7 +251,7 @@ const checkPaymentStatus = async (orderId, requestingUser) => {
 // Requires a real M-Pesa receipt number — format validated and uniqueness enforced.
 const MPESA_RECEIPT_REGEX = /^[A-Z0-9]{10}$/;
 
-const manualConfirmPayment = async (orderId, adminId, transactionRef) => {
+const manualConfirmPayment = async (orderId, adminId, transactionRef, actorRole = 'supervisor') => {
   // Require a non-empty transaction reference
   if (!transactionRef || typeof transactionRef !== 'string' || !transactionRef.trim()) {
     throw new AppError(
@@ -320,7 +321,7 @@ const manualConfirmPayment = async (orderId, adminId, transactionRef) => {
 
   await activityLogService.log({
     actorId:    adminId,
-    actorRole:  'admin',
+    actorRole,
     action:     LOG_ACTIONS.PAYMENT_MANUALLY_CONFIRMED,
     targetId:   payment._id,
     targetType: 'Payment',

@@ -22,35 +22,35 @@ const getById = async (req, res, next) => {
 
 const approve = async (req, res, next) => {
   try {
-    const order = await orderService.approve(req.params.id, req.user.id, req.branchId);
+    const order = await orderService.approve(req.params.id, req.user.id, req.branchId, req.user.role);
     return success(res, order, 'Order approved and stock deducted');
   } catch (err) { next(err); }
 };
 
 const reject = async (req, res, next) => {
   try {
-    const order = await orderService.reject(req.params.id, req.user.id, req.body.reason, req.branchId);
+    const order = await orderService.reject(req.params.id, req.user.id, req.body.reason, req.branchId, req.user.role);
     return success(res, order, 'Order rejected');
   } catch (err) { next(err); }
 };
 
 const updateStatus = async (req, res, next) => {
   try {
-    const order = await orderService.updateStatus(req.params.id, req.body.status, req.user.id, req.body.note, req.branchId);
+    const order = await orderService.updateStatus(req.params.id, req.body.status, req.user.id, req.body.note, req.branchId, req.user.role);
     return success(res, order, `Order status updated to ${req.body.status}`);
   } catch (err) { next(err); }
 };
 
 const bulkApprove = async (req, res, next) => {
   try {
-    const result = await orderService.bulkApprove(req.body.orderIds, req.user.id, req.branchId);
+    const result = await orderService.bulkApprove(req.body.orderIds, req.user.id, req.branchId, req.user.role);
     return success(res, result, `Approved: ${result.approved.length}, Failed: ${result.failed.length}`);
   } catch (err) { next(err); }
 };
 
 const bulkReject = async (req, res, next) => {
   try {
-    const result = await orderService.bulkReject(req.body.orderIds, req.user.id, req.body.reason, req.branchId);
+    const result = await orderService.bulkReject(req.body.orderIds, req.user.id, req.body.reason, req.branchId, req.user.role);
     return success(res, result, `Rejected: ${result.rejected.length}, Failed: ${result.failed.length}`);
   } catch (err) { next(err); }
 };
@@ -65,7 +65,7 @@ const getPackingSlip = async (req, res, next) => {
 const assignDriver = async (req, res, next) => {
   try {
     const { driverId } = req.body;
-    const order = await orderService.assignDriver(req.params.id, driverId, req.user.id, req.branchId);
+    const order = await orderService.assignDriver(req.params.id, driverId, req.user.id, req.branchId, req.user.role);
     return success(res, order, 'Driver assigned successfully');
   } catch (err) { next(err); }
 };

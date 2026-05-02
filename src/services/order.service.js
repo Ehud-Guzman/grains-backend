@@ -4,6 +4,7 @@ const Order = require('../models/Order');
 const Product = require('../models/Product');
 const Guest = require('../models/Guest');
 const User = require('../models/User');
+const Branch = require('../models/Branch');
 const { AppError } = require('../middleware/errorHandler.middleware');
 const activityLogService = require('./activityLog.service');
 const notificationService = require('./notification.service');
@@ -347,6 +348,8 @@ const autoCancelExpiredPendingOrders = async (branchId) => {
 // SRS 5.2 + 5.5 - no login required
 const createGuestOrder = async (orderData, branchId) => {
   if (!branchId) throw new AppError('Branch context required to place an order', 400, 'BRANCH_REQUIRED');
+  const branch = await Branch.findOne({ _id: branchId, isActive: true }).lean();
+  if (!branch) throw new AppError('Branch not found or is currently unavailable', 404, 'BRANCH_NOT_FOUND');
   // Auto-cancel is handled by autoCancel.job.js — no per-request call needed
   const settings = await settingsService.getSettings(branchId);
   assertShopCanAcceptOrders(settings);
@@ -458,6 +461,8 @@ const createGuestOrder = async (orderData, branchId) => {
 // SRS 5.2 - registered customer order
 const createCustomerOrder = async (orderData, userId, branchId) => {
   if (!branchId) throw new AppError('Branch context required to place an order', 400, 'BRANCH_REQUIRED');
+  const branch = await Branch.findOne({ _id: branchId, isActive: true }).lean();
+  if (!branch) throw new AppError('Branch not found or is currently unavailable', 404, 'BRANCH_NOT_FOUND');
   // Auto-cancel is handled by autoCancel.job.js — no per-request call needed
 
   const user = await User.findById(userId);
@@ -686,7 +691,7 @@ const validateTransition = (currentStatus, newStatus) => {
 
 // ── APPROVE ORDER ─────────────────────────────────────────────────────────────
 // SRS 5.2 - supervisor+, deducts stock atomically inside MongoDB transaction
-const approve = async (orderId, adminId, branchId) => {
+const approve = async (orderId, adminId, branchId, actorRole = 'supervisor') => {
   // Auto-cancel is handled by autoCancel.job.js — no per-request call needed
 
   const session = await mongoose.startSession();
@@ -734,7 +739,7 @@ const approve = async (orderId, adminId, branchId) => {
 
     await activityLogService.log({
       actorId: adminId,
-      actorRole: 'supervisor',
+      actorRole,
       action: LOG_ACTIONS.ORDER_APPROVED,
       branchId: order.branchId,
       targetId: order._id,
@@ -758,7 +763,7 @@ const approve = async (orderId, adminId, branchId) => {
 
 // ── REJECT ORDER ──────────────────────────────────────────────────────────────
 // SRS 5.2 - reason is mandatory
-const reject = async (orderId, adminId, reason, branchId) => {
+const reject = async (orderId, adminId, reason, branchId, actorRole = 'supervisor') => {
   // Auto-cancel is handled by autoCancel.job.js — no per-request call needed
 
   if (!reason || reason.trim().length < 3) {
@@ -791,7 +796,7 @@ const reject = async (orderId, adminId, reason, branchId) => {
 
     await activityLogService.log({
       actorId: adminId,
-      actorRole: 'supervisor',
+      actorRole,
       action: LOG_ACTIONS.ORDER_REJECTED,
       branchId: order.branchId,
       targetId: order._id,
@@ -814,7 +819,7 @@ const reject = async (orderId, adminId, reason, branchId) => {
 
 // ── UPDATE STATUS ─────────────────────────────────────────────────────────────
 // SRS 5.2 - staff+ moves order through the pipeline
-const updateStatus = async (orderId, newStatus, adminId, note = null, branchId) => {
+const updateStatus = async (orderId, newStatus, adminId, note = null, branchId, actorRole = 'staff') => {
   // Auto-cancel is handled by autoCancel.job.js — no per-request call needed
   const session = await mongoose.startSession();
   session.startTransaction();
@@ -844,7 +849,7 @@ const updateStatus = async (orderId, newStatus, adminId, note = null, branchId) 
 
     await activityLogService.log({
       actorId: adminId,
-      actorRole: 'staff',
+      actorRole,
       action: LOG_ACTIONS.ORDER_STATUS_CHANGED,
       branchId: order.branchId,
       targetId: order._id,
@@ -922,12 +927,12 @@ const cancel = async (orderId, userId, branchId) => {
 
 // ── BULK APPROVE ──────────────────────────────────────────────────────────────
 // SRS 5.2 admin - approve multiple pending orders
-const bulkApprove = async (orderIds, adminId, branchId) => {
+const bulkApprove = async (orderIds, adminId, branchId, actorRole = 'supervisor') => {
   const results = { approved: [], failed: [] };
 
   for (const id of orderIds) {
     try {
-      const order = await approve(id, adminId, branchId);
+      const order = await approve(id, adminId, branchId, actorRole);
       results.approved.push(order.orderRef);
     } catch (err) {
       results.failed.push({ id, error: err.message });
@@ -938,7 +943,7 @@ const bulkApprove = async (orderIds, adminId, branchId) => {
 };
 
 // ── BULK REJECT ───────────────────────────────────────────────────────────────
-const bulkReject = async (orderIds, adminId, reason, branchId) => {
+const bulkReject = async (orderIds, adminId, reason, branchId, actorRole = 'supervisor') => {
   if (!reason || reason.trim().length < 3) {
     throw new AppError('A rejection reason is required for bulk reject', 400, 'REASON_REQUIRED');
   }
@@ -947,7 +952,7 @@ const bulkReject = async (orderIds, adminId, reason, branchId) => {
 
   for (const id of orderIds) {
     try {
-      const order = await reject(id, adminId, reason, branchId);
+      const order = await reject(id, adminId, reason, branchId, actorRole);
       results.rejected.push(order.orderRef);
     } catch (err) {
       results.failed.push({ id, error: err.message });
@@ -994,7 +999,7 @@ const getPackingSlip = async (orderId, branchId) => {
 // ── ASSIGN DRIVER TO ORDER ────────────────────────────────────────────────────
 // Admin assigns a driver when order is preparing or out_for_delivery.
 // Automatically transitions preparing → out_for_delivery on first assignment.
-const assignDriver = async (orderId, driverId, adminId, branchId) => {
+const assignDriver = async (orderId, driverId, adminId, branchId, actorRole = 'admin') => {
   const User = require('../models/User');
   const { ROLES } = require('../utils/constants');
 
@@ -1031,7 +1036,7 @@ const assignDriver = async (orderId, driverId, adminId, branchId) => {
 
   await activityLogService.log({
     actorId: adminId,
-    actorRole: 'admin',
+    actorRole,
     action: LOG_ACTIONS.DRIVER_ASSIGNED_TO_ORDER,
     branchId,
     targetId: order._id,

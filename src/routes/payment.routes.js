@@ -3,16 +3,26 @@
 
 const express = require('express');
 const router = express.Router();
+const { body } = require('express-validator');
 const paymentController = require('../controllers/payment.controller');
 const { verifyToken } = require('../middleware/auth.middleware');
 const { validateSafaricomIP } = require('../utils/mpesaHelpers');
 const { callbackLimiter, stkLimiter } = require('../middleware/rateLimit.middleware');
+const { validate } = require('../middleware/validate.middleware');
 
 // POST /api/payments/mpesa/initiate — open to guests and logged-in customers
 // stkLimiter (5/min) is tighter than the global publicLimiter (100/min) to prevent drain attacks
 router.post(
   '/mpesa/initiate',
   stkLimiter,
+  [
+    body('orderId').trim().isMongoId().withMessage('Invalid order ID'),
+    body('phone')
+      .trim()
+      .notEmpty().withMessage('Phone number is required')
+      .matches(/^(\+254|0)[17]\d{8}$/).withMessage('Enter a valid Kenyan phone number')
+  ],
+  validate,
   paymentController.initiate
 );
 

@@ -153,7 +153,7 @@ const getAllAdmin = async (filters = {}, query = {}, branchId) => {
 };
 
 // ── ADMIN: CREATE PRODUCT ─────────────────────────────────────────────────────
-const create = async (data, adminId, branchId) => {
+const create = async (data, adminId, branchId, actorRole = 'admin') => {
   const product = await Product.create({
     ...data,
     imageURLs: normalizeImageUrls(data.imageURLs),
@@ -168,7 +168,7 @@ const create = async (data, adminId, branchId) => {
 
   await activityLogService.log({
     actorId: adminId,
-    actorRole: 'admin',
+    actorRole,
     action: LOG_ACTIONS.PRODUCT_ADDED,
     branchId,
     targetId: product._id,
@@ -181,7 +181,7 @@ const create = async (data, adminId, branchId) => {
 };
 
 // ── ADMIN: UPDATE PRODUCT ─────────────────────────────────────────────────────
-const update = async (productId, data, adminId, branchId) => {
+const update = async (productId, data, adminId, branchId, actorRole = 'admin') => {
   const query = { _id: productId };
   if (branchId) query.branchId = branchId;
 
@@ -218,7 +218,7 @@ const update = async (productId, data, adminId, branchId) => {
 
   await activityLogService.log({
     actorId: adminId,
-    actorRole: 'admin',
+    actorRole,
     action: LOG_ACTIONS.PRODUCT_EDITED,
     branchId,
     targetId: product._id,
@@ -231,7 +231,7 @@ const update = async (productId, data, adminId, branchId) => {
 };
 
 // ── ADMIN: TOGGLE ACTIVE ──────────────────────────────────────────────────────
-const toggleActive = async (productId, adminId, branchId) => {
+const toggleActive = async (productId, adminId, branchId, actorRole = 'admin') => {
   const query = { _id: productId };
   if (branchId) query.branchId = branchId;
 
@@ -243,7 +243,7 @@ const toggleActive = async (productId, adminId, branchId) => {
 
   await activityLogService.log({
     actorId: adminId,
-    actorRole: 'admin',
+    actorRole,
     action: product.isActive ? LOG_ACTIONS.PRODUCT_ACTIVATED : LOG_ACTIONS.PRODUCT_DEACTIVATED,
     branchId,
     targetId: product._id,
@@ -256,7 +256,7 @@ const toggleActive = async (productId, adminId, branchId) => {
 };
 
 // ── ADMIN: DELETE PRODUCT ─────────────────────────────────────────────────────
-const deleteProduct = async (productId, adminId, branchId) => {
+const deleteProduct = async (productId, adminId, branchId, actorRole = 'admin') => {
   const query = { _id: productId };
   if (branchId) query.branchId = branchId;
 
@@ -276,7 +276,7 @@ const deleteProduct = async (productId, adminId, branchId) => {
 
   await activityLogService.log({
     actorId: adminId,
-    actorRole: 'admin',
+    actorRole,
     action: LOG_ACTIONS.PRODUCT_DELETED,
     branchId,
     targetId: productId,
@@ -289,7 +289,7 @@ const deleteProduct = async (productId, adminId, branchId) => {
 };
 
 // ── ADMIN: DUPLICATE PRODUCT ──────────────────────────────────────────────────
-const duplicate = async (productId, adminId, branchId) => {
+const duplicate = async (productId, adminId, branchId, actorRole = 'admin') => {
   const query = { _id: productId };
   if (branchId) query.branchId = branchId;
 
@@ -308,7 +308,7 @@ const duplicate = async (productId, adminId, branchId) => {
 
   await activityLogService.log({
     actorId: adminId,
-    actorRole: 'admin',
+    actorRole,
     action: LOG_ACTIONS.PRODUCT_ADDED,
     branchId,
     targetId: copy._id,
