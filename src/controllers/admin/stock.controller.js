@@ -18,7 +18,8 @@ const getLowStock = async (req, res, next) => {
 const getLogs = async (req, res, next) => {
   try {
     const { productId } = req.params;
-    const result = await stockService.getLogs(productId, req.query, req.query, req.branchId);
+    const pagination = { page: req.query.page, limit: req.query.limit };
+    const result = await stockService.getLogs(productId, req.query, pagination, req.branchId);
     return success(res, result);
   } catch (err) { next(err); }
 };

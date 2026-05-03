@@ -24,7 +24,7 @@ const log = async ({ actorId, actorRole, action, branchId = null, targetId = nul
     logger.info(`[AUDIT] ${parts.join(' | ')}`);
   } catch (err) {
     // Never let logging failures crash the main operation
-    console.error(`[ActivityLog] Failed to write log: ${err.message}`);
+    logger.error('[ActivityLog] Failed to write log', { err: err.message });
   }
 };
 

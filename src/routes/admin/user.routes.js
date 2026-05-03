@@ -4,8 +4,12 @@ const userController = require('../../controllers/admin/user.controller');
 const { verifyToken } = require('../../middleware/auth.middleware');
 const { requireRole } = require('../../middleware/role.middleware');
 const { validate } = require('../../middleware/validate.middleware');
-const { body } = require('express-validator');
+const { body, param } = require('express-validator');
 const { adminLimiter } = require('../../middleware/rateLimit.middleware');
+
+const userIdParamValidator = [
+  param('id').isMongoId().withMessage('Invalid user ID')
+];
 
 // ALL routes here are super-admin only - SRS 5.6 + 8.3
 router.use(verifyToken, requireRole('superadmin'), adminLimiter);
@@ -39,10 +43,10 @@ router.put('/:id/role',
 );
 
 // PATCH /api/admin/users/:id/lock
-router.patch('/:id/lock', userController.lockAccount);
+router.patch('/:id/lock', userIdParamValidator, validate, userController.lockAccount);
 
 // PATCH /api/admin/users/:id/unlock
-router.patch('/:id/unlock', userController.unlockAccount);
+router.patch('/:id/unlock', userIdParamValidator, validate, userController.unlockAccount);
 
 // PATCH /api/admin/users/:id/reset-password
 router.patch('/:id/reset-password',

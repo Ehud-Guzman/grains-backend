@@ -17,7 +17,8 @@ const unlockAccount = async (req, res, next) => {
 
 const getAll = async (req, res, next) => {
   try {
-    const result = await customerService.getAll(req.query, req.query);
+    const pagination = { page: req.query.page, limit: req.query.limit };
+    const result = await customerService.getAll(req.query, pagination);
     return success(res, result);
   } catch (err) { next(err); }
 };

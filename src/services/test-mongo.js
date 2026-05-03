@@ -1,6 +1,7 @@
 // test-mongo.js
 require('dotenv').config();
 const mongoose = require('mongoose');
+const logger = require('../utils/logger');
 
 const MONGO_URI = process.env.MONGO_URI;
 
@@ -10,10 +11,10 @@ async function testConnection() {
       useNewUrlParser: true,
       useUnifiedTopology: true,
     });
-    console.log('✅ MongoDB connected successfully!');
+    logger.info('MongoDB connected successfully');
     await mongoose.connection.close();
   } catch (err) {
-    console.error('❌ MongoDB connection failed:', err.message);
+    logger.error('MongoDB connection failed', { err: err.message });
   }
 }
 

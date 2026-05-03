@@ -2,6 +2,7 @@
 require('dotenv').config();
 const app = require('./src/app');
 const connectDB = require('./src/config/db');
+const logger = require('./src/utils/logger');
 const { startCleanupJobs }   = require('./src/jobs/cleanup.job');
 const { startKeepAlive }     = require('./src/jobs/keepAlive.job');
 const { startAutoCancelJob } = require('./src/jobs/autoCancel.job');
@@ -28,13 +29,13 @@ if (missingEnv.length > 0) {
 }
 
 // ── VALIDATE JWT SECRET STRENGTH ─────────────────────────────────────────────
-if (process.env.JWT_ACCESS_SECRET.length < 32) {
-  console.error('[STARTUP ERROR] JWT_ACCESS_SECRET is too short. Minimum 32 characters required.');
+if (process.env.JWT_ACCESS_SECRET.length < 64) {
+  console.error('[STARTUP ERROR] JWT_ACCESS_SECRET is too short. Minimum 64 characters required.');
   process.exit(1);
 }
 
-if (process.env.JWT_REFRESH_SECRET.length < 32) {
-  console.error('[STARTUP ERROR] JWT_REFRESH_SECRET is too short. Minimum 32 characters required.');
+if (process.env.JWT_REFRESH_SECRET.length < 64) {
+  console.error('[STARTUP ERROR] JWT_REFRESH_SECRET is too short. Minimum 64 characters required.');
   process.exit(1);
 }
 
@@ -46,8 +47,9 @@ if (process.env.JWT_ACCESS_SECRET === process.env.JWT_REFRESH_SECRET) {
 // ── PRODUCTION SAFETY WARNINGS ────────────────────────────────────────────────
 // These do not crash the server — they warn loudly so you notice in the logs.
 if (process.env.NODE_ENV === 'production') {
-  if (process.env.MPESA_ENV === 'sandbox' || !process.env.MPESA_ENV) {
-    console.warn('[STARTUP WARNING] MPESA_ENV is set to sandbox — real payments will NOT be processed.');
+  if (process.env.MPESA_ENV !== 'production') {
+    console.error('[STARTUP ERROR] MPESA_ENV must be "production" in a production environment. Refusing to start to prevent callback IP validation bypass.');
+    process.exit(1);
   }
 
   if (process.env.AT_USERNAME === 'sandbox' || !process.env.AT_USERNAME) {
@@ -55,8 +57,9 @@ if (process.env.NODE_ENV === 'production') {
   }
 
   const frontendUrl = process.env.FRONTEND_URL || '';
-  if (frontendUrl.includes('localhost') || frontendUrl.includes('127.0.0.1')) {
-    console.warn(`[STARTUP WARNING] FRONTEND_URL is set to "${frontendUrl}" in production — CORS will block real browser requests.`);
+  if (!frontendUrl.startsWith('https://')) {
+    console.error(`[STARTUP ERROR] FRONTEND_URL must start with "https://" in production. Current value: "${frontendUrl || '(empty)'}"`);
+    process.exit(1);
   }
 
   if (!process.env.SENTRY_DSN) {
@@ -68,18 +71,14 @@ if (process.env.NODE_ENV === 'production') {
 // Synchronous errors that were never caught anywhere
 // PM2 will automatically restart the process after exit
 process.on('uncaughtException', (err) => {
-  console.error('[UNCAUGHT EXCEPTION] Shutting down...');
-  console.error(`Error: ${err.message}`);
-  console.error(err.stack);
+  logger.error('[UNCAUGHT EXCEPTION] Shutting down...', { err });
   process.exit(1);
 });
 
 // ── UNHANDLED PROMISE REJECTION HANDLER ───────────────────────────────────────
 // Async errors that were never caught with try/catch or .catch()
 process.on('unhandledRejection', (reason, promise) => {
-  console.error('[UNHANDLED REJECTION] Shutting down...');
-  console.error('Promise:', promise);
-  console.error('Reason:', reason);
+  logger.error('[UNHANDLED REJECTION] Shutting down...', { promise, reason });
   process.exit(1);
 });
 
@@ -95,7 +94,7 @@ const startServer = async () => {
     startKeepAlive();
 
     const server = app.listen(PORT, () => {
-      console.log(`
+      logger.info(`
 ====================================
   Grains & Cereals API
   Port:        ${PORT}
@@ -109,12 +108,12 @@ const startServer = async () => {
     // ── GRACEFUL SHUTDOWN ─────────────────────────────────────────────────────
     // PM2 sends SIGTERM on restart — finish in-flight requests before closing
     process.on('SIGTERM', () => {
-      console.log('[SIGTERM] Graceful shutdown initiated...');
+      logger.info('[SIGTERM] Graceful shutdown initiated...');
       server.close(async () => {
-        console.log('[SIGTERM] HTTP server closed. All connections drained.');
+        logger.info('[SIGTERM] HTTP server closed. All connections drained.');
         // Give in-flight DB operations 5 seconds to complete
         setTimeout(() => {
-          console.log('[SIGTERM] Shutdown complete.');
+          logger.info('[SIGTERM] Shutdown complete.');
           process.exit(0);
         }, 5000);
       });
@@ -122,15 +121,15 @@ const startServer = async () => {
 
     // SIGINT handles Ctrl+C in development
     process.on('SIGINT', () => {
-      console.log('\n[SIGINT] Shutting down (Ctrl+C)...');
+      logger.info('[SIGINT] Shutting down (Ctrl+C)...');
       server.close(() => {
-        console.log('[SIGINT] Server closed.');
+        logger.info('[SIGINT] Server closed.');
         process.exit(0);
       });
     });
 
   } catch (err) {
-    console.error('[STARTUP ERROR] Failed to start server:', err.message);
+    logger.error('[STARTUP ERROR] Failed to start server', { err });
     process.exit(1);
   }
 };

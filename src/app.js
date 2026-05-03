@@ -70,7 +70,7 @@ app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
-      styleSrc:   ["'self'", "'unsafe-inline'"],
+      styleSrc:   ["'self'"],
       scriptSrc:  ["'self'"],
       imgSrc:     ["'self'", "data:", "res.cloudinary.com"],
       connectSrc: ["'self'"],
@@ -85,7 +85,7 @@ app.use(helmet({
 
 // ── CORS ──────────────────────────────────────────────────────────────────────
 app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+  origin: process.env.FRONTEND_URL,
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
   allowedHeaders: ['Content-Type', 'Authorization']
@@ -141,7 +141,7 @@ if (process.env.NODE_ENV === 'production') {
 app.use(mongoSanitize({
   replaceWith: '_',
   onSanitize: ({ req, key }) => {
-    console.warn(`[SECURITY] Sanitized NoSQL injection attempt on key: ${key} from IP: ${req.ip}`);
+    logger.warn('[SECURITY] Sanitized NoSQL injection attempt', { key, ip: req.ip });
     alertService.sendAlert(
       'NOSQL_INJECTION',
       { IP: req.ip, Key: key, Route: `${req.method} ${req.originalUrl}`, 'User ID': req.user?.id || 'unauthenticated' },
@@ -152,7 +152,7 @@ app.use(mongoSanitize({
 
 // ── HTTP PARAMETER POLLUTION PROTECTION ──────────────────────────────────────
 app.use(hpp({
-  whitelist: ['category', 'status', 'packagingSize']
+  whitelist: ['category', 'status', 'packagingSize', 'period', 'type', 'from', 'to']
 }));
 
 // ── HEALTH CHECK ──────────────────────────────────────────────────────────────

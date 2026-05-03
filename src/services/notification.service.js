@@ -3,6 +3,7 @@ const AfricasTalking = require('africastalking');
 const settingsService = require('./settings.service');
 const User = require('../models/User');
 const Guest = require('../models/Guest');
+const logger = require('../utils/logger');
 
 // ── INITIALISE PROVIDERS ──────────────────────────────────────────────────────
 
@@ -41,7 +42,7 @@ const normalisePhone = (phone) => {
 
 const sendSMS = async (to, message) => {
   if (!atSMS) {
-    console.warn('[SMS] Africa\'s Talking not configured — check AT_USERNAME and AT_API_KEY in .env');
+    logger.warn('[SMS] Africa\'s Talking not configured — check AT_USERNAME and AT_API_KEY in .env');
     return;
   }
   const phone = normalisePhone(to);
@@ -53,7 +54,7 @@ const sendSMS = async (to, message) => {
 
 const sendEmail = async ({ to, subject, html }) => {
   if (!emailTransporter) {
-    console.warn('[Email] Gmail not configured — check GMAIL_USER and GMAIL_APP_PASSWORD in .env');
+    logger.warn('[Email] Gmail not configured — check GMAIL_USER and GMAIL_APP_PASSWORD in .env');
     return;
   }
   if (!to) return;
@@ -165,7 +166,7 @@ const dispatchOrderPlaced = async (order, branchId) => {
       });
     }
   } catch (err) {
-    console.error('[notification] dispatchOrderPlaced:', err.message);
+    logger.error('[notification] dispatchOrderPlaced failed', { err: err.message });
   }
 };
 
@@ -203,7 +204,7 @@ const dispatchOrderApproved = async (order, branchId) => {
       });
     }
   } catch (err) {
-    console.error('[notification] dispatchOrderApproved:', err.message);
+    logger.error('[notification] dispatchOrderApproved failed', { err: err.message });
   }
 };
 
@@ -241,7 +242,7 @@ const dispatchOrderRejected = async (order, branchId) => {
       });
     }
   } catch (err) {
-    console.error('[notification] dispatchOrderRejected:', err.message);
+    logger.error('[notification] dispatchOrderRejected failed', { err: err.message });
   }
 };
 
@@ -276,7 +277,7 @@ const dispatchOrderDispatched = async (order, branchId) => {
       });
     }
   } catch (err) {
-    console.error('[notification] dispatchOrderDispatched:', err.message);
+    logger.error('[notification] dispatchOrderDispatched failed', { err: err.message });
   }
 };
 

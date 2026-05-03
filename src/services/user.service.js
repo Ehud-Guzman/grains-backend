@@ -2,10 +2,10 @@ const bcrypt = require('bcryptjs');
 const User = require('../models/User');
 const { AppError } = require('../middleware/errorHandler.middleware');
 const activityLogService = require('./activityLog.service');
-const { ROLES, LOG_ACTIONS } = require('../utils/constants');
+const { ROLES, LOG_ACTIONS, AUTH_LIMITS } = require('../utils/constants');
 const { paginate, buildPaginationMeta } = require('../utils/paginate');
 
-const BCRYPT_WORK_FACTOR = 12;
+const BCRYPT_WORK_FACTOR = AUTH_LIMITS.BCRYPT_WORK_FACTOR;
 
 // Roles that can be assigned to admin accounts
 const ADMIN_ROLES = [ROLES.STAFF, ROLES.SUPERVISOR, ROLES.ADMIN, ROLES.SUPERADMIN];

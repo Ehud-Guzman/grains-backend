@@ -18,6 +18,7 @@ const StockIntake = require('../models/StockIntake');
 const ActivityLog = require('../models/ActivityLog');
 const OrderCounter = require('../models/OrderCounter');
 const TokenBlacklist = require('../models/TokenBlacklist');
+const logger = require('../utils/logger');
 
 const gzip = promisify(zlib.gzip);
 const gunzip = promisify(zlib.gunzip);
@@ -91,7 +92,7 @@ const ensureBackupDir = async () => {
   // Detect a crash mid-restore: if the marker file exists the previous restore
   // never finished and the database is likely incomplete.
   if (await fileExists(RESTORE_MARKER)) {
-    console.error(
+    logger.error(
       '[backup] CRITICAL: .restore-in-progress marker found on startup. ' +
       'A previous restore was interrupted — the database may be empty or incomplete. ' +
       'Log in and restore from the most recent pre-restore backup immediately.'
@@ -390,10 +391,9 @@ const restoreBackup = async ({ file, confirmation, actorId, actorRole, ip }) => 
   }
 
   if (writeErrors.length > 0) {
-    console.warn(
-      '[backup] Restore completed with partial write errors:',
-      writeErrors.map(e => `${e.collection}: ${e.inserted}/${e.total} inserted`).join(', ')
-    );
+    logger.warn('[backup] Restore completed with partial write errors', {
+      summary: writeErrors.map(e => `${e.collection}: ${e.inserted}/${e.total} inserted`).join(', ')
+    });
   }
 
   await ActivityLog.create({

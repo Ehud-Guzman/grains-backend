@@ -10,6 +10,7 @@ const activityLogService = require('./activityLog.service');
 const notificationService = require('./notification.service');
 const stockService = require('./stock.service');
 const settingsService = require('./settings.service');
+const logger = require('../utils/logger');
 const generateOrderRef = require('../utils/generateOrderRef');
 const haversine = require('../utils/haversine');
 const {
@@ -442,7 +443,7 @@ const createGuestOrder = async (orderData, branchId) => {
     });
 
     notificationService.dispatchOrderPlaced(order, branchId).catch(err =>
-      console.error('[notification] guest order placed:', err.message)
+      logger.error('[notification] guest order placed failed', { err: err.message })
     );
 
     // Attach plain token to returned object — only time it is ever available in plaintext
@@ -542,7 +543,7 @@ const createCustomerOrder = async (orderData, userId, branchId) => {
     });
 
     notificationService.dispatchOrderPlaced(order, branchId).catch(err =>
-      console.error('[notification] customer order placed:', err.message)
+      logger.error('[notification] customer order placed failed', { err: err.message })
     );
 
     return order;
@@ -748,7 +749,7 @@ const approve = async (orderId, adminId, branchId, actorRole = 'supervisor') => 
     });
 
     notificationService.dispatchOrderApproved(order, order.branchId).catch(err =>
-      console.error('[notification] order approved:', err.message)
+      logger.error('[notification] order approved failed', { err: err.message })
     );
 
     return order;
@@ -805,7 +806,7 @@ const reject = async (orderId, adminId, reason, branchId, actorRole = 'superviso
     });
 
     notificationService.dispatchOrderRejected(order, order.branchId).catch(err =>
-      console.error('[notification] order rejected:', err.message)
+      logger.error('[notification] order rejected failed', { err: err.message })
     );
 
     return order;
@@ -864,7 +865,7 @@ const updateStatus = async (orderId, newStatus, adminId, note = null, branchId, 
 
     if (newStatus === ORDER_STATUSES.OUT_FOR_DELIVERY) {
       notificationService.dispatchOrderDispatched(order, order.branchId).catch(err =>
-        console.error('[notification] order dispatched:', err.message)
+        logger.error('[notification] order dispatched failed', { err: err.message })
       );
     }
 
@@ -927,19 +928,21 @@ const cancel = async (orderId, userId, branchId) => {
 
 // ── BULK APPROVE ──────────────────────────────────────────────────────────────
 // SRS 5.2 admin - approve multiple pending orders
+// Each order runs in its own session (partial success semantics: some can fail
+// while others succeed). Promise.allSettled processes all concurrently.
 const bulkApprove = async (orderIds, adminId, branchId, actorRole = 'supervisor') => {
-  const results = { approved: [], failed: [] };
+  const settled = await Promise.allSettled(
+    orderIds.map(id => approve(id, adminId, branchId, actorRole))
+  );
 
-  for (const id of orderIds) {
-    try {
-      const order = await approve(id, adminId, branchId, actorRole);
-      results.approved.push(order.orderRef);
-    } catch (err) {
-      results.failed.push({ id, error: err.message });
+  return settled.reduce((acc, result, i) => {
+    if (result.status === 'fulfilled') {
+      acc.approved.push(result.value.orderRef);
+    } else {
+      acc.failed.push({ id: orderIds[i], error: result.reason?.message || 'Unknown error' });
     }
-  }
-
-  return results;
+    return acc;
+  }, { approved: [], failed: [] });
 };
 
 // ── BULK REJECT ───────────────────────────────────────────────────────────────
@@ -948,18 +951,18 @@ const bulkReject = async (orderIds, adminId, reason, branchId, actorRole = 'supe
     throw new AppError('A rejection reason is required for bulk reject', 400, 'REASON_REQUIRED');
   }
 
-  const results = { rejected: [], failed: [] };
+  const settled = await Promise.allSettled(
+    orderIds.map(id => reject(id, adminId, reason, branchId, actorRole))
+  );
 
-  for (const id of orderIds) {
-    try {
-      const order = await reject(id, adminId, reason, branchId, actorRole);
-      results.rejected.push(order.orderRef);
-    } catch (err) {
-      results.failed.push({ id, error: err.message });
+  return settled.reduce((acc, result, i) => {
+    if (result.status === 'fulfilled') {
+      acc.rejected.push(result.value.orderRef);
+    } else {
+      acc.failed.push({ id: orderIds[i], error: result.reason?.message || 'Unknown error' });
     }
-  }
-
-  return results;
+    return acc;
+  }, { rejected: [], failed: [] });
 };
 
 // ── PACKING SLIP DATA ─────────────────────────────────────────────────────────
@@ -1047,7 +1050,7 @@ const assignDriver = async (orderId, driverId, adminId, branchId, actorRole = 'a
   // If the driver assignment auto-advanced the order to out_for_delivery, notify customer
   if (order.status === ORDER_STATUSES.OUT_FOR_DELIVERY) {
     notificationService.dispatchOrderDispatched(order, branchId).catch(err =>
-      console.error('[notification] driver assigned dispatch:', err.message)
+      logger.error('[notification] driver assigned dispatch failed', { err: err.message })
     );
   }
 

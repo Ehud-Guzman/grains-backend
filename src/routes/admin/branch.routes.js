@@ -4,7 +4,11 @@ const branchController = require('../../controllers/admin/branch.controller');
 const { verifyToken } = require('../../middleware/auth.middleware');
 const { requireRole } = require('../../middleware/role.middleware');
 const { validate } = require('../../middleware/validate.middleware');
-const { createBranchValidator, updateBranchValidator } = require('../../validators/branch.validator');
+const {
+  createBranchValidator,
+  updateBranchValidator,
+  assignUserToBranchValidator
+} = require('../../validators/branch.validator');
 
 // All branch management routes are superadmin-only
 router.use(verifyToken, requireRole('superadmin'));
@@ -28,6 +32,6 @@ router.delete('/:id', branchController.deactivate);
 router.get('/:id/staff', branchController.getStaff);
 
 // POST /api/admin/branches/:id/assign-user
-router.post('/:id/assign-user', branchController.assignUser);
+router.post('/:id/assign-user', assignUserToBranchValidator, validate, branchController.assignUser);
 
 module.exports = router;

@@ -32,7 +32,8 @@ const setAvailability = async (req, res, next) => {
 // GET /api/driver/orders — orders assigned to this driver
 const getMyOrders = async (req, res, next) => {
   try {
-    const result = await driverService.getMyOrders(req.user.id, req.query, req.query);
+    const pagination = { page: req.query.page, limit: req.query.limit };
+    const result = await driverService.getMyOrders(req.user.id, req.query, pagination);
     return paginated(res, result.orders, result.pagination);
   } catch (err) { next(err); }
 };

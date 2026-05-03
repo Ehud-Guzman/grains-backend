@@ -9,6 +9,7 @@ const { verifyToken } = require('../middleware/auth.middleware');
 const { validateSafaricomIP } = require('../utils/mpesaHelpers');
 const { callbackLimiter, stkLimiter } = require('../middleware/rateLimit.middleware');
 const { validate } = require('../middleware/validate.middleware');
+const logger = require('../utils/logger');
 
 // POST /api/payments/mpesa/initiate — open to guests and logged-in customers
 // stkLimiter (5/min) is tighter than the global publicLimiter (100/min) to prevent drain attacks
@@ -34,7 +35,7 @@ router.post(
   (req, res, next) => {
     // Validate source IP in production
     if (!validateSafaricomIP(req)) {
-      console.warn(`[M-PESA] Rejected callback from IP: ${req.ip}`);
+      logger.warn('[M-PESA] Rejected callback from unauthorized IP', { ip: req.ip });
       // Return 200 so Safaricom doesn't enter a retry loop
       return res.status(200).json({ ResultCode: 0, ResultDesc: 'Accepted' });
     }
@@ -50,7 +51,7 @@ router.post(
       typeof req.body.Body.stkCallback.CheckoutRequestID === 'string'
     );
     if (!hasExpectedShape) {
-      console.warn(`[M-PESA] Malformed callback payload from IP: ${req.ip}`);
+      logger.warn('[M-PESA] Malformed callback payload', { ip: req.ip });
       return res.status(200).json({ ResultCode: 0, ResultDesc: 'Accepted' });
     }
     next();

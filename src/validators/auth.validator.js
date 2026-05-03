@@ -27,7 +27,8 @@ const registerValidator = [
 const loginValidator = [
   body('phone')
     .trim()
-    .notEmpty().withMessage('Phone number is required'),
+    .notEmpty().withMessage('Phone number is required')
+    .matches(/^(\+254|0)[17]\d{8}$/).withMessage('Enter a valid Kenyan phone number (e.g. 0712345678)'),
 
   body('password')
     .notEmpty().withMessage('Password is required')

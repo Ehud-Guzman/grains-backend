@@ -1,4 +1,4 @@
-const { body } = require('express-validator');
+const { body, param } = require('express-validator');
 
 const createBranchValidator = [
   body('name')
@@ -69,4 +69,13 @@ const updateBranchValidator = [
     .isBoolean().withMessage('isActive must be a boolean'),
 ];
 
-module.exports = { createBranchValidator, updateBranchValidator };
+const assignUserToBranchValidator = [
+  param('id')
+    .isMongoId().withMessage('Invalid branch ID'),
+
+  body('userId')
+    .notEmpty().withMessage('userId is required')
+    .isMongoId().withMessage('Invalid user ID')
+];
+
+module.exports = { createBranchValidator, updateBranchValidator, assignUserToBranchValidator };

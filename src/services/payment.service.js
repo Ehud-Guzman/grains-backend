@@ -9,6 +9,7 @@ const { AppError } = require('../middleware/errorHandler.middleware');
 const { PAYMENT_STATUSES, PAYMENT_METHODS, LOG_ACTIONS, ROLES } = require('../utils/constants');
 const activityLogService = require('./activityLog.service');
 const { getDarajaToken, getUrls } = require('../config/mpesa.config');
+const logger = require('../utils/logger');
 const {
   formatPhone,
   generateTimestamp,
@@ -83,16 +84,18 @@ const initiateStkPush = async (orderId, phone) => {
     });
   } catch (err) {
     // Reset paymentStatus so the customer can retry
-    await Order.findByIdAndUpdate(orderId, { paymentStatus: PAYMENT_STATUSES.FAILED }).catch(() => {});
+    await Order.findByIdAndUpdate(orderId, { paymentStatus: PAYMENT_STATUSES.FAILED })
+      .catch(resetErr => logger.error('[M-PESA] Failed to reset paymentStatus after STK error', { orderId, err: resetErr.message }));
     const msg = err.response?.data?.errorMessage || err.message;
-    console.error('[M-PESA] STK push failed:', msg);
+    logger.error('[M-PESA] STK push failed', { orderId, msg });
     throw new AppError(`M-Pesa request failed: ${msg}`, 502, 'MPESA_REQUEST_FAILED');
   }
 
   const { CheckoutRequestID, MerchantRequestID, ResponseCode, ResponseDescription } = darajaResponse.data;
 
   if (ResponseCode !== '0') {
-    await Order.findByIdAndUpdate(orderId, { paymentStatus: PAYMENT_STATUSES.FAILED }).catch(() => {});
+    await Order.findByIdAndUpdate(orderId, { paymentStatus: PAYMENT_STATUSES.FAILED })
+      .catch(resetErr => logger.error('[M-PESA] Failed to reset paymentStatus after rejection', { orderId, err: resetErr.message }));
     throw new AppError(`M-Pesa rejected the request: ${ResponseDescription}`, 502, 'MPESA_REJECTED');
   }
 
@@ -121,7 +124,7 @@ const initiateStkPush = async (orderId, phone) => {
 const handleCallback = async (callbackData) => {
   const body = callbackData?.Body?.stkCallback;
   if (!body) {
-    console.warn('[M-PESA] Invalid callback structure received');
+    logger.warn('[M-PESA] Invalid callback structure received');
     return { success: false, message: 'Invalid callback structure' };
   }
 
@@ -130,13 +133,13 @@ const handleCallback = async (callbackData) => {
   // Find the payment by checkoutRequestId
   const payment = await Payment.findOne({ checkoutRequestId: CheckoutRequestID });
   if (!payment) {
-    console.warn(`[M-PESA] Callback for unknown CheckoutRequestID: ${CheckoutRequestID}`);
+    logger.warn('[M-PESA] Callback for unknown CheckoutRequestID', { CheckoutRequestID });
     return { success: false, message: 'Payment record not found' };
   }
 
-  // IDEMPOTENCY — if already processed, do nothing
-  if (payment.status === PAYMENT_STATUSES.PAID) {
-    console.log(`[M-PESA] Duplicate callback for already-paid: ${CheckoutRequestID}`);
+  // IDEMPOTENCY — if already in a terminal state (paid or failed), do nothing
+  if (payment.status === PAYMENT_STATUSES.PAID || payment.status === PAYMENT_STATUSES.FAILED) {
+    logger.info('[M-PESA] Duplicate callback ignored — already in terminal state', { CheckoutRequestID, status: payment.status });
     return { success: true, message: 'Already processed' };
   }
 
@@ -148,9 +151,11 @@ const handleCallback = async (callbackData) => {
 
     // Verify Safaricom paid the correct amount — reject underpayments
     if (!paidAmount || Math.ceil(paidAmount) < Math.ceil(payment.amount)) {
-      console.warn(
-        `[M-PESA] Amount mismatch on ${CheckoutRequestID}: expected ${payment.amount}, got ${paidAmount}`
-      );
+      logger.warn('[M-PESA] Amount mismatch', {
+        CheckoutRequestID,
+        expected: payment.amount,
+        received: paidAmount
+      });
       await Payment.findByIdAndUpdate(payment._id, { status: PAYMENT_STATUSES.FAILED });
       await Order.findByIdAndUpdate(payment.orderId, { paymentStatus: PAYMENT_STATUSES.FAILED });
       await activityLogService.log({
@@ -160,7 +165,7 @@ const handleCallback = async (callbackData) => {
         targetId:   payment._id,
         targetType: 'Payment',
         detail:     { reason: 'AMOUNT_MISMATCH', expected: payment.amount, received: paidAmount }
-      }).catch(() => {});
+      }).catch(err => logger.error('[M-PESA] Activity log failed on amount mismatch', { err: err.message }));
       return { success: false, status: 'failed', resultCode: 'AMOUNT_MISMATCH' };
     }
 
@@ -181,9 +186,9 @@ const handleCallback = async (callbackData) => {
       targetId:   payment._id,
       targetType: 'Payment',
       detail:     { mpesaTransactionId, amount: paidAmount }
-    }).catch(() => {});
+    }).catch(err => logger.error('[M-PESA] Activity log failed on payment confirmed', { err: err.message }));
 
-    console.log(`[M-PESA] Payment confirmed: ${mpesaTransactionId} for order ${payment.orderId}`);
+    logger.info('[M-PESA] Payment confirmed', { mpesaTransactionId, orderId: payment.orderId });
     return { success: true, status: 'paid', mpesaTransactionId };
 
   } else {
@@ -209,9 +214,9 @@ const handleCallback = async (callbackData) => {
       targetId:   payment._id,
       targetType: 'Payment',
       detail:     { resultCode: ResultCode, resultDesc: ResultDesc }
-    }).catch(() => {});
+    }).catch(err => logger.error('[M-PESA] Activity log failed on payment failed', { err: err.message }));
 
-    console.log(`[M-PESA] Payment failed (code ${ResultCode}): ${ResultDesc}`);
+    logger.info('[M-PESA] Payment failed', { resultCode: ResultCode, resultDesc: ResultDesc, orderId: payment.orderId });
     return { success: false, status: 'failed', resultCode: ResultCode, resultDesc: ResultDesc };
   }
 };
@@ -344,7 +349,7 @@ const handleTimeout = async (orderId) => {
   if (payment && payment.status === PAYMENT_STATUSES.PENDING) {
     await Payment.findByIdAndUpdate(payment._id, { status: PAYMENT_STATUSES.FAILED });
     await Order.findByIdAndUpdate(orderId, { paymentStatus: PAYMENT_STATUSES.FAILED });
-    console.log(`[M-PESA] Payment timed out for order ${order.orderRef}`);
+    logger.info('[M-PESA] Payment timed out', { orderRef: order.orderRef, orderId });
   }
 };
 

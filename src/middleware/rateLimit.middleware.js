@@ -1,5 +1,6 @@
 const rateLimit = require('express-rate-limit');
 const alertService = require('../services/alert.service');
+const { RATE_LIMITS } = require('../utils/constants');
 
 // Key by branchId + IP so branches don't throttle each other.
 // branchId comes from the JWT (set by verifyToken as req.branchId) for
@@ -11,8 +12,8 @@ const keyByBranchAndIp = (req) => {
 
 // Public routes - 100 req/min per branch+IP
 const publicLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 100,
+  windowMs: RATE_LIMITS.WINDOW_MS,
+  max: RATE_LIMITS.PUBLIC_MAX,
   keyGenerator: keyByBranchAndIp,
   standardHeaders: true,
   legacyHeaders: false,
@@ -25,8 +26,8 @@ const publicLimiter = rateLimit({
 
 // Auth routes (login/register) - stricter, 10 req/min per branch+IP
 const authLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 10,
+  windowMs: RATE_LIMITS.WINDOW_MS,
+  max: RATE_LIMITS.AUTH_MAX,
   keyGenerator: keyByBranchAndIp,
   standardHeaders: true,
   legacyHeaders: false,
@@ -46,8 +47,8 @@ const authLimiter = rateLimit({
 
 // Authenticated admin routes - 300 req/min per branch+IP
 const adminLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 300,
+  windowMs: RATE_LIMITS.WINDOW_MS,
+  max: RATE_LIMITS.ADMIN_MAX,
   keyGenerator: keyByBranchAndIp,
   standardHeaders: true,
   legacyHeaders: false,
@@ -61,8 +62,8 @@ const adminLimiter = rateLimit({
 // M-Pesa callback endpoint — tight limit; legitimate Safaricom retries are max 3/callback
 // In production the IP whitelist is the primary guard; this is a second layer
 const callbackLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 30,
+  windowMs: RATE_LIMITS.WINDOW_MS,
+  max: RATE_LIMITS.CALLBACK_MAX,
   standardHeaders: true,
   legacyHeaders: false,
   // Always return 200 so Safaricom doesn't enter a retry loop on a rate-limit response
@@ -75,8 +76,8 @@ const callbackLimiter = rateLimit({
 // STK Push initiation — tighter than publicLimiter to prevent drain attacks
 // (attacker triggering repeated STK pushes on a victim's phone number)
 const stkLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 5,
+  windowMs: RATE_LIMITS.WINDOW_MS,
+  max: RATE_LIMITS.STK_MAX,
   keyGenerator: keyByBranchAndIp,
   standardHeaders: true,
   legacyHeaders: false,

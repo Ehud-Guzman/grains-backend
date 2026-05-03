@@ -47,7 +47,8 @@ const validateSafaricomIP = (req) => {
   const isValid = !!ip && SAFARICOM_IPS.some(allowedIP => ip.includes(allowedIP));
 
   if (!isValid) {
-    console.warn(`[M-PESA] Callback from unrecognized IP: ${ip}`);
+    const logger = require('./logger');
+    logger.warn('[M-PESA] Callback from unrecognized IP', { ip });
   }
 
   return isValid;

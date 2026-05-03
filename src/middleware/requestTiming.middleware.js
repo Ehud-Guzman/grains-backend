@@ -1,4 +1,4 @@
-const DEFAULT_SLOW_THRESHOLD_MS = 1200;
+const { REQUEST_TIMING } = require('../utils/constants');
 
 const requestTiming = (req, res, next) => {
   const startedAt = process.hrtime.bigint();
@@ -6,7 +6,7 @@ const requestTiming = (req, res, next) => {
   res.on('finish', () => {
     const finishedAt = process.hrtime.bigint();
     const durationMs = Number(finishedAt - startedAt) / 1_000_000;
-    const threshold = Number(process.env.SLOW_REQUEST_THRESHOLD_MS) || DEFAULT_SLOW_THRESHOLD_MS;
+    const threshold = Number(process.env.SLOW_REQUEST_THRESHOLD_MS) || REQUEST_TIMING.DEFAULT_SLOW_THRESHOLD_MS;
     const rounded = durationMs.toFixed(1);
 
     if (durationMs >= threshold) {

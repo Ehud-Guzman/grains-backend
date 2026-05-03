@@ -4,12 +4,13 @@ const User = require('../models/User');
 const Branch = require('../models/Branch');
 const TokenBlacklist = require('../models/TokenBlacklist');
 const { AppError } = require('../middleware/errorHandler.middleware');
-const { ROLES, LOG_ACTIONS } = require('../utils/constants');
+const { ROLES, LOG_ACTIONS, AUTH_LIMITS } = require('../utils/constants');
 const activityLogService = require('./activityLog.service');
 const alertService = require('./alert.service');
+const logger = require('../utils/logger');
 
-const MAX_FAILED_LOGINS = 5;
-const BCRYPT_WORK_FACTOR = 12;
+const MAX_FAILED_LOGINS = AUTH_LIMITS.MAX_FAILED_LOGINS;
+const BCRYPT_WORK_FACTOR = AUTH_LIMITS.BCRYPT_WORK_FACTOR;
 
 // ── GENERATE TOKENS ───────────────────────────────────────────────────────────
 const generateTokens = (user, branchId = null) => {
@@ -83,7 +84,7 @@ const register = async ({ name, phone, email, password, ip = null }) => {
     targetId: user._id,
     targetType: 'User',
     ip
-  }).catch(() => {});
+  }).catch(err => logger.error('[auth] Activity log write failed', { err: err.message }));
 
   return {
     user: { id: user._id, name: user.name, phone: user.phone, email: user.email, role: user.role, avatarURL: user.avatarURL || null },
@@ -108,7 +109,7 @@ const login = async ({ phone, password }, ip) => {
       actorId: user._id, actorRole: user.role,
       action: LOG_ACTIONS.FAILED_LOGIN, ip,
       detail: { phone: user.phone, reason: 'ACCOUNT_LOCKED' }
-    }).catch(() => {});
+    }).catch(err => logger.error('[auth] Activity log write failed', { err: err.message }));
     throw new AppError('Invalid phone number or password', 401, 'INVALID_CREDENTIALS');
   }
 
@@ -122,7 +123,7 @@ const login = async ({ phone, password }, ip) => {
       action: LOG_ACTIONS.FAILED_LOGIN,
       ip,
       detail: { phone: user.phone }
-    }).catch(() => {});
+    }).catch(err => logger.error('[auth] Activity log write failed', { err: err.message }));
     throw new AppError('Invalid phone number or password', 401, 'INVALID_CREDENTIALS');
   }
 
@@ -248,7 +249,7 @@ const selectBranch = async (preAuthToken, branchId, ip = null) => {
     branchId: branch._id,
     ip,
     detail: { branchName: branch.name }
-  }).catch(() => {});
+  }).catch(err => logger.error('[auth] Activity log write failed', { err: err.message }));
 
   return {
     user: { id: user._id, name: user.name, phone: user.phone, email: user.email, role: user.role, avatarURL: user.avatarURL || null },
@@ -336,7 +337,7 @@ const refreshToken = async (token, ip = null) => {
     action: LOG_ACTIONS.TOKEN_REFRESHED,
     branchId: decoded.branchId || null,
     ip
-  }).catch(() => {});
+  }).catch(err => logger.error('[auth] Activity log write failed', { err: err.message }));
 
   return {
     accessToken,
@@ -367,7 +368,7 @@ const logout = async (token, userId, role) => {
       actorId: userId,
       actorRole: role,
       action: logAction
-    }).catch(() => {}); // non-blocking — logout should always succeed
+    }).catch(err => logger.error('[auth] Activity log failed on logout', { err: err.message })); // non-blocking — logout should always succeed
   }
 
   return { success: true };
@@ -382,7 +383,7 @@ const incrementFailedLogin = async (userId, ip = null) => {
   );
 
   // Alert after 3 failures (early warning — account hasn't locked yet)
-  const ALERT_THRESHOLD = 3;
+  const ALERT_THRESHOLD = AUTH_LIMITS.ALERT_THRESHOLD;
   if (user.failedLoginCount === ALERT_THRESHOLD) {
     alertService.sendAlert(
       'BRUTE_FORCE_LOGIN',
@@ -393,7 +394,7 @@ const incrementFailedLogin = async (userId, ip = null) => {
         IP: ip || 'unknown',
       },
       `${ip || 'unknown'}:${user.phone}`
-    ).catch(() => {});
+    ).catch(err => logger.error('[auth] Alert send failed', { err: err.message }));
   }
 
   if (user.failedLoginCount >= MAX_FAILED_LOGINS) {
@@ -417,13 +418,13 @@ const lockAccount = async (userId) => {
       targetId: userId,
       targetType: 'User',
       detail: { reason: 'Too many failed login attempts' }
-    }).catch(() => {});
+    }).catch(err => logger.error('[auth] Activity log write failed', { err: err.message }));
 
     alertService.sendAlert(
       'ACCOUNT_LOCKED',
       { Phone: user.phone, Role: user.role, Reason: 'Too many failed login attempts', 'User ID': String(userId) },
       String(userId)
-    ).catch(() => {});
+    ).catch(err => logger.error('[auth] Alert send failed', { err: err.message }));
   }
 };
 

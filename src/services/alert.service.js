@@ -1,5 +1,6 @@
 const nodemailer = require('nodemailer');
 const AfricasTalking = require('africastalking');
+const logger = require('../utils/logger');
 
 // ── PROVIDER SETUP ────────────────────────────────────────────────────────────
 // Standalone transporter — does NOT depend on settingsService so alerts work
@@ -188,7 +189,7 @@ const sendAlert = async (type, data, throttleKey = 'global') => {
   if (process.env.NODE_ENV === 'test') return;
 
   if (!ALERT_CONFIG[type]) {
-    console.warn(`[alert] Unknown alert type: ${type}`);
+    logger.warn(`[alert] Unknown alert type: ${type}`);
     return;
   }
 
@@ -200,7 +201,7 @@ const sendAlert = async (type, data, throttleKey = 'global') => {
   if (!adminEmail && !adminPhone) {
     // Only warn once — avoid log spam on every alert call
     if (!sendAlert._warnedNoConfig) {
-      console.warn('[alert] ADMIN_ALERT_EMAIL and ADMIN_ALERT_PHONE not set — security alerts disabled.');
+      logger.warn('[alert] ADMIN_ALERT_EMAIL and ADMIN_ALERT_PHONE not set — security alerts disabled.');
       sendAlert._warnedNoConfig = true;
     }
     return;
@@ -218,7 +219,7 @@ const sendAlert = async (type, data, throttleKey = 'global') => {
         html: buildEmail(type, data),
       });
     } catch (err) {
-      console.error('[alert] Email failed:', err.message);
+      logger.error('[alert] Email failed', { err: err.message });
     }
   }
 
@@ -229,11 +230,11 @@ const sendAlert = async (type, data, throttleKey = 'global') => {
       const message = cfg.sms(data);
       await atSMS.send({ to: [phone], message });
     } catch (err) {
-      console.error('[alert] SMS failed:', err.message);
+      logger.error('[alert] SMS failed', { err: err.message });
     }
   }
 
-  console.warn(`[alert] ${type}`, data);
+  logger.warn(`[alert] ${type}`, data);
 };
 
 module.exports = { sendAlert };

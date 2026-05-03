@@ -3,7 +3,8 @@ const { success, paginated } = require('../../utils/apiResponse');
 
 const getAll = async (req, res, next) => {
   try {
-    const result = await driverService.getAllDrivers(req.query, req.query, req.branchId);
+    const pagination = { page: req.query.page, limit: req.query.limit };
+    const result = await driverService.getAllDrivers(req.query, pagination, req.branchId);
     return paginated(res, result.drivers, result.pagination);
   } catch (err) { next(err); }
 };
@@ -30,7 +31,8 @@ const create = async (req, res, next) => {
 
 const getOrders = async (req, res, next) => {
   try {
-    const result = await driverService.getDriverOrders(req.params.id, req.query, req.query, req.branchId);
+    const pagination = { page: req.query.page, limit: req.query.limit };
+    const result = await driverService.getDriverOrders(req.params.id, req.query, pagination, req.branchId);
     return paginated(res, result.orders, result.pagination);
   } catch (err) { next(err); }
 };

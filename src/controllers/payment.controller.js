@@ -1,6 +1,7 @@
 // ── PAYMENT CONTROLLER ────────────────────────────────────────────────────────
 const paymentService = require('../services/payment.service');
 const { success, error } = require('../utils/apiResponse');
+const logger = require('../utils/logger');
 
 // POST /api/payments/mpesa/initiate — customer auth
 const initiate = async (req, res, next) => {
@@ -21,7 +22,7 @@ const callback = async (req, res) => {
   try {
     await paymentService.handleCallback(req.body);
   } catch (err) {
-    console.error('[M-PESA] Callback processing error:', err.message);
+    logger.error('[M-PESA] Callback processing error', { err: err.message });
   }
   res.status(200).json({ ResultCode: 0, ResultDesc: 'Accepted' });
 };

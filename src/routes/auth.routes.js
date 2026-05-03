@@ -7,6 +7,7 @@ const { verifyToken, optionalAuth } = require('../middleware/auth.middleware');
 const { authLimiter } = require('../middleware/rateLimit.middleware');
 const multer = require('multer');
 const cloudinary = require('cloudinary').v2;
+const { UPLOAD_LIMITS } = require('../utils/constants');
 
 // Cloudinary config
 cloudinary.config({
@@ -18,7 +19,7 @@ cloudinary.config({
 // Multer for avatar uploads
 const uploadAvatar = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 5 * 1024 * 1024 },
+  limits: { fileSize: UPLOAD_LIMITS.IMAGE_MAX_FILE_SIZE_BYTES },
   fileFilter: (req, file, cb) => {
     const allowed = ['image/jpeg', 'image/png', 'image/webp', 'image/jpg'];
     allowed.includes(file.mimetype)

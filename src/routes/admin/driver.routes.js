@@ -4,8 +4,12 @@ const driverController = require('../../controllers/admin/driver.controller');
 const { verifyToken } = require('../../middleware/auth.middleware');
 const { requireBusinessRole } = require('../../middleware/role.middleware');
 const { validate } = require('../../middleware/validate.middleware');
-const { body } = require('express-validator');
+const { body, param } = require('express-validator');
 const { adminLimiter } = require('../../middleware/rateLimit.middleware');
+
+const driverIdParamValidator = [
+  param('id').isMongoId().withMessage('Invalid driver ID')
+];
 
 // All routes: authenticated + at least supervisor
 router.use(verifyToken, adminLimiter);
@@ -42,8 +46,8 @@ router.patch('/:id/vehicle',
   driverController.updateVehicle
 );
 
-router.patch('/:id/lock', requireBusinessRole('admin'), driverController.lockAccount);
-router.patch('/:id/unlock', requireBusinessRole('admin'), driverController.unlockAccount);
+router.patch('/:id/lock', requireBusinessRole('admin'), driverIdParamValidator, validate, driverController.lockAccount);
+router.patch('/:id/unlock', requireBusinessRole('admin'), driverIdParamValidator, validate, driverController.unlockAccount);
 
 router.patch('/:id/reset-password',
   requireBusinessRole('admin'),

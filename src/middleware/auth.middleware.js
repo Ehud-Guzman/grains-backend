@@ -1,5 +1,6 @@
 const jwt = require('jsonwebtoken');
 const { AppError } = require('./errorHandler.middleware');
+const logger = require('../utils/logger');
 
 // Validates JWT and attaches req.user = { id, role }
 const verifyToken = (req, res, next) => {
@@ -36,7 +37,8 @@ const optionalAuth = (req, res, next) => {
     const decoded = jwt.verify(token, process.env.JWT_ACCESS_SECRET);
     req.user = { id: decoded.id, role: decoded.role, branchId: decoded.branchId || null };
     req.branchId = decoded.branchId || null;
-  } catch {
+  } catch (err) {
+    logger.debug('[auth] optionalAuth ignored invalid token', { err: err.message });
     req.user = null;
     req.branchId = null;
   }

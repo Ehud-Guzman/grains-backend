@@ -1,9 +1,10 @@
 const mongoose = require('mongoose');
+const { ROLES, LOG_ACTIONS } = require('../utils/constants');
 
 const activityLogSchema = new mongoose.Schema({
   actorId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  actorRole: { type: String, required: true },
-  action: { type: String, required: true }, // e.g. ORDER_APPROVED, PRODUCT_EDITED
+  actorRole: { type: String, required: true, enum: [...Object.values(ROLES), 'system'] },
+  action: { type: String, required: true, enum: Object.values(LOG_ACTIONS) }, // e.g. ORDER_APPROVED, PRODUCT_EDITED
   targetId: { type: mongoose.Schema.Types.ObjectId, default: null },
   targetType: { type: String, default: null }, // 'Order', 'Product', 'User', 'Stock'
   branchId: { type: mongoose.Schema.Types.ObjectId, ref: 'Branch', default: null }, // null = global/system action

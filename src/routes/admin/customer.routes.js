@@ -4,8 +4,12 @@ const customerController = require('../../controllers/admin/customer.controller'
 const { verifyToken } = require('../../middleware/auth.middleware');
 const { requireRole, requireMinRole, requireBusinessRole } = require('../../middleware/role.middleware');
 const { validate } = require('../../middleware/validate.middleware');
-const { body } = require('express-validator');
+const { body, param } = require('express-validator');
 const { adminLimiter } = require('../../middleware/rateLimit.middleware');
+
+const customerIdParamValidator = [
+  param('id').isMongoId().withMessage('Invalid customer ID')
+];
 
 router.use(verifyToken, adminLimiter);
 
@@ -37,9 +41,9 @@ router.post(
 );
 
 // PATCH /api/admin/customers/:id/lock
-router.patch('/:id/lock', requireMinRole('supervisor'), customerController.lockAccount);
+router.patch('/:id/lock', requireMinRole('supervisor'), customerIdParamValidator, validate, customerController.lockAccount);
 
 // PATCH /api/admin/customers/:id/unlock — superadmin only
-router.patch('/:id/unlock', requireRole('superadmin'), customerController.unlockAccount);
+router.patch('/:id/unlock', requireRole('superadmin'), customerIdParamValidator, validate, customerController.unlockAccount);
 
 module.exports = router;

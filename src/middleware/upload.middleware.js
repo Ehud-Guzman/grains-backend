@@ -2,6 +2,7 @@ const multer = require('multer');
 const { CloudinaryStorage } = require('multer-storage-cloudinary');
 const cloudinary = require('../config/cloudinary');
 const { AppError } = require('./errorHandler.middleware');
+const { UPLOAD_LIMITS } = require('../utils/constants');
 
 // ── PRODUCT IMAGES ────────────────────────────────────────────────────────────
 const productStorage = new CloudinaryStorage({
@@ -31,15 +32,15 @@ const imageFilter = (req, file, cb) => {
 const uploadSingle = multer({
   storage: productStorage,
   fileFilter: imageFilter,
-  limits: { fileSize: 5 * 1024 * 1024 } // 5MB max per file
+  limits: { fileSize: UPLOAD_LIMITS.IMAGE_MAX_FILE_SIZE_BYTES }
 }).single('image');
 
 // Multiple images upload (max 5)
 const uploadMultiple = multer({
   storage: productStorage,
   fileFilter: imageFilter,
-  limits: { fileSize: 5 * 1024 * 1024 }
-}).array('images', 5);
+  limits: { fileSize: UPLOAD_LIMITS.IMAGE_MAX_FILE_SIZE_BYTES }
+}).array('images', UPLOAD_LIMITS.PRODUCT_MAX_IMAGES);
 
 // ── PROMISE WRAPPERS ──────────────────────────────────────────────────────────
 // Wraps multer callback into async/await friendly functions
@@ -63,7 +64,7 @@ const uploadMultipleAsync = (req, res) => new Promise((resolve, reject) => {
         return reject(new AppError('One or more images are too large. Maximum size is 5MB each.', 400, 'FILE_TOO_LARGE'));
       }
       if (err.code === 'LIMIT_UNEXPECTED_FILE') {
-        return reject(new AppError('Maximum 5 images allowed per product.', 400, 'TOO_MANY_FILES'));
+        return reject(new AppError(`Maximum ${UPLOAD_LIMITS.PRODUCT_MAX_IMAGES} images allowed per product.`, 400, 'TOO_MANY_FILES'));
       }
       return reject(new AppError(err.message, 400, 'UPLOAD_ERROR'));
     }

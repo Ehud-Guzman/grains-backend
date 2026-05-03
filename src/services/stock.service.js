@@ -6,6 +6,7 @@ const activityLogService = require('./activityLog.service');
 const { LOG_ACTIONS, STOCK_CHANGE_TYPES } = require('../utils/constants');
 const { paginate, buildPaginationMeta } = require('../utils/paginate');
 const { invalidateCache } = require('./product.service');
+const logger = require('../utils/logger');
 
 // ── HELPER: write stock log entry ─────────────────────────────────────────────
 const writeStockLog = async (
@@ -114,7 +115,13 @@ const deductStock = async (
 
   // Check low stock threshold and flag if needed
   if (packaging && packaging.lowStockThreshold && balanceAfter <= packaging.lowStockThreshold) {
-    console.warn(`[LOW STOCK] ${product.name} - ${varietyName} ${packagingSize}: ${balanceAfter} remaining (threshold: ${packaging.lowStockThreshold})`);
+    logger.warn('[LOW STOCK] Threshold reached', {
+      productName: product.name,
+      varietyName,
+      packagingSize,
+      balanceAfter,
+      threshold: packaging.lowStockThreshold
+    });
   }
 
   return { product, balanceAfter };

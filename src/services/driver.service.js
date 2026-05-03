@@ -3,10 +3,10 @@ const User = require('../models/User');
 const Order = require('../models/Order');
 const { AppError } = require('../middleware/errorHandler.middleware');
 const activityLogService = require('./activityLog.service');
-const { ROLES, LOG_ACTIONS, ORDER_STATUSES } = require('../utils/constants');
+const { ROLES, LOG_ACTIONS, ORDER_STATUSES, AUTH_LIMITS } = require('../utils/constants');
 const { paginate, buildPaginationMeta } = require('../utils/paginate');
 
-const BCRYPT_WORK_FACTOR = 12;
+const BCRYPT_WORK_FACTOR = AUTH_LIMITS.BCRYPT_WORK_FACTOR;
 
 // ── LIST DRIVERS (branch-scoped) ──────────────────────────────────────────────
 const getAllDrivers = async (filters = {}, query = {}, branchId) => {

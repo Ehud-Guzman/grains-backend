@@ -1,5 +1,6 @@
 const cloudinary = require('../config/cloudinary');
 const { AppError } = require('../middleware/errorHandler.middleware');
+const logger = require('../utils/logger');
 
 // Delete an image from Cloudinary by its public_id
 // Called when a product image is replaced or product is deleted
@@ -16,7 +17,7 @@ const deleteImage = async (imageUrl) => {
     await cloudinary.uploader.destroy(publicId);
   } catch (err) {
     // Log but never crash on image deletion failure
-    console.error('[Cloudinary] Failed to delete image:', err.message);
+    logger.error('[Cloudinary] Failed to delete image', { err: err.message });
   }
 };
 

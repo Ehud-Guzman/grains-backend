@@ -3,7 +3,8 @@ const { success, paginated } = require('../../utils/apiResponse');
 
 const getAll = async (req, res, next) => {
   try {
-    const result = await userService.getAllAdminUsers(req.query, req.query);
+    const pagination = { page: req.query.page, limit: req.query.limit };
+    const result = await userService.getAllAdminUsers(req.query, pagination);
     return paginated(res, result.users, result.pagination);
   } catch (err) { next(err); }
 };

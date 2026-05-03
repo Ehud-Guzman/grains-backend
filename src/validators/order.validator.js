@@ -1,4 +1,5 @@
 const { body, check } = require('express-validator');
+const { PAYMENT_METHODS } = require('../utils/constants');
 
 const deliveryCoordinatesValidator =
   check('deliveryCoordinates')
@@ -62,7 +63,7 @@ const guestOrderValidator = [
     .isLength({ max: 500 }).withMessage('Special instructions cannot exceed 500 characters'),
 
   body('paymentMethod')
-    .isIn(['mpesa', 'pickup', 'delivery']).withMessage('Invalid payment method'),
+    .isIn(Object.values(PAYMENT_METHODS)).withMessage('Invalid payment method'),
 
   deliveryCoordinatesValidator,
   ...orderItemsValidator
@@ -84,7 +85,7 @@ const customerOrderValidator = [
     .isLength({ max: 500 }).withMessage('Special instructions cannot exceed 500 characters'),
 
   body('paymentMethod')
-    .isIn(['mpesa', 'pickup', 'delivery']).withMessage('Invalid payment method'),
+    .isIn(Object.values(PAYMENT_METHODS)).withMessage('Invalid payment method'),
 
   deliveryCoordinatesValidator,
   ...orderItemsValidator
