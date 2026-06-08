@@ -7,22 +7,7 @@ const { paginate, buildPaginationMeta } = require('../utils/paginate');
 const { normalizeImageUrls } = require('../utils/imageUrl');
 const { deleteImages } = require('./upload.service');
 
-// Masks exact stock counts before sending to public callers.
-// Preserves enough info for badges: 0 = out, 1 = low, 2 = in stock.
-const stripStockFields = (product) => {
-  if (!product?.varieties) return product;
-  return {
-    ...product,
-    varieties: product.varieties.map(v => ({
-      ...v,
-      packaging: (v.packaging || []).map(({ stock, lowStockThreshold, ...rest }) => ({
-        ...rest,
-        stock: stock <= 0 ? 0 : stock <= (lowStockThreshold ?? 10) ? 1 : 2,
-        lowStockThreshold: 1
-      }))
-    }))
-  };
-};
+const exposePublicStockFields = (product) => product;
 
 // ── CACHE ─────────────────────────────────────────────────────────────────────
 // Per-branch cache: branchId => { data, time }
@@ -82,7 +67,7 @@ const getAll = async (filters = {}, query = {}, branchId) => {
   ]);
 
   return {
-    products: products.map(stripStockFields),
+    products: products.map(exposePublicStockFields),
     pagination: buildPaginationMeta(page, limit, total)
   };
 };
@@ -96,7 +81,7 @@ const getById = async (productId, branchId, includeInactive = false, includeStoc
   const product = await Product.findOne(query).lean();
   if (!product) throw new AppError('Product not found', 404, 'PRODUCT_NOT_FOUND');
 
-  return includeStock ? product : stripStockFields(product);
+  return includeStock ? product : exposePublicStockFields(product);
 };
 
 // ── PUBLIC: GET CATEGORIES ────────────────────────────────────────────────────

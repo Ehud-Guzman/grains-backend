@@ -4,6 +4,7 @@ const StockLog = require('../models/StockLog');
 const { AppError } = require('../middleware/errorHandler.middleware');
 const activityLogService = require('./activityLog.service');
 const { LOG_ACTIONS, STOCK_CHANGE_TYPES } = require('../utils/constants');
+const { validateReason } = require('../utils/validateReason');
 const { paginate, buildPaginationMeta } = require('../utils/paginate');
 const { invalidateCache } = require('./product.service');
 const logger = require('../utils/logger');
@@ -231,9 +232,7 @@ const addDelivery = async (productId, varietyName, packagingSize, quantity, reas
 // ── MANUAL ADJUSTMENT ─────────────────────────────────────────────────────────
 // SRS 5.4 - supervisor+ manual correction, reason is mandatory
 const manualAdjustment = async (productId, varietyName, packagingSize, newQuantity, reason, performedBy, branchId, actorRole = 'supervisor') => {
-  if (!reason || reason.trim().length < 3) {
-    throw new AppError('A reason is required for manual stock adjustments', 400, 'REASON_REQUIRED');
-  }
+  validateReason(reason, 'A reason for manual stock adjustments');
 
   if (newQuantity < 0) throw new AppError('Stock quantity cannot be negative', 400, 'INVALID_QUANTITY');
 

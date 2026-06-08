@@ -32,7 +32,7 @@ const generatePreAuthToken = (userId) => {
   return jwt.sign(
     { userId, step: 'branch_selection' },
     process.env.JWT_ACCESS_SECRET,
-    { expiresIn: '5m' }
+    { expiresIn: AUTH_LIMITS.PRE_AUTH_TOKEN_EXPIRY }
   );
 };
 

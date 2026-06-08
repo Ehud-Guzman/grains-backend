@@ -6,7 +6,7 @@ const axios = require('axios');
 const Payment = require('../models/Payment');
 const Order   = require('../models/Order');
 const { AppError } = require('../middleware/errorHandler.middleware');
-const { PAYMENT_STATUSES, PAYMENT_METHODS, LOG_ACTIONS, ROLES } = require('../utils/constants');
+const { PAYMENT_STATUSES, PAYMENT_METHODS, LOG_ACTIONS, ROLES, MPESA_RECEIPT_REGEX } = require('../utils/constants');
 const activityLogService = require('./activityLog.service');
 const { getDarajaToken, getUrls } = require('../config/mpesa.config');
 const logger = require('../utils/logger');
@@ -254,7 +254,6 @@ const checkPaymentStatus = async (orderId, requestingUser) => {
 // ── MANUAL PAYMENT CONFIRMATION ───────────────────────────────────────────────
 // Admin fallback when M-Pesa callback was lost.
 // Requires a real M-Pesa receipt number — format validated and uniqueness enforced.
-const MPESA_RECEIPT_REGEX = /^[A-Z0-9]{10}$/;
 
 const manualConfirmPayment = async (orderId, adminId, transactionRef, actorRole = 'supervisor') => {
   // Require a non-empty transaction reference

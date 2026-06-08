@@ -1,5 +1,10 @@
 const mongoose = require('mongoose');
 
+const discountRuleSchema = new mongoose.Schema({
+  minQuantityKg:   { type: Number, required: true, min: 1 },
+  discountPercent: { type: Number, required: true, min: 0.1, max: 100 }
+}, { _id: false });
+
 const packagingSchema = new mongoose.Schema({
   size: { type: String, required: true }, // e.g. "50kg", "90kg", "Bulk"
   priceKES: { type: Number, default: null },
@@ -23,7 +28,7 @@ const productSchema = new mongoose.Schema({
   isActive: { type: Boolean, default: true },
   varieties: [varietySchema],
   branchId: { type: mongoose.Schema.Types.ObjectId, ref: 'Branch', required: true },
-  discountRules: { type: Array, default: [] },
+  discountRules: { type: [discountRuleSchema], default: [] },
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true }
 }, {
   timestamps: true

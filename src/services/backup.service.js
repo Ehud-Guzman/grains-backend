@@ -53,7 +53,23 @@ const COLLECTIONS = [
 let storagePrepared = false;
 let restoreInProgress = false;
 
-const isRestoreInProgress = () => restoreInProgress;
+// In PM2 cluster mode each worker has its own memory space, so setting
+// restoreInProgress=true in the worker doing the restore doesn't propagate to
+// the others. We poll the RESTORE_MARKER file every second so all workers
+// pick up a restore that was started by any sibling worker. The in-process flag
+// stays authoritative for the worker that owns the restore — it's the most
+// up-to-date source and avoids a disk hit on the hot path.
+let markerFileDetected = false;
+setInterval(async () => {
+  try {
+    await fs.access(RESTORE_MARKER);
+    markerFileDetected = true;
+  } catch {
+    markerFileDetected = false;
+  }
+}, 1000).unref(); // unref so this timer never prevents clean process exit
+
+const isRestoreInProgress = () => restoreInProgress || markerFileDetected;
 
 const fileExists = async (targetPath) => {
   try {

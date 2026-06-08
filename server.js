@@ -65,6 +65,20 @@ if (process.env.NODE_ENV === 'production') {
   if (!process.env.SENTRY_DSN) {
     console.warn('[STARTUP WARNING] SENTRY_DSN is not set — unhandled errors in production will not be tracked.');
   }
+
+  // Warn if backup storage is pointing at a relative or default path.
+  // Render and most PaaS platforms use ephemeral disks — backups written there
+  // are lost on every deploy/restart. Set BACKUP_STORAGE_DIR to a mounted
+  // persistent volume path (e.g. Render Disk at /var/data/backups).
+  const backupDir = process.env.BACKUP_STORAGE_DIR || '';
+  if (!backupDir || !require('path').isAbsolute(backupDir)) {
+    console.warn(
+      '[STARTUP WARNING] BACKUP_STORAGE_DIR is not set to an absolute path. ' +
+      'Backups will be written to the default runtime-data/backups directory which ' +
+      'is ephemeral on Render and similar platforms. Set BACKUP_STORAGE_DIR to a ' +
+      'persistent mounted volume (e.g. /var/data/backups) to avoid data loss.'
+    );
+  }
 }
 
 // ── UNCAUGHT EXCEPTION HANDLER ────────────────────────────────────────────────

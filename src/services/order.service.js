@@ -21,6 +21,7 @@ const {
   STOCK_RESERVATION_STATUSES
 } = require('../utils/constants');
 const { paginate, buildPaginationMeta } = require('../utils/paginate');
+const { validateReason } = require('../utils/validateReason');
 
 const orderHasHeldStock = (order) => (
   [STOCK_RESERVATION_STATUSES.HELD, STOCK_RESERVATION_STATUSES.CONSUMED]
@@ -767,9 +768,7 @@ const approve = async (orderId, adminId, branchId, actorRole = 'supervisor') => 
 const reject = async (orderId, adminId, reason, branchId, actorRole = 'supervisor') => {
   // Auto-cancel is handled by autoCancel.job.js — no per-request call needed
 
-  if (!reason || reason.trim().length < 3) {
-    throw new AppError('A rejection reason is required', 400, 'REASON_REQUIRED');
-  }
+  validateReason(reason, 'A rejection reason');
 
   const session = await mongoose.startSession();
   session.startTransaction();
@@ -947,9 +946,7 @@ const bulkApprove = async (orderIds, adminId, branchId, actorRole = 'supervisor'
 
 // ── BULK REJECT ───────────────────────────────────────────────────────────────
 const bulkReject = async (orderIds, adminId, reason, branchId, actorRole = 'supervisor') => {
-  if (!reason || reason.trim().length < 3) {
-    throw new AppError('A rejection reason is required for bulk reject', 400, 'REASON_REQUIRED');
-  }
+  validateReason(reason, 'A rejection reason');
 
   const settled = await Promise.allSettled(
     orderIds.map(id => reject(id, adminId, reason, branchId, actorRole))

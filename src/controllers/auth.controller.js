@@ -1,5 +1,6 @@
 const authService = require('../services/auth.service');
 const { success, error } = require('../utils/apiResponse');
+const { AUTH_LIMITS } = require('../utils/constants');
 
 // Refresh token cookie options — HttpOnly prevents JS access (XSS mitigation).
 // SameSite=None + Secure for cross-origin prod; Lax for same-origin dev.
@@ -7,7 +8,7 @@ const refreshCookieOptions = () => ({
   httpOnly: true,
   secure:   process.env.NODE_ENV === 'production',
   sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
-  maxAge:   7 * 24 * 60 * 60 * 1000, // 7 days in ms
+  maxAge:   AUTH_LIMITS.REFRESH_COOKIE_MAX_AGE_MS,
   path:     '/api/auth',
 });
 

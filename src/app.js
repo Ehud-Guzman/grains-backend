@@ -96,6 +96,7 @@ app.use(cors({
 // reference it. The access log fires on response finish so it captures status.
 app.use((req, res, next) => {
   req.requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  res.setHeader('X-Request-ID', req.requestId);
 
   if (process.env.NODE_ENV !== 'test') {
     res.on('finish', () => {

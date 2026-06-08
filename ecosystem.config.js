@@ -3,8 +3,13 @@ module.exports = {
     {
       name: 'grains-api',
       script: 'server.js',
-      instances: 1, // increase to 'max' when scaling
-      exec_mode: 'fork',
+      // 'max' spawns one worker per CPU core. On a single-core host (Render
+      // free/starter) this resolves to 1 — no change. On a 2+ core VPS you
+      // get true parallelism with zero code changes.
+      // isRestoreInProgress() in backup.service.js is cluster-safe: it polls
+      // the RESTORE_MARKER file so all workers see an in-progress restore.
+      instances: 'max',
+      exec_mode: 'cluster',
       watch: false,
       env: {
         NODE_ENV: 'development',
@@ -18,9 +23,7 @@ module.exports = {
       out_file: './logs/out.log',
       log_file: './logs/combined.log',
       time: true,
-      // Auto-restart if memory exceeds 500MB
       max_memory_restart: '500M',
-      // Restart delay
       restart_delay: 3000
     }
   ]
