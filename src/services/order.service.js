@@ -1,4 +1,3 @@
-const crypto = require('crypto');
 const mongoose = require('mongoose');
 const Order = require('../models/Order');
 const Product = require('../models/Product');
@@ -393,10 +392,6 @@ const createGuestOrder = async (orderData, branchId) => {
 
     const orderRef = await generateOrderRef(branchId, session);
 
-    // Generate one-time tracking token for the guest — returned to frontend, stored hashed
-    const trackingToken = crypto.randomBytes(32).toString('hex');
-    const trackingTokenHash = crypto.createHash('sha256').update(trackingToken).digest('hex');
-
     let [order] = await Order.create([{
       orderRef,
       branchId,
@@ -416,7 +411,6 @@ const createGuestOrder = async (orderData, branchId) => {
       status: ORDER_STATUSES.PENDING,
       stockReservationStatus: STOCK_RESERVATION_STATUSES.NONE,
       specialInstructions: orderData.specialInstructions || null,
-      trackingTokenHash,
       deliveryCoordinates: orderData.deliveryCoordinates?.lat
         ? { lat: orderData.deliveryCoordinates.lat, lng: orderData.deliveryCoordinates.lng }
         : { lat: null, lng: null },
@@ -447,9 +441,6 @@ const createGuestOrder = async (orderData, branchId) => {
       logger.error('[notification] guest order placed failed', { err: err.message })
     );
 
-    // Attach plain token to returned object — only time it is ever available in plaintext
-    order = order.toObject();
-    order.trackingToken = trackingToken;
     return order;
   } catch (err) {
     await session.abortTransaction();
@@ -643,39 +634,19 @@ const getMyOrders = async (userId, query = {}, branchId) => {
 };
 
 // ── TRACK BY REF (GUEST) ──────────────────────────────────────────────────────
-// SRS 5.5 - public order tracking by phone + ref + verificationToken
-const trackByRef = async (phone, orderRef, verificationToken) => {
+// SRS 5.5 - public order tracking by phone + ref
+const trackByRef = async (phone, orderRef) => {
   // Auto-cancel is handled by autoCancel.job.js — no per-request call needed
-
-  if (!verificationToken) {
-    throw new AppError('Verification token is required', 400, 'TOKEN_REQUIRED');
-  }
 
   const guest = await Guest.findOne({ phone });
   if (!guest) throw new AppError('Order not found', 404, 'NOT_FOUND');
 
-  // Include trackingTokenHash in this query (excluded from default projections via select:false)
   const order = await Order.findOne({ orderRef, guestId: guest._id })
-    .select('+trackingTokenHash')
     .lean();
 
   if (!order) throw new AppError('Order not found', 404, 'ORDER_NOT_FOUND');
 
-  // Constant-time comparison to prevent timing attacks
-  const expectedHash = order.trackingTokenHash;
-  const providedHash = crypto.createHash('sha256').update(verificationToken).digest('hex');
-  const isValid = expectedHash && crypto.timingSafeEqual(
-    Buffer.from(expectedHash, 'hex'),
-    Buffer.from(providedHash, 'hex')
-  );
-
-  if (!isValid) {
-    throw new AppError('Order not found', 404, 'ORDER_NOT_FOUND');
-  }
-
-  // Strip the hash before returning
-  const { trackingTokenHash: _omit, ...safeOrder } = order;
-  return safeOrder;
+  return order;
 };
 
 // ── VALIDATE STATUS TRANSITION ────────────────────────────────────────────────

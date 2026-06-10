@@ -11,8 +11,7 @@ const createGuestOrder = async (req, res, next) => {
     return success(res, {
       orderRef: order.orderRef,
       orderId: order._id,
-      total: order.total,
-      trackingToken: order.trackingToken  // one-time — frontend must persist this locally
+      total: order.total
     }, 'Order placed successfully', 201);
   } catch (err) { next(err); }
 };
@@ -20,11 +19,11 @@ const createGuestOrder = async (req, res, next) => {
 // GET /api/orders/track?phone=&ref=
 const trackOrder = async (req, res, next) => {
   try {
-    const { phone, ref, token } = req.query;
-    if (!phone || !ref || !token) {
-      return error(res, 'phone, ref, and token are required', 'MISSING_PARAMS');
+    const { phone, ref } = req.query;
+    if (!phone || !ref) {
+      return error(res, 'phone and ref are required', 'MISSING_PARAMS');
     }
-    const order = await orderService.trackByRef(phone, ref, token);
+    const order = await orderService.trackByRef(phone, ref);
     return success(res, order);
   } catch (err) { next(err); }
 };

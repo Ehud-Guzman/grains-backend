@@ -66,10 +66,7 @@ const orderSchema = new mongoose.Schema({
     lng: { type: Number, default: null }
   },
   // Haversine distance from branch to customer (km), null for pickup or unknown location
-  deliveryDistanceKm: { type: Number, default: null },
-  // SHA-256 hash of the one-time tracking token issued to the guest at order creation.
-  // Only guest orders have this set. Never stored or returned in plaintext.
-  trackingTokenHash: { type: String, default: null, select: false }
+  deliveryDistanceKm: { type: Number, default: null }
 }, {
   timestamps: true
 });
