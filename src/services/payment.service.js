@@ -3,11 +3,13 @@
 // manual confirmation, and timeout handling
 
 const axios = require('axios');
+const mongoose = require('mongoose');
 const Payment = require('../models/Payment');
 const Order   = require('../models/Order');
 const { AppError } = require('../middleware/errorHandler.middleware');
 const { PAYMENT_STATUSES, PAYMENT_METHODS, LOG_ACTIONS, ROLES, MPESA_RECEIPT_REGEX } = require('../utils/constants');
 const activityLogService = require('./activityLog.service');
+const etimsService       = require('./etims.service');
 const { getDarajaToken, getUrls } = require('../config/mpesa.config');
 const logger = require('../utils/logger');
 const {
@@ -19,20 +21,61 @@ const {
 
 // ── INITIATE STK PUSH ─────────────────────────────────────────────────────────
 const initiateStkPush = async (orderId, phone) => {
-  // Atomic guard: flip paymentStatus → PENDING only if the order is not already
+  const reservedPaymentId = new mongoose.Types.ObjectId();
+
+  // Atomic guard: flip paymentStatus to PENDING only if the order is not already
   // PAID or PENDING. This prevents two concurrent requests both passing the check
   // and issuing two STK pushes to the customer's phone.
-  const order = await Order.findOneAndUpdate(
+  let order = await Order.findOneAndUpdate(
     { _id: orderId, paymentStatus: { $nin: [PAYMENT_STATUSES.PAID, PAYMENT_STATUSES.PENDING] } },
-    { $set: { paymentStatus: PAYMENT_STATUSES.PENDING } },
+    { $set: { paymentStatus: PAYMENT_STATUSES.PENDING, paymentId: reservedPaymentId } },
     { new: true }
   );
 
   if (!order) {
-    const existing = await Order.findById(orderId).select('paymentStatus').lean();
+    const existing = await Order.findById(orderId).select('paymentStatus paymentId').lean();
     if (!existing) throw new AppError('Order not found', 404, 'ORDER_NOT_FOUND');
     if (existing.paymentStatus === PAYMENT_STATUSES.PAID)
       throw new AppError('This order has already been paid', 400, 'ALREADY_PAID');
+
+    // Compatibility for orders created before UNPAID existed: they may be
+    // pending with no Payment record. Claim exactly that shape once.
+    if (existing.paymentStatus === PAYMENT_STATUSES.PENDING && !existing.paymentId) {
+      order = await Order.findOneAndUpdate(
+        { _id: orderId, paymentStatus: PAYMENT_STATUSES.PENDING, paymentId: null },
+        { $set: { paymentId: reservedPaymentId } },
+        { new: true }
+      );
+    }
+
+    // Retry after countdown expiry: the frontend countdown is 60 seconds, so any
+    // pending payment older than 90 s is stale (Safaricom never called back, or the
+    // callback URL was unreachable in dev). Atomically swap to the new payment ID so
+    // only one retry wins; mark the old record failed fire-and-forget.
+    if (!order && existing.paymentStatus === PAYMENT_STATUSES.PENDING && existing.paymentId) {
+      const STALE_MS = 90_000;
+      const oldPayment = await Payment.findById(existing.paymentId).select('createdAt').lean();
+      const ageMs = oldPayment ? Date.now() - new Date(oldPayment.createdAt).getTime() : 0;
+
+      if (ageMs >= STALE_MS) {
+        // Atomically claim the slot by swapping to the new paymentId.
+        order = await Order.findOneAndUpdate(
+          { _id: orderId, paymentStatus: PAYMENT_STATUSES.PENDING, paymentId: existing.paymentId },
+          { $set: { paymentId: reservedPaymentId } },
+          { new: true }
+        );
+        // Mark the old payment FAILED so a late Safaricom callback for the
+        // first STK push doesn't create a second PAID record for the same order.
+        if (order) {
+          await Payment.findByIdAndUpdate(existing.paymentId, {
+            status: PAYMENT_STATUSES.FAILED
+          }).catch(err => logger.error('[M-PESA] Failed to mark stale payment failed', { paymentId: existing.paymentId, err: err.message }));
+        }
+      }
+    }
+  }
+
+  if (!order) {
     throw new AppError(
       'A payment is already in progress for this order. Please wait for it to complete.',
       400,
@@ -55,6 +98,25 @@ const initiateStkPush = async (orderId, phone) => {
   }
 
   const formattedPhone = formatPhone(phone);
+  let payment;
+  try {
+    payment = await Payment.create({
+      _id:               reservedPaymentId,
+      orderId:           order._id,
+      method:            PAYMENT_METHODS.MPESA,
+      mpesaPhone:        formattedPhone,
+      amount:            Math.ceil(amount),
+      currency:          'KES',
+      status:            PAYMENT_STATUSES.PENDING
+    });
+  } catch (err) {
+    await Order.findByIdAndUpdate(orderId, {
+      paymentStatus: PAYMENT_STATUSES.FAILED,
+      $unset: { paymentId: '' }
+    }).catch(resetErr => logger.error('[M-PESA] Failed to reset payment after reservation error', { orderId, err: resetErr.message }));
+    throw err;
+  }
+
   const timestamp      = generateTimestamp();
   const password       = generatePassword(shortcode, passkey, timestamp);
   const token          = await getDarajaToken();
@@ -84,6 +146,8 @@ const initiateStkPush = async (orderId, phone) => {
     });
   } catch (err) {
     // Reset paymentStatus so the customer can retry
+    await Payment.findByIdAndUpdate(payment._id, { status: PAYMENT_STATUSES.FAILED })
+      .catch(resetErr => logger.error('[M-PESA] Failed to mark payment failed after STK error', { orderId, err: resetErr.message }));
     await Order.findByIdAndUpdate(orderId, { paymentStatus: PAYMENT_STATUSES.FAILED })
       .catch(resetErr => logger.error('[M-PESA] Failed to reset paymentStatus after STK error', { orderId, err: resetErr.message }));
     const msg = err.response?.data?.errorMessage || err.message;
@@ -94,24 +158,17 @@ const initiateStkPush = async (orderId, phone) => {
   const { CheckoutRequestID, MerchantRequestID, ResponseCode, ResponseDescription } = darajaResponse.data;
 
   if (ResponseCode !== '0') {
+    await Payment.findByIdAndUpdate(payment._id, { status: PAYMENT_STATUSES.FAILED })
+      .catch(resetErr => logger.error('[M-PESA] Failed to mark payment failed after rejection', { orderId, err: resetErr.message }));
     await Order.findByIdAndUpdate(orderId, { paymentStatus: PAYMENT_STATUSES.FAILED })
       .catch(resetErr => logger.error('[M-PESA] Failed to reset paymentStatus after rejection', { orderId, err: resetErr.message }));
     throw new AppError(`M-Pesa rejected the request: ${ResponseDescription}`, 502, 'MPESA_REJECTED');
   }
 
-  // Create Payment record
-  const payment = await Payment.create({
-    orderId:           order._id,
-    method:            PAYMENT_METHODS.MPESA,
-    mpesaPhone:        formattedPhone,
+  await Payment.findByIdAndUpdate(payment._id, {
     checkoutRequestId: CheckoutRequestID,
-    amount:            Math.ceil(amount),
-    currency:          'KES',
     status:            PAYMENT_STATUSES.PENDING
   });
-
-  // Link payment to order (paymentStatus already set to PENDING by the atomic guard above)
-  await Order.findByIdAndUpdate(orderId, { paymentId: payment._id });
 
   return {
     checkoutRequestId: CheckoutRequestID,
@@ -149,6 +206,16 @@ const handleCallback = async (callbackData) => {
     const mpesaTransactionId = metadata.MpesaReceiptNumber;
     const paidAmount         = metadata.Amount;
 
+    // Parse Safaricom's TransactionDate (YYYYMMDDHHMMSS) into a JS Date
+    let safaricomTimestamp = null;
+    if (metadata.TransactionDate) {
+      const raw = String(metadata.TransactionDate);
+      safaricomTimestamp = new Date(
+        `${raw.slice(0,4)}-${raw.slice(4,6)}-${raw.slice(6,8)}T${raw.slice(8,10)}:${raw.slice(10,12)}:${raw.slice(12,14)}`
+      );
+      if (isNaN(safaricomTimestamp.getTime())) safaricomTimestamp = null;
+    }
+
     // Verify Safaricom paid the correct amount — reject underpayments
     if (!paidAmount || Math.ceil(paidAmount) < Math.ceil(payment.amount)) {
       logger.warn('[M-PESA] Amount mismatch', {
@@ -169,10 +236,32 @@ const handleCallback = async (callbackData) => {
       return { success: false, status: 'failed', resultCode: 'AMOUNT_MISMATCH' };
     }
 
+    // Guard: if the order was cancelled or rejected before the callback arrived,
+    // do not flip it to PAID. Mark payment as refunded so accounting knows
+    // money was received and a manual refund to the customer is needed.
+    const relatedOrder = await Order.findById(payment.orderId).select('status');
+    if (relatedOrder && ['cancelled', 'rejected'].includes(relatedOrder.status)) {
+      logger.warn('[M-PESA] Payment received for terminal order — marking refunded', {
+        orderId: payment.orderId,
+        orderStatus: relatedOrder.status,
+        mpesaTransactionId
+      });
+      await Payment.findByIdAndUpdate(payment._id, {
+        status:             PAYMENT_STATUSES.REFUNDED,
+        mpesaTransactionId,
+        paidAt:             new Date(),
+        safaricomTimestamp,
+        refundedAt:         new Date(),
+        refundReason:       `Order was ${relatedOrder.status} before payment confirmed`
+      });
+      return { success: false, status: 'order_terminal', mpesaTransactionId };
+    }
+
     await Payment.findByIdAndUpdate(payment._id, {
       status:            PAYMENT_STATUSES.PAID,
       mpesaTransactionId,
-      paidAt:            new Date()
+      paidAt:            new Date(),
+      safaricomTimestamp
     });
 
     await Order.findByIdAndUpdate(payment.orderId, {
@@ -189,6 +278,11 @@ const handleCallback = async (callbackData) => {
     }).catch(err => logger.error('[M-PESA] Activity log failed on payment confirmed', { err: err.message }));
 
     logger.info('[M-PESA] Payment confirmed', { mpesaTransactionId, orderId: payment.orderId });
+
+    etimsService.submitInvoice(payment.orderId).catch(err =>
+      logger.error('[eTIMS] Invoice submission failed after M-Pesa callback', { orderId: payment.orderId, err: err.message })
+    );
+
     return { success: true, status: 'paid', mpesaTransactionId };
 
   } else {
@@ -225,14 +319,29 @@ const handleCallback = async (callbackData) => {
 // Used by frontend polling every 5 seconds after STK push
 const ADMIN_ROLES = [ROLES.STAFF, ROLES.SUPERVISOR, ROLES.ADMIN, ROLES.SUPERADMIN];
 
-const checkPaymentStatus = async (orderId, requestingUser) => {
-  const order = await Order.findById(orderId).select('paymentStatus paymentId orderRef total userId');
+const checkPaymentStatus = async (orderId, requestingUser, guestPhone = null) => {
+  const order = await Order.findById(orderId)
+    .select('paymentStatus paymentId orderRef total userId guestId')
+    .populate('guestId', 'phone');
   if (!order) throw new AppError('Order not found', 404, 'ORDER_NOT_FOUND');
 
   // Ownership check — only the order owner or admin-tier roles may poll payment status.
   // Return 404 (not 403) to avoid leaking whether the order ID exists at all.
-  if (!ADMIN_ROLES.includes(requestingUser.role)) {
-    if (!order.userId || order.userId.toString() !== requestingUser.id.toString()) {
+  if (requestingUser) {
+    if (!ADMIN_ROLES.includes(requestingUser.role)) {
+      if (!order.userId || order.userId.toString() !== requestingUser.id.toString()) {
+        throw new AppError('Order not found', 404, 'ORDER_NOT_FOUND');
+      }
+    }
+  } else {
+    let normalizedRequestPhone, normalizedOrderPhone;
+    try {
+      normalizedRequestPhone = guestPhone ? formatPhone(guestPhone) : null;
+      normalizedOrderPhone   = order.guestId?.phone ? formatPhone(order.guestId.phone) : null;
+    } catch {
+      throw new AppError('Order not found', 404, 'ORDER_NOT_FOUND');
+    }
+    if (!normalizedRequestPhone || normalizedRequestPhone !== normalizedOrderPhone) {
       throw new AppError('Order not found', 404, 'ORDER_NOT_FOUND');
     }
   }
@@ -255,42 +364,44 @@ const checkPaymentStatus = async (orderId, requestingUser) => {
 // Admin fallback when M-Pesa callback was lost.
 // Requires a real M-Pesa receipt number — format validated and uniqueness enforced.
 
-const manualConfirmPayment = async (orderId, adminId, transactionRef, actorRole = 'supervisor') => {
-  // Require a non-empty transaction reference
-  if (!transactionRef || typeof transactionRef !== 'string' || !transactionRef.trim()) {
-    throw new AppError(
-      'M-Pesa transaction reference is required for manual confirmation',
-      400,
-      'TRANSACTION_REF_REQUIRED'
-    );
-  }
-
-  const ref = transactionRef.trim().toUpperCase();
-
-  // Validate M-Pesa receipt format: exactly 10 uppercase alphanumeric characters (e.g. QDK14KSHD7)
-  if (!MPESA_RECEIPT_REGEX.test(ref)) {
-    throw new AppError(
-      'Invalid M-Pesa transaction reference. Expected 10 uppercase alphanumeric characters (e.g. QDK14KSHD7)',
-      400,
-      'INVALID_TRANSACTION_REF'
-    );
-  }
-
-  // Prevent reuse — a receipt number must map to exactly one order
-  const duplicate = await Payment.findOne({ mpesaTransactionId: ref });
-  if (duplicate) {
-    throw new AppError(
-      'This M-Pesa transaction reference has already been used on another payment',
-      409,
-      'DUPLICATE_TRANSACTION_REF'
-    );
-  }
-
-  const order = await Order.findById(orderId);
+const manualConfirmPayment = async (orderId, adminId, transactionRef, actorRole = 'supervisor', branchId = null) => {
+  const query = { _id: orderId };
+  if (branchId) query.branchId = branchId;
+  const order = await Order.findOne(query);
   if (!order) throw new AppError('Order not found', 404, 'ORDER_NOT_FOUND');
-
   if (order.paymentStatus === PAYMENT_STATUSES.PAID) {
     throw new AppError('Payment is already confirmed', 400, 'ALREADY_PAID');
+  }
+
+  const isMpesa = order.paymentMethod === PAYMENT_METHODS.MPESA;
+  let ref = null;
+
+  if (isMpesa) {
+    // M-Pesa manual confirm requires a real receipt number
+    if (!transactionRef || typeof transactionRef !== 'string' || !transactionRef.trim()) {
+      throw new AppError(
+        'M-Pesa transaction reference is required for manual confirmation',
+        400,
+        'TRANSACTION_REF_REQUIRED'
+      );
+    }
+    ref = transactionRef.trim().toUpperCase();
+    if (!MPESA_RECEIPT_REGEX.test(ref)) {
+      throw new AppError(
+        'Invalid M-Pesa transaction reference. Expected 10 uppercase alphanumeric characters (e.g. QDK14KSHD7)',
+        400,
+        'INVALID_TRANSACTION_REF'
+      );
+    }
+    // Prevent reuse — a receipt number must map to exactly one order
+    const duplicate = await Payment.findOne({ mpesaTransactionId: ref });
+    if (duplicate) {
+      throw new AppError(
+        'This M-Pesa transaction reference has already been used on another payment',
+        409,
+        'DUPLICATE_TRANSACTION_REF'
+      );
+    }
   }
 
   // Update or create payment record
@@ -298,30 +409,33 @@ const manualConfirmPayment = async (orderId, adminId, transactionRef, actorRole 
     ? await Payment.findById(order.paymentId)
     : null;
 
+  const paymentUpdate = {
+    status:      PAYMENT_STATUSES.PAID,
+    confirmedBy: adminId,
+    paidAt:      new Date(),
+    ...(ref && { mpesaTransactionId: ref })
+  };
+
   if (payment) {
-    await Payment.findByIdAndUpdate(payment._id, {
-      status:             PAYMENT_STATUSES.PAID,
-      mpesaTransactionId: ref,
-      confirmedBy:        adminId,
-      paidAt:             new Date()
-    });
+    await Payment.findByIdAndUpdate(payment._id, paymentUpdate);
   } else {
     payment = await Payment.create({
-      orderId:            order._id,
-      method:             PAYMENT_METHODS.MPESA,
-      amount:             order.total,
-      currency:           'KES',
-      status:             PAYMENT_STATUSES.PAID,
-      mpesaTransactionId: ref,
-      confirmedBy:        adminId,
-      paidAt:             new Date()
+      orderId:  order._id,
+      method:   order.paymentMethod,
+      amount:   order.total,
+      currency: 'KES',
+      ...paymentUpdate
     });
   }
 
-  await Order.findByIdAndUpdate(orderId, {
-    paymentStatus: PAYMENT_STATUSES.PAID,
-    paymentId:     payment._id
-  });
+  // Atomic: only flip to PAID if still not already paid — prevents double-confirmation race
+  const updated = await Order.findOneAndUpdate(
+    { _id: orderId, paymentStatus: { $ne: PAYMENT_STATUSES.PAID } },
+    { paymentStatus: PAYMENT_STATUSES.PAID, paymentId: payment._id }
+  );
+  if (!updated) {
+    throw new AppError('Payment is already confirmed', 400, 'ALREADY_PAID');
+  }
 
   await activityLogService.log({
     actorId:    adminId,
@@ -329,8 +443,12 @@ const manualConfirmPayment = async (orderId, adminId, transactionRef, actorRole 
     action:     LOG_ACTIONS.PAYMENT_MANUALLY_CONFIRMED,
     targetId:   payment._id,
     targetType: 'Payment',
-    detail:     { orderId, transactionRef: ref }
+    detail:     { orderId, transactionRef: ref || 'cash' }
   });
+
+  etimsService.submitInvoice(orderId).catch(err =>
+    logger.error('[eTIMS] Invoice submission failed after manual confirmation', { orderId, err: err.message })
+  );
 
   return payment;
 };

@@ -1,3 +1,7 @@
+const PERMISSIONS = {
+  MANAGE_BRANCHES: 'manage_branches'
+};
+
 const ORDER_STATUSES = {
   PENDING: 'pending',
   APPROVED: 'approved',
@@ -41,6 +45,7 @@ const PAYMENT_METHODS = {
 };
 
 const PAYMENT_STATUSES = {
+  UNPAID: 'unpaid',
   PENDING: 'pending',
   PAID: 'paid',
   FAILED: 'failed',
@@ -106,10 +111,15 @@ const LOG_ACTIONS = {
   INTAKE_LOGGED:    'INTAKE_LOGGED',
   INTAKE_PROCESSED: 'INTAKE_PROCESSED',
   INTAKE_DELETED:   'INTAKE_DELETED',
+  // eTIMS
+  ETIMS_INVOICE_SUBMITTED: 'ETIMS_INVOICE_SUBMITTED',
+  ETIMS_INVOICE_FAILED:    'ETIMS_INVOICE_FAILED',
   // Settings / System
   SETTINGS_UPDATED: 'SETTINGS_UPDATED',
   PLATFORM_LOCKED: 'PLATFORM_LOCKED',
   PLATFORM_UNLOCKED: 'PLATFORM_UNLOCKED',
+  // Permissions
+  USER_PERMISSIONS_UPDATED: 'USER_PERMISSIONS_UPDATED',
 };
 
 // Valid order status transitions - only these are allowed
@@ -159,6 +169,7 @@ const UPLOAD_LIMITS = {
 };
 
 module.exports = {
+  PERMISSIONS,
   ORDER_STATUSES,
   ROLES,
   STOCK_CHANGE_TYPES,

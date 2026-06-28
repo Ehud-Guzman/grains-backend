@@ -69,6 +69,13 @@ const updateSettingsValidator = [
   body('notifyCustomerOnDelivery').optional().isBoolean().withMessage('notifyCustomerOnDelivery must be a boolean'),
   body('smsEnabled').optional().isBoolean().withMessage('smsEnabled must be a boolean'),
   body('emailEnabled').optional().isBoolean().withMessage('emailEnabled must be a boolean'),
+  body('priceAlertThresholdPct').optional().isFloat({ min: 0, max: 100 }).withMessage('Price alert threshold must be 0–100'),
+
+  // Loyalty
+  body('loyaltyEnabled').optional().isBoolean().withMessage('loyaltyEnabled must be a boolean'),
+  body('loyaltyBronzeThreshold').optional().isFloat({ min: 0 }).withMessage('Bronze threshold must be >= 0'),
+  body('loyaltySilverThreshold').optional().isFloat({ min: 0 }).withMessage('Silver threshold must be >= 0'),
+  body('loyaltyGoldThreshold').optional().isFloat({ min: 0 }).withMessage('Gold threshold must be >= 0'),
 
   // Superadmin-only (service strips these for non-superadmins, but still validate shape)
   body('maintenanceMode').optional().isBoolean().withMessage('maintenanceMode must be a boolean'),

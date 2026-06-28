@@ -14,7 +14,12 @@ const BCRYPT_WORK_FACTOR = AUTH_LIMITS.BCRYPT_WORK_FACTOR;
 
 // ── GENERATE TOKENS ───────────────────────────────────────────────────────────
 const generateTokens = (user, branchId = null) => {
-  const payload = { id: user._id, role: user.role, branchId: branchId || null };
+  const payload = {
+    id: user._id,
+    role: user.role,
+    branchId: branchId || null,
+    customPermissions: user.customPermissions || []
+  };
 
   const accessToken = jwt.sign(payload, process.env.JWT_ACCESS_SECRET, {
     expiresIn: process.env.JWT_ACCESS_EXPIRY || '15m'
@@ -173,15 +178,25 @@ const login = async ({ phone, password }, ip) => {
       };
     }
   } else {
-    // Staff/Admin — must have a branch assigned
-    if (!user.branchId) {
-      throw new AppError('Your account has no branch assigned. Contact your administrator.', 403, 'NO_BRANCH_ASSIGNED');
+    // Staff/Admin
+    if (user.allowedBranchIds?.length > 0) {
+      // Multi-branch user: show their explicitly allowed branches
+      branches = await Branch.find({ _id: { $in: user.allowedBranchIds }, isActive: true })
+        .select('name slug location phone').lean();
+      if (branches.length === 0) {
+        throw new AppError('None of your assigned branches are active. Contact your administrator.', 403, 'BRANCH_INACTIVE');
+      }
+    } else {
+      // Single-branch user (legacy path)
+      if (!user.branchId) {
+        throw new AppError('Your account has no branch assigned. Contact your administrator.', 403, 'NO_BRANCH_ASSIGNED');
+      }
+      const branch = await Branch.findById(user.branchId).select('name slug location phone').lean();
+      if (!branch) {
+        throw new AppError('Your assigned branch is inactive. Contact your administrator.', 403, 'BRANCH_INACTIVE');
+      }
+      branches = [branch];
     }
-    const branch = await Branch.findById(user.branchId).select('name slug location phone').lean();
-    if (!branch) {
-      throw new AppError('Your assigned branch is inactive. Contact your administrator.', 403, 'BRANCH_INACTIVE');
-    }
-    branches = [branch];
   }
 
   const preAuthToken = generatePreAuthToken(user._id);
@@ -232,9 +247,16 @@ const selectBranch = async (preAuthToken, branchId, ip = null) => {
     branch = await Branch.findOne({ _id: branchId, isActive: true });
     if (!branch) throw new AppError('Branch not found or inactive', 404, 'BRANCH_NOT_FOUND');
   } else {
-    // Non-superadmin must select their assigned branch
-    if (user.branchId.toString() !== branchId.toString()) {
-      throw new AppError('You can only access your assigned branch', 403, 'FORBIDDEN');
+    // Non-superadmin: validate against allowedBranchIds (multi-branch) or branchId (single-branch)
+    const allowedIds = (user.allowedBranchIds || []).map(id => id.toString());
+    if (allowedIds.length > 0) {
+      if (!allowedIds.includes(branchId.toString())) {
+        throw new AppError('You can only access your assigned branches', 403, 'FORBIDDEN');
+      }
+    } else {
+      if (!user.branchId || user.branchId.toString() !== branchId.toString()) {
+        throw new AppError('You can only access your assigned branch', 403, 'FORBIDDEN');
+      }
     }
     branch = await Branch.findOne({ _id: branchId, isActive: true });
     if (!branch) throw new AppError('Your branch is currently inactive', 403, 'BRANCH_INACTIVE');

@@ -6,6 +6,9 @@ const logger = require('./src/utils/logger');
 const { startCleanupJobs }   = require('./src/jobs/cleanup.job');
 const { startKeepAlive }     = require('./src/jobs/keepAlive.job');
 const { startAutoCancelJob } = require('./src/jobs/autoCancel.job');
+const { register: registerOrderListeners } = require('./src/events/listeners/order.listener');
+const { register: registerStockListeners } = require('./src/events/listeners/stock.listener');
+const { register: registerPriceListeners } = require('./src/events/listeners/price.listener');
 
 const PORT = process.env.PORT || 5000;
 
@@ -101,6 +104,11 @@ const startServer = async () => {
   try {
     // Connect to MongoDB first — fail fast if DB is unreachable
     await connectDB();
+
+    // Register event listeners (before jobs, no DB dependency)
+    registerOrderListeners();
+    registerStockListeners();
+    registerPriceListeners();
 
     // Start background jobs (DB must be connected before jobs run)
     startCleanupJobs();

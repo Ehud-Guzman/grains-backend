@@ -83,6 +83,38 @@ const exportReport = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+const getMarginReport = async (req, res, next) => {
+  try {
+    const { period, from, to } = req.query;
+    const data = await reportService.getMarginReport(period, from, to, req.branchId);
+    return success(res, data);
+  } catch (err) { next(err); }
+};
+
+const getRiderReport = async (req, res, next) => {
+  try {
+    const { period, from, to } = req.query;
+    const data = await reportService.getRiderReport(period, from, to, req.branchId);
+    return success(res, data);
+  } catch (err) { next(err); }
+};
+
+const getVatReport = async (req, res, next) => {
+  try {
+    const { period, from, to } = req.query;
+    const data = await reportService.getVatReport(period, from, to, req.branchId);
+    return success(res, data);
+  } catch (err) { next(err); }
+};
+
+const getCustomerStatement = async (req, res, next) => {
+  try {
+    const { period, from, to } = req.query;
+    const data = await reportService.getCustomerStatement(req.params.customerId, period, from, to, req.branchId);
+    return success(res, data);
+  } catch (err) { next(err); }
+};
+
 module.exports = {
   getDashboardKPIs,
   getSalesReport,
@@ -93,5 +125,9 @@ module.exports = {
   getCustomerReport,
   getOrdersByStatus,
   getOnboardingAnalytics,
-  exportReport
+  exportReport,
+  getMarginReport,
+  getRiderReport,
+  getVatReport,
+  getCustomerStatement,
 };

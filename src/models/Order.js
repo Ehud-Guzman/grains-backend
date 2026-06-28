@@ -39,7 +39,7 @@ const orderSchema = new mongoose.Schema({
   deliveryMethod: { type: String, enum: Object.values(DELIVERY_METHODS), required: true },
   deliveryAddress: { type: String, default: null },
   paymentMethod: { type: String, enum: Object.values(PAYMENT_METHODS), required: true },
-  paymentStatus: { type: String, enum: Object.values(PAYMENT_STATUSES), default: PAYMENT_STATUSES.PENDING },
+  paymentStatus: { type: String, enum: Object.values(PAYMENT_STATUSES), default: PAYMENT_STATUSES.UNPAID },
   paymentId: { type: mongoose.Schema.Types.ObjectId, ref: 'Payment', default: null },
   status: {
     type: String,
@@ -57,6 +57,9 @@ const orderSchema = new mongoose.Schema({
   stockConsumedAt: { type: Date, default: null },
   statusHistory: [statusHistorySchema],
   specialInstructions: { type: String, default: null },
+  couponCode:     { type: String, default: null },
+  couponDiscount: { type: Number, default: 0 },
+  buyerKraPin: { type: String, default: null },
   branchId: { type: mongoose.Schema.Types.ObjectId, ref: 'Branch', required: true },
   driverId: { type: mongoose.Schema.Types.ObjectId, default: null },
   deliveryTrackingUrl: { type: String, default: null },
@@ -66,7 +69,13 @@ const orderSchema = new mongoose.Schema({
     lng: { type: Number, default: null }
   },
   // Haversine distance from branch to customer (km), null for pickup or unknown location
-  deliveryDistanceKm: { type: Number, default: null }
+  deliveryDistanceKm: { type: Number, default: null },
+  deliveredAt: { type: Date, default: null },
+
+  // KRA eTIMS fiscal invoice
+  etimsStatus:        { type: String, enum: ['pending', 'submitted', 'failed'] },
+  etimsInvoiceNumber: { type: String },
+  etimsControlNumber: { type: String }
 }, {
   timestamps: true
 });

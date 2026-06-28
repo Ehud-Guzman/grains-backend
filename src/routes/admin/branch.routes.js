@@ -2,7 +2,8 @@ const express = require('express');
 const router = express.Router();
 const branchController = require('../../controllers/admin/branch.controller');
 const { verifyToken } = require('../../middleware/auth.middleware');
-const { requireRole } = require('../../middleware/role.middleware');
+const { requireSuperadminOrPermission } = require('../../middleware/role.middleware');
+const { PERMISSIONS } = require('../../utils/constants');
 const { validate } = require('../../middleware/validate.middleware');
 const {
   createBranchValidator,
@@ -10,8 +11,8 @@ const {
   assignUserToBranchValidator
 } = require('../../validators/branch.validator');
 
-// All branch management routes are superadmin-only
-router.use(verifyToken, requireRole('superadmin'));
+// Superadmin-only OR users explicitly granted manage_branches permission
+router.use(verifyToken, requireSuperadminOrPermission(PERMISSIONS.MANAGE_BRANCHES));
 
 // GET  /api/admin/branches
 router.get('/', branchController.getAll);

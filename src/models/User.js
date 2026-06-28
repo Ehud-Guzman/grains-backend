@@ -1,5 +1,5 @@
 const mongoose = require('mongoose');
-const { ROLES } = require('../utils/constants');
+const { ROLES, PERMISSIONS } = require('../utils/constants');
 
 const addressSchema = new mongoose.Schema({
   label: { type: String, required: true },
@@ -63,6 +63,17 @@ const userSchema = new mongoose.Schema({
   failedLoginCount: { type: Number, default: 0 },
   lastLoginAt: { type: Date, default: null },
   branchId: { type: mongoose.Schema.Types.ObjectId, ref: 'Branch', default: null }, // null = superadmin (no branch)
+  // Extra capabilities granted by superadmin (additive — never restricts role permissions)
+  customPermissions: {
+    type: [{ type: String, enum: Object.values(PERMISSIONS) }],
+    default: []
+  },
+  // If non-empty, user can switch between these branches at login (overrides single branchId check)
+  allowedBranchIds: [{
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Branch'
+  }],
+  isB2B: { type: Boolean, default: false }, // true = business customer with KRA PIN
   orderHistory: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Order' }],
   onboarding: {
     type: onboardingSchema,

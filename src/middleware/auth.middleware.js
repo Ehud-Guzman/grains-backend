@@ -14,7 +14,7 @@ const verifyToken = (req, res, next) => {
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_ACCESS_SECRET);
-    req.user = { id: decoded.id, role: decoded.role, branchId: decoded.branchId || null };
+    req.user = { id: decoded.id, role: decoded.role, branchId: decoded.branchId || null, customPermissions: decoded.customPermissions || [] };
     req.branchId = decoded.branchId || null;
     next();
   } catch (err) {
@@ -35,7 +35,7 @@ const optionalAuth = (req, res, next) => {
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_ACCESS_SECRET);
-    req.user = { id: decoded.id, role: decoded.role, branchId: decoded.branchId || null };
+    req.user = { id: decoded.id, role: decoded.role, branchId: decoded.branchId || null, customPermissions: decoded.customPermissions || [] };
     req.branchId = decoded.branchId || null;
   } catch (err) {
     logger.debug('[auth] optionalAuth ignored invalid token', { err: err.message });

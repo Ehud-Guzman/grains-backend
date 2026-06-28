@@ -3,9 +3,9 @@
 
 const express = require('express');
 const router = express.Router();
-const { body } = require('express-validator');
+const { body, param } = require('express-validator');
 const paymentController = require('../controllers/payment.controller');
-const { verifyToken } = require('../middleware/auth.middleware');
+const { optionalAuth } = require('../middleware/auth.middleware');
 const { validateSafaricomIP } = require('../utils/mpesaHelpers');
 const { callbackLimiter, stkLimiter } = require('../middleware/rateLimit.middleware');
 const { validate } = require('../middleware/validate.middleware');
@@ -62,7 +62,9 @@ router.post(
 // GET /api/payments/status/:orderId — customer polls after STK push
 router.get(
   '/status/:orderId',
-  verifyToken,
+  optionalAuth,
+  [param('orderId').isMongoId().withMessage('Invalid order ID')],
+  validate,
   paymentController.getStatus
 );
 

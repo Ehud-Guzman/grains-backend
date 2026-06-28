@@ -88,6 +88,15 @@ const settingsSchema = new mongoose.Schema({
   smsEnabled:               { type: Boolean, default: false },
   emailEnabled:             { type: Boolean, default: false },
 
+  // ── LOYALTY PROGRAMME ─────────────────────────────────────────────────────
+  loyaltyEnabled:          { type: Boolean, default: true  },
+  loyaltyBronzeThreshold:  { type: Number,  default: 5000  }, // KES lifetime spend
+  loyaltySilverThreshold:  { type: Number,  default: 25000 },
+  loyaltyGoldThreshold:    { type: Number,  default: 75000 },
+
+  // ── CUSTOMER ALERTS ───────────────────────────────────────────────────────
+  priceAlertThresholdPct:  { type: Number, default: 5 }, // only fire price-drop alert if drop >= this %
+
   // ── SYSTEM SETTINGS (superadmin only) ────────────────────────────────────
   maintenanceMode:    { type: Boolean, default: false },
   maintenanceMessage: { type: String, default: 'We are currently undergoing maintenance. Please check back soon.' },

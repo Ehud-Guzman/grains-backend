@@ -6,6 +6,8 @@ const { LOG_ACTIONS } = require('../utils/constants');
 const { paginate, buildPaginationMeta } = require('../utils/paginate');
 const { normalizeImageUrls } = require('../utils/imageUrl');
 const { deleteImages } = require('./upload.service');
+const priceLogService = require('./priceLog.service');
+const { appEvents, PRICE_EVENTS, STOCK_EVENTS } = require('../events/appEvents');
 
 const exposePublicStockFields = (product) => product;
 
@@ -175,6 +177,14 @@ const update = async (productId, data, adminId, branchId, actorRole = 'admin') =
 
   const before = { name: product.name, category: product.category, isActive: product.isActive };
 
+  // Snapshot old prices before mutation (for PriceLog)
+  const oldPriceMap = {};
+  for (const v of (product.varieties || [])) {
+    for (const pkg of (v.packaging || [])) {
+      oldPriceMap[`${v.varietyName}::${pkg.size}`] = pkg.priceKES;
+    }
+  }
+
   // Collect all existing Cloudinary URLs before the update
   const oldProductImages = product.imageURLs || [];
   const oldVarietyImages = (product.varieties || []).flatMap(v => v.imageURLs || []);
@@ -193,6 +203,46 @@ const update = async (productId, data, adminId, branchId, actorRole = 'admin') =
   product.markModified('imageURLs');
   product.markModified('varieties');
   await product.save();
+
+  // Detect price changes and log them
+  for (const v of (product.varieties || [])) {
+    for (const pkg of (v.packaging || [])) {
+      const key = `${v.varietyName}::${pkg.size}`;
+      const oldPrice = oldPriceMap[key];
+      if (oldPrice !== undefined && oldPrice !== pkg.priceKES && pkg.priceKES > 0) {
+        priceLogService.logChange({
+          productId: product._id,
+          branchId,
+          varietyName: v.varietyName,
+          packaging: pkg.size,
+          oldPrice,
+          newPrice: pkg.priceKES,
+          changedBy: adminId,
+        }).catch(() => {});
+
+        appEvents.emit(PRICE_EVENTS.CHANGED, {
+          productId: product._id,
+          branchId,
+          varietyName: v.varietyName,
+          packaging: pkg.size,
+          oldPrice,
+          newPrice: pkg.priceKES,
+          changedBy: adminId,
+        });
+      }
+
+      // Emit stock update when stock is explicitly set (for back-in-stock alerts)
+      if (oldPriceMap[key] !== undefined && pkg.stock > 0) {
+        appEvents.emit(STOCK_EVENTS.UPDATED, {
+          productId: product._id,
+          branchId,
+          varietyName: v.varietyName,
+          packaging: pkg.size,
+          newStock: pkg.stock,
+        });
+      }
+    }
+  }
 
   // Delete any Cloudinary images that were removed during this update
   const newProductImages = product.imageURLs || [];

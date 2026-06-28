@@ -30,7 +30,7 @@ const callback = async (req, res) => {
 // GET /api/payments/status/:orderId — customer polls this after STK push
 const getStatus = async (req, res, next) => {
   try {
-    const result = await paymentService.checkPaymentStatus(req.params.orderId, req.user);
+    const result = await paymentService.checkPaymentStatus(req.params.orderId, req.user, req.query.phone);
     return success(res, result);
   } catch (err) { next(err); }
 };
@@ -43,7 +43,8 @@ const manualConfirm = async (req, res, next) => {
       req.params.orderId,
       req.user.id,
       transactionRef,
-      req.user.role
+      req.user.role,
+      req.branchId || null
     );
     return success(res, result, 'Payment confirmed manually');
   } catch (err) { next(err); }

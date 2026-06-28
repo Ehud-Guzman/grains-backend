@@ -53,4 +53,12 @@ const cancelOrder = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-module.exports = { createGuestOrder, trackOrder, createCustomerOrder, getMyOrders, cancelOrder };
+// GET /api/orders/my/stats - customer auth required
+const getMyStats = async (req, res, next) => {
+  try {
+    const data = await orderService.getMyStats(req.user.id);
+    return success(res, data);
+  } catch (err) { next(err); }
+};
+
+module.exports = { createGuestOrder, trackOrder, createCustomerOrder, getMyOrders, cancelOrder, getMyStats };

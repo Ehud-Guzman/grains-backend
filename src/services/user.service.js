@@ -193,11 +193,55 @@ const resetPassword = async (userId, newPassword, superAdminId) => {
   return { id: user._id, name: user.name, message: 'Password reset successfully' };
 };
 
+// ── SET PERMISSIONS ───────────────────────────────────────────────────────────
+// Superadmin only — grant/revoke custom permissions and multi-branch access for any staff user
+const { PERMISSIONS } = require('../utils/constants');
+
+const setPermissions = async (userId, { customPermissions, allowedBranchIds }, actorId) => {
+  const user = await User.findById(userId);
+  if (!user) throw new AppError('User not found', 404, 'USER_NOT_FOUND');
+
+  if (userId.toString() === actorId.toString()) {
+    throw new AppError('You cannot modify your own permissions', 400, 'CANNOT_MODIFY_SELF');
+  }
+
+  if (customPermissions !== undefined) {
+    const invalid = customPermissions.filter(p => !Object.values(PERMISSIONS).includes(p));
+    if (invalid.length > 0) {
+      throw new AppError(`Invalid permissions: ${invalid.join(', ')}`, 400, 'INVALID_PERMISSIONS');
+    }
+    user.customPermissions = customPermissions;
+  }
+
+  if (allowedBranchIds !== undefined) {
+    user.allowedBranchIds = allowedBranchIds;
+  }
+
+  await user.save();
+
+  await activityLogService.log({
+    actorId,
+    actorRole: ROLES.SUPERADMIN,
+    action: LOG_ACTIONS.USER_PERMISSIONS_UPDATED,
+    targetId: userId,
+    targetType: 'User',
+    detail: { name: user.name, customPermissions: user.customPermissions, allowedBranchIds: user.allowedBranchIds }
+  });
+
+  return {
+    id: user._id,
+    name: user.name,
+    customPermissions: user.customPermissions,
+    allowedBranchIds: user.allowedBranchIds
+  };
+};
+
 module.exports = {
   getAllAdminUsers,
   createAdminUser,
   changeRole,
   lockAdminAccount,
   unlockAdminAccount,
-  resetPassword
+  resetPassword,
+  setPermissions
 };

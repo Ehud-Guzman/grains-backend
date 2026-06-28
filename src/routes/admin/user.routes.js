@@ -57,4 +57,17 @@ router.patch('/:id/reset-password',
   userController.resetPassword
 );
 
+// PATCH /api/admin/users/:id/permissions
+router.patch('/:id/permissions',
+  [
+    param('id').isMongoId().withMessage('Invalid user ID'),
+    body('customPermissions').optional().isArray().withMessage('customPermissions must be an array'),
+    body('customPermissions.*').optional().isString().withMessage('Each permission must be a string'),
+    body('allowedBranchIds').optional().isArray().withMessage('allowedBranchIds must be an array'),
+    body('allowedBranchIds.*').optional().isMongoId().withMessage('Each branch ID must be valid'),
+  ],
+  validate,
+  userController.setPermissions
+);
+
 module.exports = router;

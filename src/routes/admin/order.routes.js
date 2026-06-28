@@ -10,6 +10,11 @@ const {
   updateStatusValidator,
   bulkActionValidator
 } = require('../../validators/order.validator');
+const Order                 = require('../../models/Order');
+const etimsService          = require('../../services/etims.service');
+const globalSettingsService = require('../../services/globalSettings.service');
+const { success }           = require('../../utils/apiResponse');
+const { AppError }          = require('../../middleware/errorHandler.middleware');
 
 // All admin order routes require auth + staff minimum
 router.use(verifyToken, adminLimiter);
@@ -76,5 +81,38 @@ router.post(
   validate,
   orderController.bulkReject
 );
+
+// POST /api/admin/orders/:id/etims/resubmit
+// Available to roles listed in globalSettings.etims.allowedRoles (set by superadmin)
+router.post('/:id/etims/resubmit', requireMinRole('staff'), async (req, res, next) => {
+  try {
+    const globalSettings = await globalSettingsService.getSettings();
+    const { enabled, allowedRoles = [] } = globalSettings.etims || {};
+
+    if (!enabled) {
+      return next(new AppError('eTIMS is not enabled', 400, 'ETIMS_DISABLED'));
+    }
+    if (!allowedRoles.includes(req.user.role)) {
+      return next(new AppError('You do not have permission to resubmit eTIMS invoices', 403, 'FORBIDDEN'));
+    }
+
+    const query = { _id: req.params.id };
+    if (req.branchId) query.branchId = req.branchId;
+    const order = await Order.findOne(query).select('status paymentStatus').lean();
+
+    if (!order) {
+      return next(new AppError('Order not found', 404, 'ORDER_NOT_FOUND'));
+    }
+    if (order.status !== 'completed') {
+      return next(new AppError('eTIMS invoices can only be resubmitted for completed orders', 400, 'INVALID_ORDER_STATUS'));
+    }
+    if (order.paymentStatus !== 'paid') {
+      return next(new AppError('Cannot submit eTIMS invoice for an unpaid order', 400, 'PAYMENT_NOT_CONFIRMED'));
+    }
+
+    await etimsService.submitInvoice(req.params.id);
+    return success(res, null, 'eTIMS invoice submitted');
+  } catch (err) { next(err); }
+});
 
 module.exports = router;

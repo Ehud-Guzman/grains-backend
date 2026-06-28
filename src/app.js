@@ -28,14 +28,24 @@ require('./models/ActivityLog');
 require('./models/OrderCounter');
 require('./models/Settings');
 require('./models/TokenBlacklist');
+require('./models/PriceLog');
+require('./models/CustomerAlert');
+require('./models/SavedList');
+require('./models/Coupon');
+require('./models/Promotion');
+require('./models/GlobalSettings');
 
 // ── PUBLIC ROUTES ─────────────────────────────────────────────────────────────
-const authRoutes     = require('./routes/auth.routes');
-const productRoutes  = require('./routes/product.routes');
-const orderRoutes    = require('./routes/order.routes');
-const settingsRoutes = require('./routes/settings.routes');
-const paymentRoutes  = require('./routes/payment.routes');
-const driverRoutes   = require('./routes/driver.routes');
+const authRoutes         = require('./routes/auth.routes');
+const productRoutes      = require('./routes/product.routes');
+const orderRoutes        = require('./routes/order.routes');
+const settingsRoutes     = require('./routes/settings.routes');
+const paymentRoutes      = require('./routes/payment.routes');
+const driverRoutes       = require('./routes/driver.routes');
+const customerAlertRoutes = require('./routes/customerAlert.routes');
+const savedListRoutes    = require('./routes/savedList.routes');
+const couponRoutes       = require('./routes/coupon.routes');
+const promotionRoutes    = require('./routes/promotion.routes');
 
 // ── ADMIN ROUTES ──────────────────────────────────────────────────────────────
 const adminProductRoutes  = require('./routes/admin/product.routes');
@@ -51,6 +61,9 @@ const adminBranchRoutes   = require('./routes/admin/branch.routes');
 const adminBackupRoutes   = require('./routes/admin/backup.routes');
 const adminDriverRoutes       = require('./routes/admin/driver.routes');
 const adminStockIntakeRoutes  = require('./routes/admin/stockIntake.routes');
+const adminCouponRoutes          = require('./routes/admin/coupon.routes');
+const adminPromotionRoutes       = require('./routes/admin/promotion.routes');
+const adminGlobalSettingsRoutes  = require('./routes/admin/globalSettings.routes');
 
 const app = express();
 
@@ -206,6 +219,10 @@ app.use('/api/orders',   orderRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/payments', paymentRoutes);
 app.use('/api/driver',   driverRoutes);
+app.use('/api/alerts',     customerAlertRoutes);
+app.use('/api/lists',      savedListRoutes);
+app.use('/api/coupons',    couponRoutes);
+app.use('/api/promotions', promotionRoutes);
 
 // ── ADMIN ROUTES ──────────────────────────────────────────────────────────────
 app.use('/api/admin/products',  adminProductRoutes);
@@ -221,6 +238,9 @@ app.use('/api/admin/branches',  adminBranchRoutes);
 app.use('/api/admin/backups',   adminBackupRoutes);
 app.use('/api/admin/drivers',       adminDriverRoutes);
 app.use('/api/admin/stock-intake',  adminStockIntakeRoutes);
+app.use('/api/admin/coupons',          adminCouponRoutes);
+app.use('/api/admin/promotions',       adminPromotionRoutes);
+app.use('/api/admin/global-settings',  adminGlobalSettingsRoutes);
 
 // ── 404 HANDLER ───────────────────────────────────────────────────────────────
 app.use((req, res) => {

@@ -1,13 +1,15 @@
 const mongoose = require('mongoose');
 const Order = require('../models/Order');
+const Payment = require('../models/Payment');
 const Product = require('../models/Product');
 const Guest = require('../models/Guest');
 const User = require('../models/User');
 const Branch = require('../models/Branch');
 const { AppError } = require('../middleware/errorHandler.middleware');
 const activityLogService = require('./activityLog.service');
-const notificationService = require('./notification.service');
-const stockService = require('./stock.service');
+const stockService       = require('./stock.service');
+const etimsService       = require('./etims.service');
+const { appEvents, ORDER_EVENTS } = require('../events/appEvents');
 const settingsService = require('./settings.service');
 const logger = require('../utils/logger');
 const generateOrderRef = require('../utils/generateOrderRef');
@@ -17,10 +19,13 @@ const {
   ORDER_STATUSES,
   ORDER_STATUS_TRANSITIONS,
   STOCK_CHANGE_TYPES,
-  STOCK_RESERVATION_STATUSES
+  STOCK_RESERVATION_STATUSES,
+  PAYMENT_STATUSES,
+  PAYMENT_METHODS
 } = require('../utils/constants');
 const { paginate, buildPaginationMeta } = require('../utils/paginate');
 const { validateReason } = require('../utils/validateReason');
+const couponService = require('./coupon.service');
 
 const orderHasHeldStock = (order) => (
   [STOCK_RESERVATION_STATUSES.HELD, STOCK_RESERVATION_STATUSES.CONSUMED]
@@ -103,7 +108,14 @@ const buildOrderItems = async (cartItems, options = {}) => {
       );
     }
 
-    const lineTotal = packaging.priceKES * item.quantity;
+    // Apply volume pricing tier if configured
+    let unitPrice = packaging.priceKES;
+    if (packaging.pricingTiers?.length > 0) {
+      const sorted = [...packaging.pricingTiers].sort((a, b) => b.minQty - a.minQty);
+      const tier = sorted.find(t => item.quantity >= t.minQty);
+      if (tier) unitPrice = tier.priceKES;
+    }
+    const lineTotal = unitPrice * item.quantity;
     subtotal += lineTotal;
 
     items.push({
@@ -112,7 +124,7 @@ const buildOrderItems = async (cartItems, options = {}) => {
       variety: item.variety,
       packaging: item.packaging,
       quantity: item.quantity,
-      unitPrice: packaging.priceKES, // snapshot at time of order
+      unitPrice, // snapshot at time of order (tier-adjusted)
       lineTotal
     });
   }
@@ -377,6 +389,17 @@ const createGuestOrder = async (orderData, branchId) => {
   const vatRate    = vatEnabled ? (Number(settings.vatRate) || 0) : 0;
   const vatAmount  = vatEnabled ? Math.round(subtotal * vatRate) / 100 : 0;
 
+  // Coupon
+  let couponCode = null;
+  let couponDiscount = 0;
+  if (orderData.couponCode) {
+    const { coupon, discountAmount } = await couponService.validate(
+      orderData.couponCode, branchId, null, subtotal
+    );
+    couponCode = coupon.code;
+    couponDiscount = discountAmount;
+  }
+
   const session = await mongoose.startSession();
   session.startTransaction();
 
@@ -403,14 +426,17 @@ const createGuestOrder = async (orderData, branchId) => {
       vatEnabled,
       vatRate,
       vatAmount,
-      total: subtotal + deliveryFee + vatAmount,
+      couponCode,
+      couponDiscount,
+      total: Math.max(0, subtotal + deliveryFee + vatAmount - couponDiscount),
       deliveryMethod: orderData.deliveryMethod,
       deliveryAddress: orderData.deliveryAddress || null,
       paymentMethod: orderData.paymentMethod,
-      paymentStatus: 'pending',
+      paymentStatus: PAYMENT_STATUSES.UNPAID,
       status: ORDER_STATUSES.PENDING,
       stockReservationStatus: STOCK_RESERVATION_STATUSES.NONE,
       specialInstructions: orderData.specialInstructions || null,
+      buyerKraPin: orderData.buyerKraPin?.trim() || null,
       deliveryCoordinates: orderData.deliveryCoordinates?.lat
         ? { lat: orderData.deliveryCoordinates.lat, lng: orderData.deliveryCoordinates.lng }
         : { lat: null, lng: null },
@@ -426,6 +452,7 @@ const createGuestOrder = async (orderData, branchId) => {
     await reserveOrderStock(order, guest._id, 'guest', session);
     await Guest.findByIdAndUpdate(guest._id, { $push: { orders: order._id } }, { session });
     await session.commitTransaction();
+    if (couponCode) await couponService.incrementUsage(couponCode, branchId);
 
     await activityLogService.log({
       actorId: guest._id,
@@ -437,9 +464,7 @@ const createGuestOrder = async (orderData, branchId) => {
       detail: { orderRef, total: order.total, itemCount: items.length, stockReserved: true }
     });
 
-    notificationService.dispatchOrderPlaced(order, branchId).catch(err =>
-      logger.error('[notification] guest order placed failed', { err: err.message })
-    );
+    appEvents.emit(ORDER_EVENTS.PLACED, { order, branchId });
 
     return order;
   } catch (err) {
@@ -484,6 +509,17 @@ const createCustomerOrder = async (orderData, userId, branchId) => {
   const vatRate    = vatEnabled ? (Number(settings.vatRate) || 0) : 0;
   const vatAmount  = vatEnabled ? Math.round(subtotal * vatRate) / 100 : 0;
 
+  // Coupon
+  let couponCode = null;
+  let couponDiscount = 0;
+  if (orderData.couponCode) {
+    const { coupon, discountAmount } = await couponService.validate(
+      orderData.couponCode, branchId, userId, subtotal
+    );
+    couponCode = coupon.code;
+    couponDiscount = discountAmount;
+  }
+
   const session = await mongoose.startSession();
   session.startTransaction();
 
@@ -500,14 +536,17 @@ const createCustomerOrder = async (orderData, userId, branchId) => {
       vatEnabled,
       vatRate,
       vatAmount,
-      total: subtotal + deliveryFee + vatAmount,
+      couponCode,
+      couponDiscount,
+      total: Math.max(0, subtotal + deliveryFee + vatAmount - couponDiscount),
       deliveryMethod: orderData.deliveryMethod,
       deliveryAddress: orderData.deliveryAddress || null,
       paymentMethod: orderData.paymentMethod,
-      paymentStatus: 'pending',
+      paymentStatus: PAYMENT_STATUSES.UNPAID,
       status: ORDER_STATUSES.PENDING,
       stockReservationStatus: STOCK_RESERVATION_STATUSES.NONE,
       specialInstructions: orderData.specialInstructions || null,
+      buyerKraPin: orderData.buyerKraPin?.trim() || null,
       deliveryCoordinates: orderData.deliveryCoordinates?.lat
         ? { lat: orderData.deliveryCoordinates.lat, lng: orderData.deliveryCoordinates.lng }
         : { lat: null, lng: null },
@@ -523,6 +562,7 @@ const createCustomerOrder = async (orderData, userId, branchId) => {
     await reserveOrderStock(order, userId, 'customer', session);
     await User.findByIdAndUpdate(userId, { $push: { orderHistory: order._id } }, { session });
     await session.commitTransaction();
+    if (couponCode) await couponService.incrementUsage(couponCode, branchId);
 
     await activityLogService.log({
       actorId: userId,
@@ -534,9 +574,7 @@ const createCustomerOrder = async (orderData, userId, branchId) => {
       detail: { orderRef, total: order.total, itemCount: items.length, stockReserved: true }
     });
 
-    notificationService.dispatchOrderPlaced(order, branchId).catch(err =>
-      logger.error('[notification] customer order placed failed', { err: err.message })
-    );
+    appEvents.emit(ORDER_EVENTS.PLACED, { order, branchId });
 
     return order;
   } catch (err) {
@@ -618,7 +656,7 @@ const getMyOrders = async (userId, query = {}, branchId) => {
   // Customers can see their orders across all branches (shared accounts)
   const filter = { userId };
 
-  const CUSTOMER_ORDER_FIELDS = 'orderRef orderItems subtotal deliveryFee vatEnabled vatRate vatAmount total deliveryMethod deliveryAddress paymentMethod paymentStatus status rejectionReason specialInstructions branchId createdAt updatedAt statusHistory';
+  const CUSTOMER_ORDER_FIELDS = 'orderRef orderItems subtotal deliveryFee vatEnabled vatRate vatAmount total deliveryMethod deliveryAddress paymentMethod paymentStatus status rejectionReason specialInstructions buyerKraPin branchId createdAt updatedAt statusHistory';
 
   const [total, orders] = await Promise.all([
     Order.countDocuments(filter),
@@ -678,6 +716,17 @@ const approve = async (orderId, adminId, branchId, actorRole = 'supervisor') => 
 
     validateTransition(order.status, ORDER_STATUSES.APPROVED);
 
+    if (
+      order.paymentMethod === PAYMENT_METHODS.MPESA &&
+      order.paymentStatus !== PAYMENT_STATUSES.PAID
+    ) {
+      throw new AppError(
+        'Cannot approve order: M-Pesa payment has not been confirmed yet.',
+        400,
+        'PAYMENT_NOT_CONFIRMED'
+      );
+    }
+
     if (order.stockReservationStatus === STOCK_RESERVATION_STATUSES.RELEASED) {
       throw new AppError('This order no longer has stock reserved. Ask the customer to reorder.', 409, 'STOCK_RESERVATION_RELEASED');
     }
@@ -720,9 +769,7 @@ const approve = async (orderId, adminId, branchId, actorRole = 'supervisor') => 
       detail: { orderRef: order.orderRef }
     });
 
-    notificationService.dispatchOrderApproved(order, order.branchId).catch(err =>
-      logger.error('[notification] order approved failed', { err: err.message })
-    );
+    appEvents.emit(ORDER_EVENTS.APPROVED, { order, branchId: order.branchId });
 
     return order;
 
@@ -765,6 +812,23 @@ const reject = async (orderId, adminId, reason, branchId, actorRole = 'superviso
     await order.save({ session });
     await session.commitTransaction();
 
+    if (order.paymentStatus === PAYMENT_STATUSES.PAID && order.paymentId) {
+      await Payment.findByIdAndUpdate(order.paymentId, {
+        status:       PAYMENT_STATUSES.REFUNDED,
+        refundedAt:   new Date(),
+        refundReason: reason
+      });
+      await activityLogService.log({
+        actorId:    adminId,
+        actorRole,
+        action:     LOG_ACTIONS.PAYMENT_REFUNDED,
+        branchId:   order.branchId,
+        targetId:   order.paymentId,
+        targetType: 'Payment',
+        detail:     { orderRef: order.orderRef, reason }
+      });
+    }
+
     await activityLogService.log({
       actorId: adminId,
       actorRole,
@@ -775,9 +839,7 @@ const reject = async (orderId, adminId, reason, branchId, actorRole = 'superviso
       detail: { orderRef: order.orderRef, reason, stockReleased: true }
     });
 
-    notificationService.dispatchOrderRejected(order, order.branchId).catch(err =>
-      logger.error('[notification] order rejected failed', { err: err.message })
-    );
+    appEvents.emit(ORDER_EVENTS.REJECTED, { order, branchId: order.branchId });
 
     return order;
   } catch (err) {
@@ -803,6 +865,18 @@ const updateStatus = async (orderId, newStatus, adminId, note = null, branchId, 
 
     validateTransition(order.status, newStatus);
 
+    if (
+      newStatus === ORDER_STATUSES.COMPLETED &&
+      order.paymentMethod !== PAYMENT_METHODS.MPESA &&
+      order.paymentStatus !== PAYMENT_STATUSES.PAID
+    ) {
+      throw new AppError(
+        'Cannot complete order: cash payment has not been confirmed yet.',
+        400,
+        'PAYMENT_NOT_CONFIRMED'
+      );
+    }
+
     order.status = newStatus;
     order.statusHistory.push({
       status: newStatus,
@@ -813,6 +887,10 @@ const updateStatus = async (orderId, newStatus, adminId, note = null, branchId, 
 
     if (newStatus === ORDER_STATUSES.CANCELLED) {
       await releaseOrderStock(order, adminId, session, note || 'Cancelled by staff');
+    }
+
+    if (newStatus === ORDER_STATUSES.COMPLETED && !order.deliveredAt) {
+      order.deliveredAt = new Date();
     }
 
     await order.save({ session });
@@ -834,8 +912,14 @@ const updateStatus = async (orderId, newStatus, adminId, note = null, branchId, 
     });
 
     if (newStatus === ORDER_STATUSES.OUT_FOR_DELIVERY) {
-      notificationService.dispatchOrderDispatched(order, order.branchId).catch(err =>
-        logger.error('[notification] order dispatched failed', { err: err.message })
+      appEvents.emit(ORDER_EVENTS.DISPATCHED, { order, branchId: order.branchId });
+    }
+
+    // eTIMS: fiscalise COD and pickup orders at the moment of completion.
+    // M-Pesa orders are already fiscalised when the payment callback arrives.
+    if (newStatus === ORDER_STATUSES.COMPLETED && order.paymentMethod !== 'mpesa') {
+      etimsService.submitInvoice(order._id).catch(err =>
+        logger.error('[eTIMS] Invoice submission failed on order completion', { orderId: order._id, err: err.message })
       );
     }
 
@@ -1017,12 +1101,51 @@ const assignDriver = async (orderId, driverId, adminId, branchId, actorRole = 'a
 
   // If the driver assignment auto-advanced the order to out_for_delivery, notify customer
   if (order.status === ORDER_STATUSES.OUT_FOR_DELIVERY) {
-    notificationService.dispatchOrderDispatched(order, branchId).catch(err =>
-      logger.error('[notification] driver assigned dispatch failed', { err: err.message })
-    );
+    appEvents.emit(ORDER_EVENTS.DISPATCHED, { order, branchId });
   }
 
   return order;
+};
+
+// ── CUSTOMER SPENDING STATS ───────────────────────────────────────────────────
+// Returns this-month spend, last-month spend, all-time total, and a simple
+// category breakdown derived from completed/approved orders.
+const getMyStats = async (userId) => {
+  const now = new Date();
+  const thisMonthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const lastMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+  const lastMonthEnd   = new Date(now.getFullYear(), now.getMonth(), 1);
+
+  const COUNTED_STATUSES = ['pending', 'approved', 'preparing', 'out_for_delivery', 'completed'];
+
+  const [thisMonth, lastMonth, allTime, categoryBreakdown] = await Promise.all([
+    Order.aggregate([
+      { $match: { userId, status: { $in: COUNTED_STATUSES }, createdAt: { $gte: thisMonthStart } } },
+      { $group: { _id: null, total: { $sum: '$total' }, count: { $sum: 1 } } }
+    ]),
+    Order.aggregate([
+      { $match: { userId, status: { $in: COUNTED_STATUSES }, createdAt: { $gte: lastMonthStart, $lt: lastMonthEnd } } },
+      { $group: { _id: null, total: { $sum: '$total' }, count: { $sum: 1 } } }
+    ]),
+    Order.aggregate([
+      { $match: { userId, status: { $in: COUNTED_STATUSES } } },
+      { $group: { _id: null, total: { $sum: '$total' }, count: { $sum: 1 } } }
+    ]),
+    Order.aggregate([
+      { $match: { userId, status: { $in: COUNTED_STATUSES } } },
+      { $unwind: '$orderItems' },
+      { $group: { _id: '$orderItems.productName', total: { $sum: '$orderItems.lineTotal' } } },
+      { $sort: { total: -1 } },
+      { $limit: 5 }
+    ])
+  ]);
+
+  return {
+    thisMonth:  { total: thisMonth[0]?.total  || 0, orderCount: thisMonth[0]?.count  || 0 },
+    lastMonth:  { total: lastMonth[0]?.total  || 0, orderCount: lastMonth[0]?.count  || 0 },
+    allTime:    { total: allTime[0]?.total    || 0, orderCount: allTime[0]?.count    || 0 },
+    topProducts: categoryBreakdown.map(r => ({ name: r._id, total: r.total }))
+  };
 };
 
 module.exports = {
@@ -1032,6 +1155,7 @@ module.exports = {
   getById,
   getAll,
   getMyOrders,
+  getMyStats,
   trackByRef,
   approve,
   reject,

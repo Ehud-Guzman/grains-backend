@@ -63,6 +63,12 @@ const getPublicSettings = async (branchId) => {
     vatEnabled: s.vatEnabled === true,
     vatRate:    Number(s.vatRate)  || 16,
     // kraPin and receiptFooterNote are omitted — fetched via authenticated /api/settings/receipt
+    // Loyalty programme thresholds (needed by customer dashboard)
+    loyaltyEnabled:         s.loyaltyEnabled !== false,
+    loyaltyBronzeThreshold: s.loyaltyBronzeThreshold ?? 5000,
+    loyaltySilverThreshold: s.loyaltySilverThreshold ?? 25000,
+    loyaltyGoldThreshold:   s.loyaltyGoldThreshold   ?? 75000,
+    priceAlertThresholdPct: s.priceAlertThresholdPct ?? 5,
   };
 };
 

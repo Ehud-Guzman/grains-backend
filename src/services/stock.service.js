@@ -4,6 +4,7 @@ const StockLog = require('../models/StockLog');
 const { AppError } = require('../middleware/errorHandler.middleware');
 const activityLogService = require('./activityLog.service');
 const { LOG_ACTIONS, STOCK_CHANGE_TYPES } = require('../utils/constants');
+const { appEvents, STOCK_EVENTS } = require('../events/appEvents');
 const { validateReason } = require('../utils/validateReason');
 const { paginate, buildPaginationMeta } = require('../utils/paginate');
 const { invalidateCache } = require('./product.service');
@@ -225,6 +226,10 @@ const addDelivery = async (productId, varietyName, packagingSize, quantity, reas
     detail: { varietyName, packagingSize, quantity, balanceAfter, supplierId }
   });
 
+  appEvents.emit(STOCK_EVENTS.UPDATED, {
+    productId, branchId, varietyName, packaging: packagingSize, newStock: balanceAfter,
+  });
+
   invalidateCache();
   return { product, balanceAfter };
 };
@@ -289,6 +294,13 @@ const manualAdjustment = async (productId, varietyName, packagingSize, newQuanti
     targetType: 'Product',
     detail: { varietyName, packagingSize, before: currentStock, after: newQuantity, reason }
   });
+
+  // Only emit if stock went from 0 → positive (triggers back-in-stock alerts)
+  if (currentStock === 0 && newQuantity > 0) {
+    appEvents.emit(STOCK_EVENTS.UPDATED, {
+      productId, branchId, varietyName, packaging: packagingSize, newStock: newQuantity,
+    });
+  }
 
   invalidateCache();
   return { product, balanceAfter: newQuantity };

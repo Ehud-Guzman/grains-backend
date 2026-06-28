@@ -45,4 +45,16 @@ const resetPassword = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-module.exports = { getAll, create, changeRole, lockAccount, unlockAccount, resetPassword };
+const setPermissions = async (req, res, next) => {
+  try {
+    const { customPermissions, allowedBranchIds } = req.body;
+    const result = await userService.setPermissions(
+      req.params.id,
+      { customPermissions, allowedBranchIds },
+      req.user.id
+    );
+    return success(res, result, 'Permissions updated');
+  } catch (err) { next(err); }
+};
+
+module.exports = { getAll, create, changeRole, lockAccount, unlockAccount, resetPassword, setPermissions };

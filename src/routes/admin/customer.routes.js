@@ -40,6 +40,9 @@ router.post(
   customerController.addNote
 );
 
+// PATCH /api/admin/customers/:id/b2b — toggle B2B flag
+router.patch('/:id/b2b', requireBusinessRole('supervisor'), customerIdParamValidator, validate, customerController.toggleB2B);
+
 // PATCH /api/admin/customers/:id/lock
 router.patch('/:id/lock', requireMinRole('supervisor'), customerIdParamValidator, validate, customerController.lockAccount);
 

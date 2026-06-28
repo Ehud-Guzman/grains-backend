@@ -11,6 +11,7 @@ const paymentSchema = new mongoose.Schema({
   currency: { type: String, default: 'KES' },
   status: { type: String, enum: Object.values(PAYMENT_STATUSES), default: PAYMENT_STATUSES.PENDING },
   paidAt: { type: Date, default: null },
+  safaricomTimestamp: { type: Date, default: null },
   refundedAt: { type: Date, default: null },
   refundReason: { type: String, default: null },
   confirmedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null }

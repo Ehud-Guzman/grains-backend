@@ -97,6 +97,17 @@ const requireBranch = (req, res, next) => {
   next();
 };
 
+// requireSuperadminOrPermission('manage_branches') — superadmin OR a user explicitly granted the named permission
+const requireSuperadminOrPermission = (permission) => {
+  return (req, res, next) => {
+    if (!req.user) {
+      return next(new AppError('Authentication required', 401, 'UNAUTHORIZED'));
+    }
+    if (req.user.role === ROLES.SUPERADMIN || req.user.customPermissions?.includes(permission)) {
+      return next();
+    }
+    return next(new AppError('You do not have permission to perform this action', 403, 'FORBIDDEN'));
+  };
+};
 
-
-module.exports = { requireRole, requireMinRole, requireBusinessRole, requireBranch };
+module.exports = { requireRole, requireMinRole, requireBusinessRole, requireBranch, requireSuperadminOrPermission };

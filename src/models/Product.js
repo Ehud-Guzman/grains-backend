@@ -5,9 +5,16 @@ const discountRuleSchema = new mongoose.Schema({
   discountPercent: { type: Number, required: true, min: 0.1, max: 100 }
 }, { _id: false });
 
+const pricingTierSchema = new mongoose.Schema({
+  minQty:   { type: Number, required: true, min: 1 },
+  priceKES: { type: Number, required: true, min: 0 },
+}, { _id: false });
+
 const packagingSchema = new mongoose.Schema({
   size: { type: String, required: true }, // e.g. "50kg", "90kg", "Bulk"
   priceKES: { type: Number, default: null },
+  costPriceKES: { type: Number, default: null }, // optional cost price for margin tracking
+  pricingTiers: { type: [pricingTierSchema], default: [] }, // volume discount tiers
   stock: { type: Number, default: 0 },
   lowStockThreshold: { type: Number, default: 10 },
   quoteOnly: { type: Boolean, default: false } // true for Bulk — no fixed price

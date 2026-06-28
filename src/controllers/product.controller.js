@@ -1,5 +1,6 @@
 const productService = require('../services/product.service');
 const { getDefaultBranchId } = require('../services/defaultBranch.service');
+const priceLogService = require('../services/priceLog.service');
 const { success, paginated } = require('../utils/apiResponse');
 
 // ── LIST ALL PRODUCTS (public) ────────────────────────────────────────────────
@@ -104,6 +105,36 @@ const addImagesToProduct = async (productId, urls) => {
   return productService.addImages(productId, urls);
 };
 
+// ── PRICE HISTORY (public — for chart on product detail page) ─────────────────
+const getPriceHistory = async (req, res, next) => {
+  try {
+    const { variety, packaging } = req.query;
+    const history = await priceLogService.getHistory(req.params.id, { varietyName: variety, packaging });
+    return success(res, history);
+  } catch (err) { next(err); }
+};
+
+// ── BATCH PRICE CHANGES (public — for card badges on product lists) ───────────
+const getPriceChanges = async (req, res, next) => {
+  try {
+    const ids = (req.query.ids || '').split(',').filter(Boolean);
+    if (!ids.length) return success(res, {});
+    const data = await priceLogService.getBatchPriceChanges(ids);
+    return success(res, data);
+  } catch (err) { next(err); }
+};
+
+// ── BEST-TIME-TO-BUY BADGE (public) ──────────────────────────────────────────
+const getBestTimeBadge = async (req, res, next) => {
+  try {
+    const { variety, packaging, price } = req.query;
+    const badge = await priceLogService.getBestTimeBadge(
+      req.params.id, variety, packaging, Number(price)
+    );
+    return success(res, badge);
+  } catch (err) { next(err); }
+};
+
 module.exports = {
   getAll,
   getById,
@@ -116,4 +147,7 @@ module.exports = {
   duplicate,
   deleteProduct,
   addImagesToProduct,
+  getPriceHistory,
+  getPriceChanges,
+  getBestTimeBadge,
 };

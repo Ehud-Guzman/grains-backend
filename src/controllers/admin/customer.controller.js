@@ -44,4 +44,25 @@ const getSegments = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-module.exports = { getAll, getProfile, addNote, getSegments, lockAccount, unlockAccount };
+const toggleB2B = async (req, res, next) => {
+  try {
+    const { AppError } = require('../../middleware/errorHandler.middleware');
+    const activityLogService = require('../../services/activityLog.service');
+    const mongoose = require('mongoose');
+    const customer = await mongoose.model('User').findByIdAndUpdate(
+      req.params.id,
+      [{ $set: { isB2B: { $not: '$isB2B' } } }],
+      { new: true }
+    );
+    if (!customer) throw new AppError('Customer not found', 404, 'NOT_FOUND');
+    await activityLogService.log({
+      actorId: req.user.id, actorRole: req.user.role,
+      action: 'CUSTOMER_UPDATED',
+      branchId: req.branchId, targetId: customer._id, targetType: 'User',
+      detail: { isB2B: customer.isB2B },
+    });
+    return success(res, { isB2B: customer.isB2B }, customer.isB2B ? 'Marked as B2B' : 'Removed B2B flag');
+  } catch (err) { next(err); }
+};
+
+module.exports = { getAll, getProfile, addNote, getSegments, lockAccount, unlockAccount, toggleB2B };

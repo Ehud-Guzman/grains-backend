@@ -42,6 +42,22 @@ router.get('/orders', requireMinRole('supervisor'), reportController.getOrdersBy
 // GET /api/admin/reports/onboarding
 router.get('/onboarding', requireMinRole('supervisor'), reportController.getOnboardingAnalytics);
 
+// ── GROSS MARGIN REPORT - supervisor+ ────────────────────────────────────────
+// GET /api/admin/reports/margins?period=month
+router.get('/margins', requireMinRole('supervisor'), reportController.getMarginReport);
+
+// ── RIDER PERFORMANCE - supervisor+ ──────────────────────────────────────────
+// GET /api/admin/reports/riders?period=month
+router.get('/riders', requireMinRole('supervisor'), reportController.getRiderReport);
+
+// ── VAT REPORT - supervisor+ ──────────────────────────────────────────────────
+// GET /api/admin/reports/vat?period=month
+router.get('/vat', requireMinRole('supervisor'), reportController.getVatReport);
+
+// ── CUSTOMER STATEMENT - supervisor+ ─────────────────────────────────────────
+// GET /api/admin/reports/customer-statement/:customerId?period=month
+router.get('/customer-statement/:customerId', requireMinRole('supervisor'), reportController.getCustomerStatement);
+
 // ── CSV EXPORT - admin+ only per SRS 5.6 ─────────────────────────────────────
 // GET /api/admin/reports/export/:type?period=month
 // type: sales | best-sellers | stock-valuation | customers | orders | stock-movement

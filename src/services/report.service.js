@@ -52,7 +52,11 @@ const getDashboardKPIs = async (branchId) => {
   const todayEnd = endOfDay(now);
   const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
 
-  const branchFilter = branchId ? { branchId } : {};
+  const branchFilter = branchId ? { branchId: new mongoose.Types.ObjectId(String(branchId)) } : {};
+
+  const ACTIVE_STATUSES = ['pending', 'approved', 'preparing', 'out_for_delivery', 'completed'];
+  // Revenue is counted from approved onwards — pending orders aren't committed yet
+  const REVENUE_STATUSES = ['approved', 'preparing', 'out_for_delivery', 'completed'];
 
   const [
     ordersToday,
@@ -60,7 +64,8 @@ const getDashboardKPIs = async (branchId) => {
     revenueToday,
     revenueThisMonth,
     lowStockCount,
-    recentOrders
+    recentOrders,
+    cashFlow
   ] = await Promise.all([
     // Orders placed today
     Order.countDocuments({ ...branchFilter, createdAt: { $gte: todayStart, $lte: todayEnd } }),
@@ -68,15 +73,15 @@ const getDashboardKPIs = async (branchId) => {
     // Pending orders
     Order.countDocuments({ ...branchFilter, status: 'pending' }),
 
-    // Revenue today (completed orders only)
+    // Revenue today (approved+ orders placed today)
     Order.aggregate([
-      { $match: { ...branchFilter, status: 'completed', updatedAt: { $gte: todayStart, $lte: todayEnd } } },
+      { $match: { ...branchFilter, status: { $in: REVENUE_STATUSES }, createdAt: { $gte: todayStart, $lte: todayEnd } } },
       { $group: { _id: null, total: { $sum: '$total' } } }
     ]),
 
-    // Revenue this month
+    // Revenue this month (approved+ orders placed this month)
     Order.aggregate([
-      { $match: { ...branchFilter, status: 'completed', updatedAt: { $gte: monthStart } } },
+      { $match: { ...branchFilter, status: { $in: REVENUE_STATUSES }, createdAt: { $gte: monthStart } } },
       { $group: { _id: null, total: { $sum: '$total' } } }
     ]),
 
@@ -102,8 +107,18 @@ const getDashboardKPIs = async (branchId) => {
       .sort({ createdAt: -1 })
       .limit(10)
       .select('orderRef status total paymentMethod createdAt userId guestId')
-      .lean()
+      .lean(),
+
+    // Cash flow this month: paid vs unpaid across all active orders
+    Order.aggregate([
+      { $match: { ...branchFilter, status: { $in: ACTIVE_STATUSES }, createdAt: { $gte: monthStart } } },
+      { $group: { _id: '$paymentStatus', total: { $sum: '$total' }, count: { $sum: 1 } } }
+    ])
   ]);
+
+  const paidFlow    = cashFlow.find(r => r._id === 'paid')    || { total: 0, count: 0 };
+  const unpaidFlow  = cashFlow.find(r => r._id === 'unpaid')  || { total: 0, count: 0 };
+  const partialFlow = cashFlow.find(r => r._id === 'partial') || { total: 0, count: 0 };
 
   return {
     ordersToday,
@@ -111,7 +126,13 @@ const getDashboardKPIs = async (branchId) => {
     revenueToday: revenueToday[0]?.total || 0,
     revenueThisMonth: revenueThisMonth[0]?.total || 0,
     lowStockCount,
-    recentOrders
+    recentOrders,
+    cashFlow: {
+      paidRevenue:    paidFlow.total,
+      paidOrders:     paidFlow.count,
+      unpaidRevenue:  unpaidFlow.total + partialFlow.total,
+      unpaidOrders:   unpaidFlow.count + partialFlow.count,
+    }
   };
 };
 
@@ -120,12 +141,14 @@ const getDashboardKPIs = async (branchId) => {
 // Used for line/bar charts on dashboard
 const getSalesReport = async (period, from, to, branchId) => {
   const { start, end } = getDateRange(period, from, to);
-  const branchFilter = branchId ? { branchId } : {};
+  const branchFilter = branchId ? { branchId: new mongoose.Types.ObjectId(String(branchId)) } : {};
+
+  const REVENUE_STATUSES = ['approved', 'preparing', 'out_for_delivery', 'completed'];
 
   const [summary, byCategory, byDay, orderVolume] = await Promise.all([
     // Overall summary
     Order.aggregate([
-      { $match: { ...branchFilter, status: 'completed', updatedAt: { $gte: start, $lte: end } } },
+      { $match: { ...branchFilter, status: { $in: REVENUE_STATUSES }, createdAt: { $gte: start, $lte: end } } },
       {
         $group: {
           _id: null,
@@ -139,7 +162,7 @@ const getSalesReport = async (period, from, to, branchId) => {
 
     // Revenue by product category
     Order.aggregate([
-      { $match: { ...branchFilter, status: 'completed', updatedAt: { $gte: start, $lte: end } } },
+      { $match: { ...branchFilter, status: { $in: REVENUE_STATUSES }, createdAt: { $gte: start, $lte: end } } },
       { $unwind: '$orderItems' },
       {
         $lookup: {
@@ -163,13 +186,13 @@ const getSalesReport = async (period, from, to, branchId) => {
 
     // Revenue by day (for line chart - UX B5)
     Order.aggregate([
-      { $match: { ...branchFilter, status: 'completed', updatedAt: { $gte: start, $lte: end } } },
+      { $match: { ...branchFilter, status: { $in: REVENUE_STATUSES }, createdAt: { $gte: start, $lte: end } } },
       {
         $group: {
           _id: {
-            year: { $year: '$updatedAt' },
-            month: { $month: '$updatedAt' },
-            day: { $dayOfMonth: '$updatedAt' }
+            year: { $year: '$createdAt' },
+            month: { $month: '$createdAt' },
+            day: { $dayOfMonth: '$createdAt' }
           },
           revenue: { $sum: '$total' },
           orders: { $sum: 1 }
@@ -194,7 +217,7 @@ const getSalesReport = async (period, from, to, branchId) => {
 
     // Order volume by payment method
     Order.aggregate([
-      { $match: { ...branchFilter, status: 'completed', updatedAt: { $gte: start, $lte: end } } },
+      { $match: { ...branchFilter, status: { $in: REVENUE_STATUSES }, createdAt: { $gte: start, $lte: end } } },
       {
         $group: {
           _id: '$paymentMethod',
@@ -224,10 +247,12 @@ const getSalesReport = async (period, from, to, branchId) => {
 // UX B5 - products ranked by units sold and revenue
 const getBestSellers = async (period, from, to, limit = 10, branchId) => {
   const { start, end } = getDateRange(period, from, to);
-  const branchFilter = branchId ? { branchId } : {};
+  const branchFilter = branchId ? { branchId: new mongoose.Types.ObjectId(String(branchId)) } : {};
+
+  const REVENUE_STATUSES = ['approved', 'preparing', 'out_for_delivery', 'completed'];
 
   const results = await Order.aggregate([
-    { $match: { ...branchFilter, status: 'completed', createdAt: { $gte: start, $lte: end } } },
+    { $match: { ...branchFilter, status: { $in: REVENUE_STATUSES }, createdAt: { $gte: start, $lte: end } } },
     { $unwind: '$orderItems' },
     {
       $group: {
@@ -266,17 +291,17 @@ const getBestSellers = async (period, from, to, limit = 10, branchId) => {
 const getSlowMovers = async (days = 30, branchId) => {
   const cutoff = new Date();
   cutoff.setDate(cutoff.getDate() - days);
-  const branchFilter = branchId ? { branchId } : {};
+  const branchFilter = branchId ? { branchId: new mongoose.Types.ObjectId(String(branchId)) } : {};
 
   // Get all active products
   const allProducts = await Product.find({ isActive: true, ...branchFilter })
     .select('name category varieties')
     .lean();
 
-  // Get products that had orders in the period
+  // Get products that had orders in the period (approved or beyond)
   const activeProductIds = await Order.distinct('orderItems.productId', {
     ...branchFilter,
-    status: 'completed',
+    status: { $in: ['approved', 'preparing', 'out_for_delivery', 'completed'] },
     createdAt: { $gte: cutoff }
   });
 
@@ -368,7 +393,7 @@ const getStockMovementReport = async (period, from, to, branchId) => {
 const getCustomerReport = async (branchId) => {
   const thirtyDaysAgo = new Date();
   thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-  const branchFilter = branchId ? { branchId } : {};
+  const branchFilter = branchId ? { branchId: new mongoose.Types.ObjectId(String(branchId)) } : {};
 
   const stats = await Order.aggregate([
     { $match: { ...branchFilter, status: 'completed', userId: { $ne: null } } },
@@ -437,7 +462,7 @@ const getCustomerReport = async (branchId) => {
 // UX B5 - count and value of orders at each status stage
 const getOrdersByStatus = async (period, from, to, branchId) => {
   const { start, end } = getDateRange(period, from, to);
-  const branchFilter = branchId ? { branchId } : {};
+  const branchFilter = branchId ? { branchId: new mongoose.Types.ObjectId(String(branchId)) } : {};
 
   const [byStatus, peakHours, avgOrderValue] = await Promise.all([
     // Orders grouped by status
@@ -668,6 +693,301 @@ const getOnboardingAnalytics = async () => {
   };
 };
 
+// ── GROSS MARGIN REPORT ───────────────────────────────────────────────────────
+// Aggregates revenue and estimated cost per SKU using costPriceKES from packaging.
+// Only SKUs that have costPriceKES set are included.
+const getMarginReport = async (period, from, to, branchId) => {
+  const { start, end } = getDateRange(period, from, to);
+  const branchFilter = branchId ? { branchId: new mongoose.Types.ObjectId(String(branchId)) } : {};
+
+  const rows = await Order.aggregate([
+    {
+      $match: {
+        ...branchFilter,
+        status: { $in: ['completed'] },
+        createdAt: { $gte: start, $lte: end },
+      },
+    },
+    { $unwind: '$orderItems' },
+    {
+      $group: {
+        _id: {
+          productId:   '$orderItems.productId',
+          productName: '$orderItems.productName',
+          variety:     '$orderItems.variety',
+          packaging:   '$orderItems.packaging',
+        },
+        unitsSold: { $sum: '$orderItems.quantity' },
+        revenue:   { $sum: '$orderItems.lineTotal' },
+        unitPrice: { $first: '$orderItems.unitPrice' },
+      },
+    },
+    {
+      $lookup: {
+        from: 'products',
+        localField: '_id.productId',
+        foreignField: '_id',
+        as: 'product',
+      },
+    },
+    { $unwind: { path: '$product', preserveNullAndEmpty: true } },
+    {
+      $project: {
+        productId:   '$_id.productId',
+        productName: '$_id.productName',
+        variety:     '$_id.variety',
+        packaging:   '$_id.packaging',
+        unitsSold:   1,
+        revenue:     1,
+        unitPrice:   1,
+        costPriceKES: {
+          $let: {
+            vars: {
+              v: {
+                $first: {
+                  $filter: {
+                    input: '$product.varieties',
+                    cond: { $eq: ['$$this.varietyName', '$_id.variety'] },
+                  },
+                },
+              },
+            },
+            in: {
+              $let: {
+                vars: {
+                  p: {
+                    $first: {
+                      $filter: {
+                        input: '$$v.packaging',
+                        cond: { $eq: ['$$this.size', '$_id.packaging'] },
+                      },
+                    },
+                  },
+                },
+                in: '$$p.costPriceKES',
+              },
+            },
+          },
+        },
+      },
+    },
+    {
+      $addFields: {
+        estimatedCost: {
+          $cond: [
+            { $gt: ['$costPriceKES', null] },
+            { $multiply: ['$costPriceKES', '$unitsSold'] },
+            null,
+          ],
+        },
+      },
+    },
+    {
+      $addFields: {
+        grossProfit: {
+          $cond: [
+            { $gt: ['$estimatedCost', null] },
+            { $subtract: ['$revenue', '$estimatedCost'] },
+            null,
+          ],
+        },
+        marginPct: {
+          $cond: [
+            { $and: [{ $gt: ['$estimatedCost', null] }, { $gt: ['$revenue', 0] }] },
+            {
+              $multiply: [
+                { $divide: [{ $subtract: ['$revenue', '$estimatedCost'] }, '$revenue'] },
+                100,
+              ],
+            },
+            null,
+          ],
+        },
+      },
+    },
+    { $sort: { grossProfit: -1 } },
+  ]);
+
+  const withCost = rows.filter(r => r.estimatedCost !== null);
+  const totalRevenue = rows.reduce((s, r) => s + r.revenue, 0);
+  const totalCost = withCost.reduce((s, r) => s + r.estimatedCost, 0);
+  const totalGrossProfit = withCost.reduce((s, r) => s + r.grossProfit, 0);
+  const overallMarginPct = totalRevenue > 0
+    ? Math.round((totalGrossProfit / withCost.reduce((s, r) => s + r.revenue, 0)) * 100)
+    : null;
+
+  return {
+    period: { start, end },
+    summary: {
+      totalRevenue: Math.round(totalRevenue),
+      totalCost: Math.round(totalCost),
+      totalGrossProfit: Math.round(totalGrossProfit),
+      overallMarginPct,
+      skusWithCostData: withCost.length,
+      totalSkus: rows.length,
+    },
+    rows: rows.map(r => ({
+      ...r,
+      revenue: Math.round(r.revenue),
+      estimatedCost: r.estimatedCost !== null ? Math.round(r.estimatedCost) : null,
+      grossProfit: r.grossProfit !== null ? Math.round(r.grossProfit) : null,
+      marginPct: r.marginPct !== null ? Math.round(r.marginPct) : null,
+    })),
+  };
+};
+
+// ── RIDER PERFORMANCE REPORT ──────────────────────────────────────────────────
+// Uses deliveredAt (set on status → completed) and driverId on Order.
+const getRiderReport = async (period, from, to, branchId) => {
+  const { start, end } = getDateRange(period, from, to);
+  const branchFilter = branchId ? { branchId: new mongoose.Types.ObjectId(String(branchId)) } : {};
+
+  const rows = await Order.aggregate([
+    {
+      $match: {
+        ...branchFilter,
+        status: 'completed',
+        deliveryMethod: 'delivery',
+        driverId: { $ne: null },
+        deliveredAt: { $ne: null },
+        createdAt: { $gte: start, $lte: end },
+      },
+    },
+    {
+      $addFields: {
+        deliveryMinutes: {
+          $divide: [
+            { $subtract: ['$deliveredAt', '$createdAt'] },
+            60000,
+          ],
+        },
+      },
+    },
+    {
+      $group: {
+        _id: '$driverId',
+        deliveries: { $sum: 1 },
+        totalRevenue: { $sum: '$total' },
+        avgDeliveryMinutes: { $avg: '$deliveryMinutes' },
+        minDeliveryMinutes: { $min: '$deliveryMinutes' },
+        maxDeliveryMinutes: { $max: '$deliveryMinutes' },
+      },
+    },
+    {
+      $lookup: {
+        from: 'users',
+        localField: '_id',
+        foreignField: '_id',
+        as: 'driver',
+      },
+    },
+    { $unwind: { path: '$driver', preserveNullAndEmpty: true } },
+    {
+      $project: {
+        driverId: '$_id',
+        driverName: '$driver.name',
+        driverPhone: '$driver.phone',
+        deliveries: 1,
+        totalRevenue: 1,
+        avgDeliveryMinutes: { $round: ['$avgDeliveryMinutes', 0] },
+        minDeliveryMinutes: { $round: ['$minDeliveryMinutes', 0] },
+        maxDeliveryMinutes: { $round: ['$maxDeliveryMinutes', 0] },
+      },
+    },
+    { $sort: { deliveries: -1 } },
+  ]);
+
+  return {
+    period: { start, end },
+    riders: rows,
+  };
+};
+
+// ── VAT REPORT ────────────────────────────────────────────────────────────────
+// Monthly VAT summary for KRA filing
+const getVatReport = async (period, from, to, branchId) => {
+  const { start, end } = getDateRange(period, from, to);
+  const branchFilter = branchId ? { branchId: new mongoose.Types.ObjectId(String(branchId)) } : {};
+
+  const rows = await Order.aggregate([
+    {
+      $match: {
+        ...branchFilter,
+        status: 'completed',
+        vatEnabled: true,
+        createdAt: { $gte: start, $lte: end },
+      },
+    },
+    {
+      $group: {
+        _id: {
+          year:  { $year: '$createdAt' },
+          month: { $month: '$createdAt' },
+        },
+        orders:      { $sum: 1 },
+        totalExVat:  { $sum: '$subtotal' },
+        totalVat:    { $sum: '$vatAmount' },
+        totalInclVat:{ $sum: '$total' },
+        vatRate:     { $first: '$vatRate' },
+      },
+    },
+    { $sort: { '_id.year': 1, '_id.month': 1 } },
+    {
+      $project: {
+        _id: 0,
+        year:         '$_id.year',
+        month:        '$_id.month',
+        orders:       1,
+        vatRate:      1,
+        totalExVat:   { $round: ['$totalExVat',   0] },
+        totalVat:     { $round: ['$totalVat',     0] },
+        totalInclVat: { $round: ['$totalInclVat', 0] },
+      },
+    },
+  ]);
+
+  const summary = rows.reduce(
+    (acc, r) => ({
+      totalOrders:   acc.totalOrders   + r.orders,
+      totalExVat:    acc.totalExVat    + r.totalExVat,
+      totalVat:      acc.totalVat      + r.totalVat,
+      totalInclVat:  acc.totalInclVat  + r.totalInclVat,
+    }),
+    { totalOrders: 0, totalExVat: 0, totalVat: 0, totalInclVat: 0 }
+  );
+
+  return { period: { start, end }, summary, rows };
+};
+
+// ── CUSTOMER STATEMENT ────────────────────────────────────────────────────────
+// All completed orders for one customer in a date range (admin-downloadable)
+const getCustomerStatement = async (userId, period, from, to, branchId) => {
+  const { start, end } = getDateRange(period, from, to);
+  const branchFilter = branchId ? { branchId: new mongoose.Types.ObjectId(String(branchId)) } : {};
+
+  const orders = await Order.find({
+    ...branchFilter,
+    userId,
+    status: 'completed',
+    createdAt: { $gte: start, $lte: end },
+  })
+    .select('orderRef createdAt subtotal deliveryFee vatAmount couponDiscount total paymentMethod paymentStatus')
+    .sort({ createdAt: 1 })
+    .lean();
+
+  const summary = orders.reduce(
+    (acc, o) => ({
+      totalOrders:    acc.totalOrders + 1,
+      totalSpend:     acc.totalSpend  + o.total,
+      totalVat:       acc.totalVat    + (o.vatAmount || 0),
+      totalDiscounts: acc.totalDiscounts + (o.couponDiscount || 0),
+    }),
+    { totalOrders: 0, totalSpend: 0, totalVat: 0, totalDiscounts: 0 }
+  );
+
+  return { period: { start, end }, orders, summary };
+};
+
 module.exports = {
   getDashboardKPIs,
   getSalesReport,
@@ -678,5 +998,9 @@ module.exports = {
   getCustomerReport,
   getOrdersByStatus,
   exportReport,
-  getOnboardingAnalytics
+  getOnboardingAnalytics,
+  getMarginReport,
+  getRiderReport,
+  getVatReport,
+  getCustomerStatement,
 };
