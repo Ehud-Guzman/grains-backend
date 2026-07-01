@@ -119,7 +119,18 @@ const initiateStkPush = async (orderId, phone) => {
 
   const timestamp      = generateTimestamp();
   const password       = generatePassword(shortcode, passkey, timestamp);
-  const token          = await getDarajaToken();
+
+  let token;
+  try {
+    token = await getDarajaToken();
+  } catch (err) {
+    await Payment.findByIdAndUpdate(payment._id, { status: PAYMENT_STATUSES.FAILED })
+      .catch(resetErr => logger.error('[M-PESA] Failed to mark payment failed after token error', { orderId, err: resetErr.message }));
+    await Order.findByIdAndUpdate(orderId, { paymentStatus: PAYMENT_STATUSES.FAILED })
+      .catch(resetErr => logger.error('[M-PESA] Failed to reset paymentStatus after token error', { orderId, err: resetErr.message }));
+    logger.error('[M-PESA] Daraja token fetch failed', { orderId, msg: err.message });
+    throw new AppError(`M-Pesa request failed: ${err.message}`, 502, 'MPESA_REQUEST_FAILED');
+  }
 
   const payload = {
     BusinessShortCode: shortcode,
