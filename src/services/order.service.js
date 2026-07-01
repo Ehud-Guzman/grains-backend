@@ -21,8 +21,10 @@ const {
   STOCK_CHANGE_TYPES,
   STOCK_RESERVATION_STATUSES,
   PAYMENT_STATUSES,
-  PAYMENT_METHODS
+  PAYMENT_METHODS,
+  ROLES
 } = require('../utils/constants');
+const { formatPhone } = require('../utils/mpesaHelpers');
 const { paginate, buildPaginationMeta } = require('../utils/paginate');
 const { validateReason } = require('../utils/validateReason');
 const couponService = require('./coupon.service');
@@ -31,47 +33,6 @@ const orderHasHeldStock = (order) => (
   [STOCK_RESERVATION_STATUSES.HELD, STOCK_RESERVATION_STATUSES.CONSUMED]
     .includes(order.stockReservationStatus || STOCK_RESERVATION_STATUSES.NONE)
 );
-
-// ── VALIDATE STOCK AVAILABILITY ───────────────────────────────────────────────
-// Called before order submission to prevent cart submission on out-of-stock (UX C1)
-const validateOrderStock = async (orderItems) => {
-  const errors = [];
-
-  // One query for all unique products instead of one query per item
-  const productIds = [...new Set(orderItems.map(i => i.productId))];
-  const products = await Product.find({ _id: { $in: productIds }, isActive: true }).lean();
-  const productsMap = new Map(products.map(p => [p._id.toString(), p]));
-
-  for (const item of orderItems) {
-    const product = productsMap.get(item.productId?.toString());
-
-    if (!product) {
-      errors.push(`Product "${item.productName}" is no longer available`);
-      continue;
-    }
-
-    const variety = product.varieties.find(v => v.varietyName === item.variety);
-    const packaging = variety?.packaging.find(p => p.size === item.packaging);
-
-    if (!packaging) {
-      errors.push(`${item.variety} ${item.packaging} is no longer available`);
-      continue;
-    }
-
-    if (packaging.quoteOnly) {
-      errors.push(`${item.variety} ${item.packaging} requires a quote — it cannot be ordered online`);
-      continue;
-    }
-
-    if (packaging.stock < item.quantity) {
-      errors.push(
-        `Insufficient stock for ${item.variety} ${item.packaging}. Available: ${packaging.stock}, Requested: ${item.quantity}`
-      );
-    }
-  }
-
-  return errors;
-};
 
 // ── BUILD ORDER ITEMS WITH PRICE SNAPSHOT ────────────────────────────────────
 // Snapshot prices at time of order - SRS 7.4
@@ -385,11 +346,7 @@ const createGuestOrder = async (orderData, branchId) => {
       400, 'DELIVERY_OUT_OF_RANGE'
     );
   }
-  const vatEnabled = settings.vatEnabled === true;
-  const vatRate    = vatEnabled ? (Number(settings.vatRate) || 0) : 0;
-  const vatAmount  = vatEnabled ? Math.round(subtotal * vatRate) / 100 : 0;
-
-  // Coupon
+  // Coupon — computed before VAT so the net subtotal (post-discount) forms the VAT base
   let couponCode = null;
   let couponDiscount = 0;
   if (orderData.couponCode) {
@@ -399,6 +356,11 @@ const createGuestOrder = async (orderData, branchId) => {
     couponCode = coupon.code;
     couponDiscount = discountAmount;
   }
+
+  const vatEnabled = settings.vatEnabled === true;
+  const vatRate    = vatEnabled ? (Number(settings.vatRate) || 0) : 0;
+  const vatBase    = Math.max(0, subtotal - couponDiscount);
+  const vatAmount  = vatEnabled ? Math.round(vatBase * vatRate / 100) : 0;
 
   const session = await mongoose.startSession();
   session.startTransaction();
@@ -451,8 +413,8 @@ const createGuestOrder = async (orderData, branchId) => {
 
     await reserveOrderStock(order, guest._id, 'guest', session);
     await Guest.findByIdAndUpdate(guest._id, { $push: { orders: order._id } }, { session });
+    if (couponCode) await couponService.incrementUsage(couponCode, branchId, session);
     await session.commitTransaction();
-    if (couponCode) await couponService.incrementUsage(couponCode, branchId);
 
     await activityLogService.log({
       actorId: guest._id,
@@ -505,11 +467,7 @@ const createCustomerOrder = async (orderData, userId, branchId) => {
       400, 'DELIVERY_OUT_OF_RANGE'
     );
   }
-  const vatEnabled = settings.vatEnabled === true;
-  const vatRate    = vatEnabled ? (Number(settings.vatRate) || 0) : 0;
-  const vatAmount  = vatEnabled ? Math.round(subtotal * vatRate) / 100 : 0;
-
-  // Coupon
+  // Coupon — computed before VAT so the net subtotal (post-discount) forms the VAT base
   let couponCode = null;
   let couponDiscount = 0;
   if (orderData.couponCode) {
@@ -519,6 +477,11 @@ const createCustomerOrder = async (orderData, userId, branchId) => {
     couponCode = coupon.code;
     couponDiscount = discountAmount;
   }
+
+  const vatEnabled = settings.vatEnabled === true;
+  const vatRate    = vatEnabled ? (Number(settings.vatRate) || 0) : 0;
+  const vatBase    = Math.max(0, subtotal - couponDiscount);
+  const vatAmount  = vatEnabled ? Math.round(vatBase * vatRate / 100) : 0;
 
   const session = await mongoose.startSession();
   session.startTransaction();
@@ -561,8 +524,8 @@ const createCustomerOrder = async (orderData, userId, branchId) => {
 
     await reserveOrderStock(order, userId, 'customer', session);
     await User.findByIdAndUpdate(userId, { $push: { orderHistory: order._id } }, { session });
+    if (couponCode) await couponService.incrementUsage(couponCode, branchId, session);
     await session.commitTransaction();
-    if (couponCode) await couponService.incrementUsage(couponCode, branchId);
 
     await activityLogService.log({
       actorId: userId,
@@ -676,7 +639,7 @@ const getMyOrders = async (userId, query = {}, branchId) => {
 const trackByRef = async (phone, orderRef) => {
   // Auto-cancel is handled by autoCancel.job.js — no per-request call needed
 
-  const guest = await Guest.findOne({ phone });
+  const guest = await Guest.findOne({ phone: formatPhone(phone) });
   if (!guest) throw new AppError('Order not found', 404, 'NOT_FOUND');
 
   const order = await Order.findOne({ orderRef, guestId: guest._id })
@@ -934,7 +897,7 @@ const updateStatus = async (orderId, newStatus, adminId, note = null, branchId, 
 
 // ── CANCEL ORDER ──────────────────────────────────────────────────────────────
 // SRS 5.2 - customer can cancel only if still pending
-const cancel = async (orderId, userId, branchId) => {
+const cancel = async (orderId, userId) => {
   // Auto-cancel is handled by autoCancel.job.js — no per-request call needed
   const session = await mongoose.startSession();
   session.startTransaction();
@@ -943,7 +906,7 @@ const cancel = async (orderId, userId, branchId) => {
     const order = await Order.findById(orderId).session(session);
     if (!order) throw new AppError('Order not found', 404, 'ORDER_NOT_FOUND');
 
-    if (order.userId && order.userId.toString() !== userId.toString()) {
+    if (!order.userId || order.userId.toString() !== userId.toString()) {
       throw new AppError('You can only cancel your own orders', 403, 'FORBIDDEN');
     }
 
@@ -1055,39 +1018,47 @@ const getPackingSlip = async (orderId, branchId) => {
 // Admin assigns a driver when order is preparing or out_for_delivery.
 // Automatically transitions preparing → out_for_delivery on first assignment.
 const assignDriver = async (orderId, driverId, adminId, branchId, actorRole = 'admin') => {
-  const User = require('../models/User');
-  const { ROLES } = require('../utils/constants');
+  const session = await mongoose.startSession();
+  session.startTransaction();
 
-  const order = await Order.findOne({ _id: orderId, branchId });
-  if (!order) throw new AppError('Order not found', 404, 'ORDER_NOT_FOUND');
+  let order, driver;
+  try {
+    order = await Order.findOne({ _id: orderId, branchId }).session(session);
+    if (!order) throw new AppError('Order not found', 404, 'ORDER_NOT_FOUND');
 
-  if (order.deliveryMethod !== 'delivery') {
-    throw new AppError('Cannot assign a driver to a pickup order', 400, 'NOT_DELIVERY_ORDER');
+    if (order.deliveryMethod !== 'delivery') {
+      throw new AppError('Cannot assign a driver to a pickup order', 400, 'NOT_DELIVERY_ORDER');
+    }
+
+    const allowed = [ORDER_STATUSES.PREPARING, ORDER_STATUSES.OUT_FOR_DELIVERY];
+    if (!allowed.includes(order.status)) {
+      throw new AppError(`Driver can only be assigned when order is preparing or out for delivery`, 400, 'INVALID_ORDER_STATUS');
+    }
+
+    driver = await User.findOne({ _id: driverId, role: ROLES.DRIVER, branchId }).session(session);
+    if (!driver) throw new AppError('Driver not found in this branch', 404, 'DRIVER_NOT_FOUND');
+
+    order.driverId = driverId;
+
+    // Auto-advance: preparing → out_for_delivery when driver is first assigned
+    if (order.status === ORDER_STATUSES.PREPARING) {
+      order.status = ORDER_STATUSES.OUT_FOR_DELIVERY;
+      order.statusHistory.push({
+        status: ORDER_STATUSES.OUT_FOR_DELIVERY,
+        changedAt: new Date(),
+        changedBy: adminId,
+        note: `Driver ${driver.name} assigned`
+      });
+    }
+
+    await order.save({ session });
+    await session.commitTransaction();
+  } catch (err) {
+    await session.abortTransaction();
+    throw err;
+  } finally {
+    session.endSession();
   }
-
-  const allowed = [ORDER_STATUSES.PREPARING, ORDER_STATUSES.OUT_FOR_DELIVERY];
-  if (!allowed.includes(order.status)) {
-    throw new AppError(`Driver can only be assigned when order is preparing or out for delivery`, 400, 'INVALID_ORDER_STATUS');
-  }
-
-  // Verify driver belongs to this branch
-  const driver = await User.findOne({ _id: driverId, role: ROLES.DRIVER, branchId });
-  if (!driver) throw new AppError('Driver not found in this branch', 404, 'DRIVER_NOT_FOUND');
-
-  order.driverId = driverId;
-
-  // Auto-advance: preparing → out_for_delivery when driver is first assigned
-  if (order.status === ORDER_STATUSES.PREPARING) {
-    order.status = ORDER_STATUSES.OUT_FOR_DELIVERY;
-    order.statusHistory.push({
-      status: ORDER_STATUSES.OUT_FOR_DELIVERY,
-      changedAt: new Date(),
-      changedBy: adminId,
-      note: `Driver ${driver.name} assigned`
-    });
-  }
-
-  await order.save();
 
   await activityLogService.log({
     actorId: adminId,
@@ -1099,7 +1070,7 @@ const assignDriver = async (orderId, driverId, adminId, branchId, actorRole = 'a
     detail: { orderRef: order.orderRef, driverId, driverName: driver.name }
   });
 
-  // If the driver assignment auto-advanced the order to out_for_delivery, notify customer
+  // Notify customer only when the order transitions to out_for_delivery
   if (order.status === ORDER_STATUSES.OUT_FOR_DELIVERY) {
     appEvents.emit(ORDER_EVENTS.DISPATCHED, { order, branchId });
   }
@@ -1118,33 +1089,34 @@ const getMyStats = async (userId) => {
 
   const COUNTED_STATUSES = ['pending', 'approved', 'preparing', 'out_for_delivery', 'completed'];
 
-  const [thisMonth, lastMonth, allTime, categoryBreakdown] = await Promise.all([
-    Order.aggregate([
-      { $match: { userId, status: { $in: COUNTED_STATUSES }, createdAt: { $gte: thisMonthStart } } },
-      { $group: { _id: null, total: { $sum: '$total' }, count: { $sum: 1 } } }
-    ]),
-    Order.aggregate([
-      { $match: { userId, status: { $in: COUNTED_STATUSES }, createdAt: { $gte: lastMonthStart, $lt: lastMonthEnd } } },
-      { $group: { _id: null, total: { $sum: '$total' }, count: { $sum: 1 } } }
-    ]),
-    Order.aggregate([
-      { $match: { userId, status: { $in: COUNTED_STATUSES } } },
-      { $group: { _id: null, total: { $sum: '$total' }, count: { $sum: 1 } } }
-    ]),
-    Order.aggregate([
-      { $match: { userId, status: { $in: COUNTED_STATUSES } } },
-      { $unwind: '$orderItems' },
-      { $group: { _id: '$orderItems.productName', total: { $sum: '$orderItems.lineTotal' } } },
-      { $sort: { total: -1 } },
-      { $limit: 5 }
-    ])
+  const [result] = await Order.aggregate([
+    { $match: { userId, status: { $in: COUNTED_STATUSES } } },
+    { $facet: {
+      thisMonth: [
+        { $match: { createdAt: { $gte: thisMonthStart } } },
+        { $group: { _id: null, total: { $sum: '$total' }, count: { $sum: 1 } } }
+      ],
+      lastMonth: [
+        { $match: { createdAt: { $gte: lastMonthStart, $lt: lastMonthEnd } } },
+        { $group: { _id: null, total: { $sum: '$total' }, count: { $sum: 1 } } }
+      ],
+      allTime: [
+        { $group: { _id: null, total: { $sum: '$total' }, count: { $sum: 1 } } }
+      ],
+      topProducts: [
+        { $unwind: '$orderItems' },
+        { $group: { _id: '$orderItems.productName', total: { $sum: '$orderItems.lineTotal' } } },
+        { $sort: { total: -1 } },
+        { $limit: 5 }
+      ]
+    }}
   ]);
 
   return {
-    thisMonth:  { total: thisMonth[0]?.total  || 0, orderCount: thisMonth[0]?.count  || 0 },
-    lastMonth:  { total: lastMonth[0]?.total  || 0, orderCount: lastMonth[0]?.count  || 0 },
-    allTime:    { total: allTime[0]?.total    || 0, orderCount: allTime[0]?.count    || 0 },
-    topProducts: categoryBreakdown.map(r => ({ name: r._id, total: r.total }))
+    thisMonth:   { total: result.thisMonth[0]?.total   || 0, orderCount: result.thisMonth[0]?.count   || 0 },
+    lastMonth:   { total: result.lastMonth[0]?.total   || 0, orderCount: result.lastMonth[0]?.count   || 0 },
+    allTime:     { total: result.allTime[0]?.total     || 0, orderCount: result.allTime[0]?.count     || 0 },
+    topProducts: result.topProducts.map(r => ({ name: r._id, total: r.total }))
   };
 };
 

@@ -236,6 +236,16 @@ const handleCallback = async (callbackData) => {
       return { success: false, status: 'failed', resultCode: 'AMOUNT_MISMATCH' };
     }
 
+    // Log overpayments for manual reconciliation — do not reject, but flag them
+    if (Math.ceil(paidAmount) > Math.ceil(payment.amount)) {
+      logger.warn('[M-PESA] Overpayment received — manual reconciliation required', {
+        orderId:  payment.orderId,
+        expected: payment.amount,
+        received: paidAmount,
+        surplus:  Math.ceil(paidAmount) - Math.ceil(payment.amount)
+      });
+    }
+
     // Guard: if the order was cancelled or rejected before the callback arrived,
     // do not flip it to PAID. Mark payment as refunded so accounting knows
     // money was received and a manual refund to the customer is needed.
@@ -364,7 +374,7 @@ const checkPaymentStatus = async (orderId, requestingUser, guestPhone = null) =>
 // Admin fallback when M-Pesa callback was lost.
 // Requires a real M-Pesa receipt number — format validated and uniqueness enforced.
 
-const manualConfirmPayment = async (orderId, adminId, transactionRef, actorRole = 'supervisor', branchId = null) => {
+const manualConfirmPayment = async (orderId, adminId, transactionRef, actorRole = 'supervisor', branchId = null, receivedAmount = null) => {
   const query = { _id: orderId };
   if (branchId) query.branchId = branchId;
   const order = await Order.findOne(query);
@@ -401,6 +411,25 @@ const manualConfirmPayment = async (orderId, adminId, transactionRef, actorRole 
         409,
         'DUPLICATE_TRANSACTION_REF'
       );
+    }
+  }
+
+  // Reject cash underpayments — admin must pass the received amount and it must cover the order total
+  if (!isMpesa && receivedAmount != null) {
+    if (Math.round(receivedAmount) < Math.round(order.total)) {
+      throw new AppError(
+        `Received amount (KES ${Math.round(receivedAmount)}) is less than the order total (KES ${Math.round(order.total)}). Correct the amount or contact a supervisor.`,
+        400,
+        'CASH_UNDERPAYMENT'
+      );
+    }
+    if (Math.round(receivedAmount) > Math.round(order.total)) {
+      logger.warn('[CASH] Overpayment on manual confirmation — manual reconciliation required', {
+        orderId:  order._id,
+        expected: order.total,
+        received: receivedAmount,
+        delta:    Math.round(receivedAmount) - Math.round(order.total)
+      });
     }
   }
 

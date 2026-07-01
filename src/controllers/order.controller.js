@@ -48,7 +48,7 @@ const getMyOrders = async (req, res, next) => {
 // PATCH /api/orders/:id/cancel - customer auth required
 const cancelOrder = async (req, res, next) => {
   try {
-    const order = await orderService.cancel(req.params.id, req.user.id, req.branchId);
+    const order = await orderService.cancel(req.params.id, req.user.id);
     return success(res, order, 'Order cancelled');
   } catch (err) { next(err); }
 };

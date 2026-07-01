@@ -2,14 +2,36 @@
 const paymentService = require('../services/payment.service');
 const { success, error } = require('../utils/apiResponse');
 const logger = require('../utils/logger');
+const Order = require('../models/Order');
+const Guest = require('../models/Guest');
+const { formatPhone } = require('../utils/mpesaHelpers');
 
-// POST /api/payments/mpesa/initiate — customer auth
+// POST /api/payments/mpesa/initiate — guest or authenticated customer
 const initiate = async (req, res, next) => {
   try {
     const { orderId, phone } = req.body;
     if (!orderId || !phone) {
       return error(res, 'orderId and phone are required', 'MISSING_FIELDS');
     }
+
+    // Ownership check — prevents triggering STK push on someone else's order
+    const order = await Order.findById(orderId).select('userId guestId').lean();
+    if (!order) return error(res, 'Order not found', 'NOT_FOUND', 404);
+
+    if (req.user) {
+      // Authenticated customer — must own the order
+      if (!order.userId || order.userId.toString() !== req.user.id) {
+        return error(res, 'Order not found', 'NOT_FOUND', 404);
+      }
+    } else {
+      // Guest — provided phone must match the guest's registered phone
+      if (!order.guestId) return error(res, 'Order not found', 'NOT_FOUND', 404);
+      const guest = await Guest.findById(order.guestId).select('phone').lean();
+      if (!guest || formatPhone(guest.phone) !== formatPhone(phone)) {
+        return error(res, 'Order not found', 'NOT_FOUND', 404);
+      }
+    }
+
     const result = await paymentService.initiateStkPush(orderId, phone);
     return success(res, result, 'STK push sent to your phone');
   } catch (err) { next(err); }
@@ -38,13 +60,14 @@ const getStatus = async (req, res, next) => {
 // POST /api/admin/payments/:orderId/confirm-manual — supervisor+
 const manualConfirm = async (req, res, next) => {
   try {
-    const { transactionRef } = req.body;
+    const { transactionRef, receivedAmount } = req.body;
     const result = await paymentService.manualConfirmPayment(
       req.params.orderId,
       req.user.id,
       transactionRef,
       req.user.role,
-      req.branchId || null
+      req.branchId || null,
+      receivedAmount != null ? Number(receivedAmount) : null
     );
     return success(res, result, 'Payment confirmed manually');
   } catch (err) { next(err); }

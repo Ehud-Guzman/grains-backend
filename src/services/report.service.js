@@ -625,6 +625,22 @@ const exportReport = async (type, params, branchId) => {
       return { csv, filename: `onboarding-report-${Date.now()}.csv` };
     }
 
+    case 'vat': {
+      const data = await getVatReport(period, from, to, branchId);
+      const csv = toCSV(data.rows.map(r => ({
+        ...r,
+        period: new Date(r.year, r.month - 1).toLocaleDateString('en-KE', { month: 'long', year: 'numeric' }),
+      })), [
+        { label: 'Month',                key: 'period'       },
+        { label: 'Orders',               key: 'orders'       },
+        { label: 'VAT Rate (%)',          key: 'vatRate'      },
+        { label: 'Ex-VAT (KES)',          key: 'totalExVat'   },
+        { label: 'VAT Collected (KES)',   key: 'totalVat'     },
+        { label: 'Incl. VAT (KES)',       key: 'totalInclVat' },
+      ]);
+      return { csv, filename: `vat-report-${Date.now()}.csv` };
+    }
+
     default:
       throw new Error('Unknown report type');
   }
@@ -925,9 +941,9 @@ const getVatReport = async (period, from, to, branchId) => {
           month: { $month: '$createdAt' },
         },
         orders:      { $sum: 1 },
-        totalExVat:  { $sum: '$subtotal' },
+        totalExVat:  { $sum: { $subtract: ['$subtotal', { $ifNull: ['$couponDiscount', 0] }] } },
         totalVat:    { $sum: '$vatAmount' },
-        totalInclVat:{ $sum: '$total' },
+        totalInclVat:{ $sum: { $add: [{ $subtract: ['$subtotal', { $ifNull: ['$couponDiscount', 0] }] }, '$vatAmount'] } },
         vatRate:     { $first: '$vatRate' },
       },
     },

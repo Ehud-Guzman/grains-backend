@@ -61,7 +61,7 @@ const getPublicSettings = async (branchId) => {
       s.branchLat != null && s.branchLng != null,
     // Tax — vatEnabled/vatRate needed for checkout VAT preview
     vatEnabled: s.vatEnabled === true,
-    vatRate:    Number(s.vatRate)  || 16,
+    vatRate:    s.vatRate != null ? Number(s.vatRate) : 16,
     // kraPin and receiptFooterNote are omitted — fetched via authenticated /api/settings/receipt
     // Loyalty programme thresholds (needed by customer dashboard)
     loyaltyEnabled:         s.loyaltyEnabled !== false,

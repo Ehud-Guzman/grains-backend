@@ -16,6 +16,7 @@ const logger = require('../utils/logger');
 router.post(
   '/mpesa/initiate',
   stkLimiter,
+  optionalAuth,
   [
     body('orderId').trim().isMongoId().withMessage('Invalid order ID'),
     body('phone')

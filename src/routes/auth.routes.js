@@ -6,18 +6,10 @@ const { validate } = require('../middleware/validate.middleware');
 const { verifyToken, optionalAuth } = require('../middleware/auth.middleware');
 const { authLimiter } = require('../middleware/rateLimit.middleware');
 const multer = require('multer');
-const cloudinary = require('cloudinary').v2;
 const { UPLOAD_LIMITS } = require('../utils/constants');
 
-// Cloudinary config
-cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key:    process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET,
-});
-
 // Multer for avatar uploads
-const uploadAvatar = multer({
+const avatarUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: UPLOAD_LIMITS.IMAGE_MAX_FILE_SIZE_BYTES },
   fileFilter: (req, file, cb) => {
@@ -66,47 +58,6 @@ router.get('/onboarding', verifyToken, authController.getOnboarding);
 router.patch('/onboarding', verifyToken, authController.updateOnboarding);
 
 // POST /api/auth/avatar — upload profile picture
-router.post('/avatar', verifyToken, uploadAvatar.single('avatar'), async (req, res, next) => {
-  try {
-    if (!req.file) {
-      return res.status(400).json({ success: false, message: 'No image provided' });
-    }
-
-    // Upload to Cloudinary — square crop with face detection
-    const url = await new Promise((resolve, reject) => {
-      const stream = cloudinary.uploader.upload_stream(
-        {
-          folder: 'grains-shop/avatars',
-          public_id: `user-${req.user.id}`,
-          overwrite: true,
-          transformation: [
-            { width: 400, height: 400, crop: 'fill', gravity: 'face', quality: 'auto', fetch_format: 'auto' }
-          ]
-        },
-        (error, result) => error ? reject(error) : resolve(result.secure_url)
-      );
-      stream.end(req.file.buffer);
-    });
-
-    // Save URL to user document
-    const User = require('../models/User');
-    await User.findByIdAndUpdate(req.user.id, { avatarURL: url });
-
-    // Log
-    const activityLogService = require('../services/activityLog.service');
-    await activityLogService.log({
-      actorId: req.user.id,
-      actorRole: req.user.role,
-      action: 'PROFILE_UPDATED',
-      targetId: req.user.id,
-      targetType: 'User',
-      detail: { updatedFields: ['avatarURL'] }
-    });
-
-    return res.json({ success: true, data: { avatarURL: url }, message: 'Avatar updated' });
-  } catch (err) {
-    next(err);
-  }
-});
+router.post('/avatar', verifyToken, avatarUpload.single('avatar'), authController.uploadAvatar);
 
 module.exports = router;

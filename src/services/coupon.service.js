@@ -26,15 +26,32 @@ const validate = async (code, branchId, userId, subtotal) => {
   }
 
   const discountAmount = coupon.discountType === 'percentage'
-    ? Math.round(subtotal * coupon.discountValue / 100)
-    : Math.min(coupon.discountValue, subtotal);
+    ? Math.round(subtotal * Math.min(coupon.discountValue, 100) / 100)
+    : Math.round(Math.min(coupon.discountValue, subtotal));
 
   return { coupon, discountAmount };
 };
 
 // ── INCREMENT USAGE ───────────────────────────────────────────────────────────
-const incrementUsage = async (code, branchId) => {
-  await Coupon.updateOne({ code: code.toUpperCase().trim(), branchId }, { $inc: { usedCount: 1 } });
+// Uses a conditional $inc so that if two concurrent orders both pass the usage
+// check above, only the one that atomically finds usedCount still under the
+// limit will succeed — the other will get a matched count of 0 and throw.
+const incrementUsage = async (code, branchId, session) => {
+  const opts = session ? { session } : {};
+  const upper = code.toUpperCase().trim();
+
+  const coupon = await Coupon.findOne({ code: upper, branchId }, 'usageLimit', opts).lean();
+  if (!coupon) throw new AppError('Coupon not found during increment', 404, 'COUPON_NOT_FOUND');
+
+  const filter = coupon.usageLimit !== null
+    ? { code: upper, branchId, usedCount: { $lt: coupon.usageLimit } }
+    : { code: upper, branchId };
+
+  const result = await Coupon.updateOne(filter, { $inc: { usedCount: 1 } }, opts);
+
+  if (result.matchedCount === 0) {
+    throw new AppError('This coupon has reached its usage limit.', 400, 'COUPON_EXHAUSTED');
+  }
 };
 
 // ── ADMIN CRUD ────────────────────────────────────────────────────────────────

@@ -3,7 +3,13 @@ const mongoose = require('mongoose');
 const couponSchema = new mongoose.Schema({
   code:          { type: String, required: true, uppercase: true, trim: true },
   discountType:  { type: String, enum: ['percentage', 'fixed'], required: true },
-  discountValue: { type: Number, required: true, min: 0 },
+  discountValue: {
+    type: Number, required: true, min: 0,
+    validate: {
+      validator: function(v) { return this.discountType !== 'percentage' || v <= 100; },
+      message: 'Percentage discount cannot exceed 100%',
+    },
+  },
   minOrderValue: { type: Number, default: 0 },
   expiresAt:     { type: Date, default: null },
   usageLimit:    { type: Number, default: null }, // null = unlimited

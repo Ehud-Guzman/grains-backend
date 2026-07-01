@@ -156,6 +156,47 @@ const updateOnboarding = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+const uploadAvatar = async (req, res, next) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ success: false, message: 'No image provided' });
+    }
+
+    const cloudinary = require('cloudinary').v2;
+    const url = await new Promise((resolve, reject) => {
+      const stream = cloudinary.uploader.upload_stream(
+        {
+          folder: 'grains-shop/avatars',
+          public_id: `user-${req.user.id}`,
+          overwrite: true,
+          transformation: [
+            { width: 400, height: 400, crop: 'fill', gravity: 'face', quality: 'auto', fetch_format: 'auto' }
+          ]
+        },
+        (err, result) => err ? reject(err) : resolve(result.secure_url)
+      );
+      stream.end(req.file.buffer);
+    });
+
+    const User = require('../models/User');
+    await User.findByIdAndUpdate(req.user.id, { avatarURL: url });
+
+    const activityLogService = require('../services/activityLog.service');
+    await activityLogService.log({
+      actorId: req.user.id,
+      actorRole: req.user.role,
+      action: 'PROFILE_UPDATED',
+      targetId: req.user.id,
+      targetType: 'User',
+      detail: { updatedFields: ['avatarURL'] }
+    });
+
+    return res.json({ success: true, data: { avatarURL: url }, message: 'Avatar updated' });
+  } catch (err) {
+    next(err);
+  }
+};
+
 module.exports = {
   register,
   login,
@@ -167,5 +208,6 @@ module.exports = {
   getProfile,
   updateProfile,
   getOnboarding,
-  updateOnboarding
+  updateOnboarding,
+  uploadAvatar
 };

@@ -20,7 +20,7 @@ const orderItemSchema = new mongoose.Schema({
 const statusHistorySchema = new mongoose.Schema({
   status: { type: String, required: true },
   changedAt: { type: Date, default: Date.now },
-  changedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  changedBy: { type: mongoose.Schema.Types.ObjectId, required: true },
   note: { type: String, default: null }
 }, { _id: false });
 
