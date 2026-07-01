@@ -65,10 +65,22 @@ const fetchToken = async () => {
 
   const credentials = Buffer.from(`${key}:${secret}`).toString('base64');
 
-  const res = await axios.get(getUrls().oauth, {
-    headers: { Authorization: `Basic ${credentials}` },
-    timeout: 10000
-  });
+  let res;
+  try {
+    res = await axios.get(getUrls().oauth, {
+      headers: {
+        Authorization: `Basic ${credentials}`,
+        // Safaricom's Daraja API sits behind an Incapsula WAF that can reject
+        // requests carrying axios's default generic User-Agent as bot traffic.
+        'User-Agent': 'Mozilla/5.0 (compatible; VittoriosGrains/1.0)'
+      },
+      timeout: 10000
+    });
+  } catch (err) {
+    // Surface Safaricom's actual error body — a bare "status code 400" tells us nothing
+    const detail = err.response?.data ? JSON.stringify(err.response.data) : err.message;
+    throw new Error(`Daraja OAuth request failed: ${detail}`);
+  }
 
   return {
     token:     res.data.access_token,
