@@ -7,8 +7,11 @@ const activityLogService = require('./activityLog.service');
 const { paginate, buildPaginationMeta } = require('../utils/paginate');
 
 // ── GET ALL CUSTOMERS ─────────────────────────────────────────────────────────
-// SRS 5.5 - unified view of registered accounts + guest records
-const getAll = async (filters = {}, query = {}) => {
+// SRS 5.5 - unified view of registered accounts + guest records.
+// Customers are shared across branches, but their ORDER data is branch-scoped:
+// when branchId is present, stats/history only reflect the viewing admin's
+// branch (superadmin without a branch keeps the global view).
+const getAll = async (filters = {}, query = {}, branchId = null) => {
   const { page, limit, skip } = paginate(query);
 
   const matchStage = { role: 'customer' };
@@ -34,7 +37,7 @@ const getAll = async (filters = {}, query = {}) => {
 
   // Enrich with order stats
   const enriched = await Promise.all(users.map(async (user) => {
-    const stats = await getOrderStats(user._id);
+    const stats = await getOrderStats(user._id, branchId);
     return { ...user, ...stats };
   }));
 
@@ -42,9 +45,12 @@ const getAll = async (filters = {}, query = {}) => {
 };
 
 // ── GET ORDER STATS FOR A USER ────────────────────────────────────────────────
-const getOrderStats = async (userId) => {
+const getOrderStats = async (userId, branchId = null) => {
+  const match = { userId: new mongoose.Types.ObjectId(userId), status: 'completed' };
+  if (branchId) match.branchId = new mongoose.Types.ObjectId(branchId);
+
   const stats = await Order.aggregate([
-    { $match: { userId: new mongoose.Types.ObjectId(userId), status: 'completed' } },
+    { $match: match },
     {
       $group: {
         _id: null,
@@ -78,17 +84,20 @@ const getOrderStats = async (userId) => {
 
 // ── GET CUSTOMER PROFILE ──────────────────────────────────────────────────────
 // SRS 5.5 - full profile with order history + lifetime stats
-const getProfile = async (userId) => {
+const getProfile = async (userId, branchId = null) => {
   const user = await User.findById(userId)
     .select('-passwordHash -failedLoginCount')
     .lean();
 
   if (!user) throw new AppError('Customer not found', 404, 'USER_NOT_FOUND');
 
-  const stats = await getOrderStats(userId);
+  const stats = await getOrderStats(userId, branchId);
 
-  // Recent orders
-  const recentOrders = await Order.find({ userId })
+  // Recent orders — branch-scoped so one branch's admin never sees another
+  // branch's order history through the shared customer record
+  const orderQuery = { userId };
+  if (branchId) orderQuery.branchId = branchId;
+  const recentOrders = await Order.find(orderQuery)
     .sort({ createdAt: -1 })
     .limit(20)
     .select('orderRef status total createdAt paymentMethod deliveryMethod')
@@ -124,11 +133,14 @@ const addNote = async (userId, note, adminId, adminRole) => {
 
 // ── GET CUSTOMER SEGMENTS ─────────────────────────────────────────────────────
 // SRS 5.5 + UX B4 - repeat (3+ orders), high value (top 10%), inactive (30+ days)
-const getSegments = async () => {
+const getSegments = async (branchId = null) => {
   const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
 
+  const match = { status: 'completed', userId: { $ne: null } };
+  if (branchId) match.branchId = new mongoose.Types.ObjectId(branchId);
+
   const stats = await Order.aggregate([
-    { $match: { status: 'completed', userId: { $ne: null } } },
+    { $match: match },
     {
       $group: {
         _id: '$userId',

@@ -42,14 +42,23 @@ const getById = async (id, branchId) => {
   return promo;
 };
 
+// Whitelist client-settable fields — branchId/createdBy must never come from
+// the request body (mass-assignment guard)
+const pickPromotionFields = (data) => {
+  const allowed = ['title', 'description', 'imageUrl', 'type', 'linkedProductId', 'startDate', 'endDate', 'isActive', 'seasonTag', 'sortOrder'];
+  return Object.fromEntries(
+    Object.entries(data || {}).filter(([key]) => allowed.includes(key))
+  );
+};
+
 const create = async (data, branchId, actorId) => {
-  return Promotion.create({ ...data, branchId, createdBy: actorId });
+  return Promotion.create({ ...pickPromotionFields(data), branchId, createdBy: actorId });
 };
 
 const update = async (id, data, branchId) => {
   const promo = await Promotion.findOneAndUpdate(
     { _id: id, branchId },
-    { ...data },
+    pickPromotionFields(data),
     { new: true, runValidators: true }
   );
   if (!promo) throw new AppError('Promotion not found', 404, 'PROMO_NOT_FOUND');

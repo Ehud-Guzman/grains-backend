@@ -18,7 +18,7 @@ router.get('/', requireMinRole('supervisor'), stockController.getOverview);
 router.get('/low', requireMinRole('supervisor'), stockController.getLowStock);
 
 // GET /api/admin/stock/logs
-router.get('/logs', (req, res, next) => {
+router.get('/logs', requireMinRole('supervisor'), (req, res, next) => {
   req.params.productId = null;
   stockController.getLogs(req, res, next);
 });

@@ -18,14 +18,14 @@ const unlockAccount = async (req, res, next) => {
 const getAll = async (req, res, next) => {
   try {
     const pagination = { page: req.query.page, limit: req.query.limit };
-    const result = await customerService.getAll(req.query, pagination);
+    const result = await customerService.getAll(req.query, pagination, req.branchId);
     return success(res, result);
   } catch (err) { next(err); }
 };
 
 const getProfile = async (req, res, next) => {
   try {
-    const profile = await customerService.getProfile(req.params.id);
+    const profile = await customerService.getProfile(req.params.id, req.branchId);
     return success(res, profile);
   } catch (err) { next(err); }
 };
@@ -39,7 +39,7 @@ const addNote = async (req, res, next) => {
 
 const getSegments = async (req, res, next) => {
   try {
-    const segments = await customerService.getSegments();
+    const segments = await customerService.getSegments(req.branchId);
     return success(res, segments);
   } catch (err) { next(err); }
 };

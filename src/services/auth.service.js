@@ -43,6 +43,24 @@ const generatePreAuthToken = (userId) => {
 
 const ADMIN_ROLES = [ROLES.STAFF, ROLES.SUPERVISOR, ROLES.ADMIN, ROLES.SUPERADMIN];
 
+// Blacklist a token until its natural expiry. Never throws — an expired/invalid
+// token needs no blacklisting, and a duplicate key means it's already revoked.
+const revokeToken = async (token, secret) => {
+  if (!token) return;
+  try {
+    const decoded = jwt.verify(token, secret);
+    await TokenBlacklist.create({
+      token,
+      userId: decoded.id,
+      expiresAt: new Date(decoded.exp * 1000)
+    });
+  } catch (err) {
+    if (err.code !== 11000 && !['TokenExpiredError', 'JsonWebTokenError'].includes(err.name)) {
+      logger.error('[auth] Token revocation failed', { err: err.message });
+    }
+  }
+};
+
 const normalizeOnboarding = (onboarding = {}) => ({
   version: onboarding.version || 1,
   checklistProgress: onboarding.checklistProgress instanceof Map
@@ -282,7 +300,7 @@ const selectBranch = async (preAuthToken, branchId, ip = null) => {
 };
 
 // ── SWITCH BRANCH (superadmin only, already logged in) ────────────────────────
-const switchBranch = async (userId, branchId, oldRefreshToken = null) => {
+const switchBranch = async (userId, branchId, oldRefreshToken = null, oldAccessToken = null) => {
   const user = await User.findById(userId);
   if (!user || user.role !== ROLES.SUPERADMIN) {
     throw new AppError('Only superadmin can switch branches', 403, 'FORBIDDEN');
@@ -294,21 +312,9 @@ const switchBranch = async (userId, branchId, oldRefreshToken = null) => {
     if (!branch) throw new AppError('Branch not found or inactive', 404, 'BRANCH_NOT_FOUND');
   }
 
-  // Revoke the old refresh token so it can't be used after the branch context changes
-  if (oldRefreshToken) {
-    try {
-      const decoded = jwt.decode(oldRefreshToken);
-      if (decoded?.exp) {
-        await TokenBlacklist.create({
-          token: oldRefreshToken,
-          userId: user._id,
-          expiresAt: new Date(decoded.exp * 1000)
-        });
-      }
-    } catch {
-      // Non-fatal — proceed with issuing new tokens
-    }
-  }
+  // Revoke the old token pair so the stale branch context can't be reused
+  await revokeToken(oldRefreshToken, process.env.JWT_REFRESH_SECRET);
+  await revokeToken(oldAccessToken, process.env.JWT_ACCESS_SECRET);
 
   const { accessToken, refreshToken } = generateTokens(user, branch?._id || null);
 
@@ -369,19 +375,10 @@ const refreshToken = async (token, ip = null) => {
 };
 
 // ── LOGOUT ────────────────────────────────────────────────────────────────────
-const logout = async (token, userId, role) => {
-  // Blacklist the refresh token so it can't be used after logout
-  if (token) {
-    try {
-      const decoded = jwt.verify(token, process.env.JWT_REFRESH_SECRET);
-      const expiresAt = new Date(decoded.exp * 1000);
-      await TokenBlacklist.create({ token, userId: decoded.id, expiresAt });
-    } catch (err) {
-      if (err.code !== 11000) {
-        // Token already expired or invalid — no need to blacklist, logout is still valid
-      }
-    }
-  }
+const logout = async (token, accessToken, userId, role) => {
+  // Blacklist both tokens so neither survives the logout
+  await revokeToken(token, process.env.JWT_REFRESH_SECRET);
+  await revokeToken(accessToken, process.env.JWT_ACCESS_SECRET);
 
   // Log the logout event
   if (userId) {

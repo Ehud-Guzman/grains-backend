@@ -6,6 +6,8 @@ const promoController = require('../../controllers/admin/promotion.controller');
 const { verifyToken } = require('../../middleware/auth.middleware');
 const { requireMinRole, requireBusinessRole } = require('../../middleware/role.middleware');
 const { adminLimiter } = require('../../middleware/rateLimit.middleware');
+const { validate } = require('../../middleware/validate.middleware');
+const { createPromotionValidator, updatePromotionValidator } = require('../../validators/promotion.validator');
 
 router.use(verifyToken, adminLimiter);
 
@@ -36,8 +38,8 @@ router.post('/upload-image', requireBusinessRole('admin'), upload.single('image'
 
 router.get('/',     requireMinRole('supervisor'), promoController.getAll);
 router.get('/:id',  requireMinRole('supervisor'), promoController.getById);
-router.post('/',    requireMinRole('admin'),       promoController.create);
-router.put('/:id',  requireMinRole('admin'),       promoController.update);
+router.post('/',    requireMinRole('admin'),       createPromotionValidator, validate, promoController.create);
+router.put('/:id',  requireMinRole('admin'),       updatePromotionValidator, validate, promoController.update);
 router.delete('/:id', requireMinRole('admin'),     promoController.remove);
 
 module.exports = router;

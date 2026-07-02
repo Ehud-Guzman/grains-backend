@@ -1042,6 +1042,7 @@ const assignDriver = async (orderId, driverId, adminId, branchId, actorRole = 'a
 
     // Auto-advance: preparing → out_for_delivery when driver is first assigned
     if (order.status === ORDER_STATUSES.PREPARING) {
+      validateTransition(order.status, ORDER_STATUSES.OUT_FOR_DELIVERY);
       order.status = ORDER_STATUSES.OUT_FOR_DELIVERY;
       order.statusHistory.push({
         status: ORDER_STATUSES.OUT_FOR_DELIVERY,

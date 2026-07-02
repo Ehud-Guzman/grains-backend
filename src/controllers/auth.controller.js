@@ -22,6 +22,11 @@ const clearRefreshCookie = (res) =>
 const extractRefreshToken = (req) =>
   req.cookies?.refreshToken || req.body?.refreshToken || null;
 
+const extractAccessToken = (req) => {
+  const authHeader = req.headers.authorization;
+  return authHeader?.startsWith('Bearer ') ? authHeader.split(' ')[1] : null;
+};
+
 const register = async (req, res, next) => {
   try {
     const { name, phone, email, password } = req.body;
@@ -76,7 +81,7 @@ const switchBranch = async (req, res, next) => {
   try {
     const { branchId } = req.body;
     const oldToken = extractRefreshToken(req);
-    const result = await authService.switchBranch(req.user.id, branchId || null, oldToken);
+    const result = await authService.switchBranch(req.user.id, branchId || null, oldToken, extractAccessToken(req));
     setRefreshCookie(res, result.refreshToken);
     const { refreshToken: _rt, ...data } = result;
     return success(res, data, 'Branch switched');
@@ -106,7 +111,7 @@ const logout = async (req, res, next) => {
     const refreshToken = extractRefreshToken(req);
     const userId = req.user?.id;
     const role   = req.user?.role;
-    await authService.logout(refreshToken, userId, role);
+    await authService.logout(refreshToken, extractAccessToken(req), userId, role);
     clearRefreshCookie(res);
     return success(res, null, 'Logged out successfully');
   } catch (err) {

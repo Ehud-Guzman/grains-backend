@@ -286,4 +286,5 @@ module.exports = {
   dispatchOrderApproved,
   dispatchOrderRejected,
   dispatchOrderDispatched,
+  sendEmail,
 };

@@ -12,7 +12,7 @@ router.use(verifyToken, adminLimiter);
 // GET /api/admin/settings
 router.get('/', requireMinRole('admin'), settingsController.getAll);
 
-// POST /api/admin/settings/test-email — send a test email to verify Brevo config
+// POST /api/admin/settings/test-email — send a test email to verify Gmail config
 router.post('/test-email', requireMinRole('admin'), settingsController.testEmail);
 
 // PUT /api/admin/settings

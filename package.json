@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "Grains & Cereals Shop - Backend API",
   "main": "server.js",
+  "engines": {
+    "node": ">=20 <23"
+  },
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js",
@@ -31,10 +34,15 @@
     "morgan": "^1.10.0",
     "multer": "^2.1.1",
     "multer-storage-cloudinary": "^4.0.0",
-    "nodemailer": "^8.0.5",
-    "xlsx": "^0.18.5"
+    "nodemailer": "^9.0.3",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"
+  },
+  "overrides": {
+    "africastalking": {
+      "joi": "^18.2.1"
+    }
   }
 }

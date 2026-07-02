@@ -71,16 +71,28 @@ const getById = async (id, branchId) => {
   return coupon;
 };
 
+// Whitelist client-settable fields — branchId/createdBy/usedCount must never
+// come from the request body (mass-assignment guard)
+const pickCouponFields = (data) => {
+  const allowed = ['code', 'discountType', 'discountValue', 'minOrderValue', 'expiresAt', 'usageLimit', 'assignedTo', 'isActive'];
+  return Object.fromEntries(
+    Object.entries(data || {}).filter(([key]) => allowed.includes(key))
+  );
+};
+
 const create = async (data, branchId, actorId) => {
-  const existing = await Coupon.findOne({ code: data.code.toUpperCase().trim(), branchId });
+  const fields = pickCouponFields(data);
+  const existing = await Coupon.findOne({ code: fields.code.toUpperCase().trim(), branchId });
   if (existing) throw new AppError('A coupon with that code already exists.', 409, 'COUPON_DUPLICATE');
-  return Coupon.create({ ...data, code: data.code.toUpperCase().trim(), branchId, createdBy: actorId });
+  return Coupon.create({ ...fields, code: fields.code.toUpperCase().trim(), branchId, createdBy: actorId });
 };
 
 const update = async (id, data, branchId) => {
+  const fields = pickCouponFields(data);
+  if (typeof fields.code === 'string') fields.code = fields.code.toUpperCase().trim();
   const coupon = await Coupon.findOneAndUpdate(
     { _id: id, branchId },
-    { ...data },
+    fields,
     { new: true, runValidators: true }
   );
   if (!coupon) throw new AppError('Coupon not found', 404, 'COUPON_NOT_FOUND');

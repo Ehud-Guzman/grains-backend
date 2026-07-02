@@ -69,8 +69,33 @@ const app = express();
 
 // ── SENTRY ────────────────────────────────────────────────────────────────────
 if (process.env.NODE_ENV === 'production' && process.env.SENTRY_DSN) {
-  Sentry.init({ dsn: process.env.SENTRY_DSN });
-  app.use(Sentry.Handlers.requestHandler());
+  Sentry.init({
+    dsn: process.env.SENTRY_DSN,
+    // Strip credentials and PII before events leave the server — tokens,
+    // cookies, and request bodies (passwords, phone numbers) must never
+    // reach Sentry
+    sendDefaultPii: false,
+    beforeSend(event) {
+      if (event.request) {
+        delete event.request.cookies;
+        delete event.request.data;
+        if (event.request.headers) {
+          delete event.request.headers.authorization;
+          delete event.request.headers.Authorization;
+          delete event.request.headers.cookie;
+          delete event.request.headers.Cookie;
+        }
+      }
+      if (event.user) {
+        event.user = { id: event.user.id };
+      }
+      return event;
+    }
+  });
+  app.use(Sentry.Handlers.requestHandler({
+    request: ['method', 'url', 'query_string'],
+    user: ['id']
+  }));
 }
 
 // ── SECURITY HEADERS ──────────────────────────────────────────────────────────

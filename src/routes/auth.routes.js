@@ -42,8 +42,9 @@ router.post('/logout', optionalAuth, authController.logout);
 
 // ── AUTHENTICATED ROUTES ──────────────────────────────────────────────────────
 
-// POST /api/auth/change-password
-router.post('/change-password', verifyToken, authController.changePassword);
+// POST /api/auth/change-password — authLimiter throttles currentPassword guessing
+// with a stolen access token to the same 10/min tier as login
+router.post('/change-password', verifyToken, authLimiter, authController.changePassword);
 
 // GET /api/auth/me — get own profile
 router.get('/me', verifyToken, authController.getProfile);
