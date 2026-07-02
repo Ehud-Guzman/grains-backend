@@ -1,5 +1,6 @@
 const PERMISSIONS = {
-  MANAGE_BRANCHES: 'manage_branches'
+  MANAGE_BRANCHES: 'manage_branches',
+  MANAGE_ETIMS: 'manage_etims'
 };
 
 const ORDER_STATUSES = {

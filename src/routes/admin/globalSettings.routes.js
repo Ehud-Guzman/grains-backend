@@ -1,18 +1,20 @@
 // ── GLOBAL SETTINGS ROUTES ────────────────────────────────────────────────────
-// Superadmin-only — credentials and role gates for system-wide features (eTIMS).
+// Superadmin-only, OR users explicitly granted the manage_etims permission —
+// credentials and role gates for system-wide features (eTIMS).
 
 const express    = require('express');
 const router     = express.Router();
 const { body }   = require('express-validator');
 const controller = require('../../controllers/admin/globalSettings.controller');
 const { verifyToken }   = require('../../middleware/auth.middleware');
-const { requireRole }   = require('../../middleware/role.middleware');
+const { requireSuperadminOrPermission } = require('../../middleware/role.middleware');
 const { adminLimiter }  = require('../../middleware/rateLimit.middleware');
 const { validate }      = require('../../middleware/validate.middleware');
+const { PERMISSIONS }   = require('../../utils/constants');
 
 const ALLOWED_ROLES = ['staff', 'supervisor', 'admin', 'superadmin'];
 
-router.use(verifyToken, adminLimiter, requireRole('superadmin'));
+router.use(verifyToken, adminLimiter, requireSuperadminOrPermission(PERMISSIONS.MANAGE_ETIMS));
 
 // GET  /api/admin/global-settings
 router.get('/', controller.get);
