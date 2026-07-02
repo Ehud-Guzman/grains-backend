@@ -293,6 +293,7 @@ const autoCancelExpiredPendingOrders = async (branchId) => {
       });
 
       await releaseOrderStock(order, actorId, session, note);
+      if (order.couponCode) await couponService.releaseUsage(order.couponCode, order.branchId, session);
       await order.save({ session });
       await session.commitTransaction();
 
@@ -772,6 +773,7 @@ const reject = async (orderId, adminId, reason, branchId, actorRole = 'superviso
     });
 
     await releaseOrderStock(order, adminId, session, reason);
+    if (order.couponCode) await couponService.releaseUsage(order.couponCode, order.branchId, session);
     await order.save({ session });
     await session.commitTransaction();
 
@@ -850,6 +852,7 @@ const updateStatus = async (orderId, newStatus, adminId, note = null, branchId, 
 
     if (newStatus === ORDER_STATUSES.CANCELLED) {
       await releaseOrderStock(order, adminId, session, note || 'Cancelled by staff');
+      if (order.couponCode) await couponService.releaseUsage(order.couponCode, order.branchId, session);
     }
 
     if (newStatus === ORDER_STATUSES.COMPLETED && !order.deliveredAt) {
@@ -921,6 +924,7 @@ const cancel = async (orderId, userId) => {
     });
 
     await releaseOrderStock(order, userId, session, 'Cancelled by customer');
+    if (order.couponCode) await couponService.releaseUsage(order.couponCode, order.branchId, session);
     await order.save({ session });
     await session.commitTransaction();
 

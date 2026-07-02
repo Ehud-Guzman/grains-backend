@@ -54,6 +54,22 @@ const incrementUsage = async (code, branchId, session) => {
   }
 };
 
+// ── RELEASE USAGE ─────────────────────────────────────────────────────────────
+// Called when an order that consumed a coupon is cancelled or rejected — gives
+// the use back so a one-time coupon isn't burned by a sale that never happened.
+// Safe by construction: cancelled/rejected are terminal statuses (validated by
+// ORDER_STATUS_TRANSITIONS), so this runs at most once per order. The $gt: 0
+// guard prevents a negative count, and a since-deleted coupon is a silent
+// no-op — releasing must never block a cancellation.
+const releaseUsage = async (code, branchId, session) => {
+  const opts = session ? { session } : {};
+  await Coupon.updateOne(
+    { code: code.toUpperCase().trim(), branchId, usedCount: { $gt: 0 } },
+    { $inc: { usedCount: -1 } },
+    opts
+  );
+};
+
 // ── ADMIN CRUD ────────────────────────────────────────────────────────────────
 const getAll = async (branchId) => {
   return Coupon.find({ branchId })
@@ -104,4 +120,4 @@ const remove = async (id, branchId) => {
   if (!coupon) throw new AppError('Coupon not found', 404, 'COUPON_NOT_FOUND');
 };
 
-module.exports = { validate, incrementUsage, getAll, getById, create, update, remove };
+module.exports = { validate, incrementUsage, releaseUsage, getAll, getById, create, update, remove };

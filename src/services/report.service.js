@@ -3,20 +3,14 @@ const Order = require('../models/Order');
 const Product = require('../models/Product');
 const StockLog = require('../models/StockLog');
 const User = require('../models/User');
+const { NAIROBI_TZ, startOfDayEAT, endOfDayEAT, startOfMonthEAT } = require('../utils/businessTime');
 
 // ── HELPERS ───────────────────────────────────────────────────────────────────
+// Day/month boundaries follow the Nairobi clock (see utils/businessTime.js) —
+// the server runs in UTC, so local setHours() would shift every boundary by 3h.
 
-const startOfDay = (date) => {
-  const d = new Date(date);
-  d.setHours(0, 0, 0, 0);
-  return d;
-};
-
-const endOfDay = (date) => {
-  const d = new Date(date);
-  d.setHours(23, 59, 59, 999);
-  return d;
-};
+const startOfDay = startOfDayEAT;
+const endOfDay = endOfDayEAT;
 
 const getDateRange = (period, from, to) => {
   const now = new Date();
@@ -50,7 +44,7 @@ const getDashboardKPIs = async (branchId) => {
   const now = new Date();
   const todayStart = startOfDay(now);
   const todayEnd = endOfDay(now);
-  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const monthStart = startOfMonthEAT(now);
 
   const branchFilter = branchId ? { branchId: new mongoose.Types.ObjectId(String(branchId)) } : {};
 
@@ -190,9 +184,9 @@ const getSalesReport = async (period, from, to, branchId) => {
       {
         $group: {
           _id: {
-            year: { $year: '$createdAt' },
-            month: { $month: '$createdAt' },
-            day: { $dayOfMonth: '$createdAt' }
+            year: { $year: { date: '$createdAt', timezone: NAIROBI_TZ } },
+            month: { $month: { date: '$createdAt', timezone: NAIROBI_TZ } },
+            day: { $dayOfMonth: { date: '$createdAt', timezone: NAIROBI_TZ } }
           },
           revenue: { $sum: '$total' },
           orders: { $sum: 1 }
@@ -205,7 +199,8 @@ const getSalesReport = async (period, from, to, branchId) => {
             $dateFromParts: {
               year: '$_id.year',
               month: '$_id.month',
-              day: '$_id.day'
+              day: '$_id.day',
+              timezone: NAIROBI_TZ
             }
           },
           revenue: 1,
@@ -484,7 +479,7 @@ const getOrdersByStatus = async (period, from, to, branchId) => {
       { $match: { ...branchFilter, createdAt: { $gte: start, $lte: end } } },
       {
         $group: {
-          _id: { $hour: '$createdAt' },
+          _id: { $hour: { date: '$createdAt', timezone: NAIROBI_TZ } },
           count: { $sum: 1 }
         }
       },
@@ -746,7 +741,7 @@ const getMarginReport = async (period, from, to, branchId) => {
         as: 'product',
       },
     },
-    { $unwind: { path: '$product', preserveNullAndEmpty: true } },
+    { $unwind: { path: '$product', preserveNullAndEmptyArrays: true } },
     {
       $project: {
         productId:   '$_id.productId',
@@ -897,7 +892,7 @@ const getRiderReport = async (period, from, to, branchId) => {
         as: 'driver',
       },
     },
-    { $unwind: { path: '$driver', preserveNullAndEmpty: true } },
+    { $unwind: { path: '$driver', preserveNullAndEmptyArrays: true } },
     {
       $project: {
         driverId: '$_id',
@@ -937,8 +932,8 @@ const getVatReport = async (period, from, to, branchId) => {
     {
       $group: {
         _id: {
-          year:  { $year: '$createdAt' },
-          month: { $month: '$createdAt' },
+          year:  { $year:  { date: '$createdAt', timezone: NAIROBI_TZ } },
+          month: { $month: { date: '$createdAt', timezone: NAIROBI_TZ } },
         },
         orders:      { $sum: 1 },
         totalExVat:  { $sum: { $subtract: ['$subtotal', { $ifNull: ['$couponDiscount', 0] }] } },
