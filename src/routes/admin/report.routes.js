@@ -27,6 +27,9 @@ router.get('/slow-movers', requireMinRole('supervisor'), reportController.getSlo
 // GET /api/admin/reports/stock-valuation
 router.get('/stock-valuation', requireMinRole('supervisor'), reportController.getStockValuation);
 
+// GET /api/admin/reports/stock-turnover?period=month&from=&to=
+router.get('/stock-turnover', requireMinRole('supervisor'), reportController.getStockTurnoverReport);
+
 // GET /api/admin/reports/stock-movement?period=month&from=&to=
 router.get('/stock-movement', requireMinRole('supervisor'), reportController.getStockMovementReport);
 

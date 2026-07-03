@@ -65,6 +65,8 @@ const adminStockIntakeRoutes  = require('./routes/admin/stockIntake.routes');
 const adminCouponRoutes          = require('./routes/admin/coupon.routes');
 const adminPromotionRoutes       = require('./routes/admin/promotion.routes');
 const adminGlobalSettingsRoutes  = require('./routes/admin/globalSettings.routes');
+const adminAlertRoutes           = require('./routes/admin/alert.routes');
+const adminBroadcastRoutes       = require('./routes/admin/broadcast.routes');
 
 const app = express();
 
@@ -268,6 +270,8 @@ app.use('/api/admin/stock-intake',  adminStockIntakeRoutes);
 app.use('/api/admin/coupons',          adminCouponRoutes);
 app.use('/api/admin/promotions',       adminPromotionRoutes);
 app.use('/api/admin/global-settings',  adminGlobalSettingsRoutes);
+app.use('/api/admin/alerts',           adminAlertRoutes);
+app.use('/api/admin/broadcast',        adminBroadcastRoutes);
 
 // ── 404 HANDLER ───────────────────────────────────────────────────────────────
 app.use((req, res) => {

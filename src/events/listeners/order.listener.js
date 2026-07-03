@@ -1,11 +1,14 @@
 const { appEvents, ORDER_EVENTS } = require('../appEvents');
 const notificationService = require('../../services/notification.service');
+const adminAlertService = require('../../services/adminAlert.service');
 const logger = require('../../utils/logger');
 
 const register = () => {
   appEvents.on(ORDER_EVENTS.PLACED, ({ order, branchId }) => {
     notificationService.dispatchOrderPlaced(order, branchId)
       .catch(err => logger.error('[notification] order:placed failed', { err: err.message }));
+    adminAlertService.notifyNewOrder(order, branchId)
+      .catch(err => logger.error('[adminAlert] order:placed failed', { err: err.message }));
   });
 
   appEvents.on(ORDER_EVENTS.APPROVED, ({ order, branchId }) => {

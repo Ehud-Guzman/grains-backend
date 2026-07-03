@@ -61,7 +61,8 @@ const orderSchema = new mongoose.Schema({
   couponDiscount: { type: Number, default: 0 },
   buyerKraPin: { type: String, default: null },
   branchId: { type: mongoose.Schema.Types.ObjectId, ref: 'Branch', required: true },
-  driverId: { type: mongoose.Schema.Types.ObjectId, default: null },
+  driverId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  preferredDriverId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null }, // customer's requested rider at checkout — admin still confirms actual assignment
   deliveryTrackingUrl: { type: String, default: null },
   // Customer's GPS coordinates at checkout — stored for driver reference & analytics
   deliveryCoordinates: {

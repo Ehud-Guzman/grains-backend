@@ -121,6 +121,8 @@ const LOG_ACTIONS = {
   PLATFORM_UNLOCKED: 'PLATFORM_UNLOCKED',
   // Permissions
   USER_PERMISSIONS_UPDATED: 'USER_PERMISSIONS_UPDATED',
+  // Marketing
+  SMS_BROADCAST_SENT: 'SMS_BROADCAST_SENT',
 };
 
 // Valid order status transitions - only these are allowed

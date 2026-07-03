@@ -1,8 +1,12 @@
 const PriceLog = require('../models/PriceLog');
 
 // ── LOG A PRICE CHANGE ────────────────────────────────────────────────────────
-const logChange = async ({ productId, branchId, varietyName, packaging, oldPrice, newPrice, changedBy, note }) => {
-  return PriceLog.create({ productId, branchId, varietyName, packaging, oldPrice, newPrice, changedBy, note: note || null });
+const logChange = async ({ productId, branchId, varietyName, packaging, oldPrice, newPrice, changedBy, note, seasonTag }) => {
+  return PriceLog.create({
+    productId, branchId, varietyName, packaging, oldPrice, newPrice, changedBy,
+    note: note || null,
+    seasonTag: seasonTag || null,
+  });
 };
 
 // ── GET PRICE HISTORY FOR A PRODUCT/VARIETY/PACKAGING ─────────────────────────

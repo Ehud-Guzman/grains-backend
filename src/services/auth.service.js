@@ -523,7 +523,7 @@ const getProfile = async (userId) => {
 };
 
 // ── UPDATE PROFILE ────────────────────────────────────────────────────────────
-const updateProfile = async (userId, { name, email, addresses }, ip = null) => {
+const updateProfile = async (userId, { name, email, addresses, kraPin }, ip = null) => {
   if (email) {
     const existing = await User.findOne({ email, _id: { $ne: userId } });
     if (existing) throw new AppError('Email already in use', 409, 'EMAIL_TAKEN');
@@ -535,6 +535,7 @@ const updateProfile = async (userId, { name, email, addresses }, ip = null) => {
       ...(name      && { name: name.trim() }),
       ...(email !== undefined && { email: email || null }),
       ...(addresses  && { addresses }),
+      ...(kraPin !== undefined && { kraPin: kraPin ? kraPin.trim().toUpperCase() : null }),
     },
     { new: true, runValidators: true }
   ).select('-passwordHash -failedLoginCount');

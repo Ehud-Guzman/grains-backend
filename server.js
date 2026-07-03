@@ -6,6 +6,7 @@ const logger = require('./src/utils/logger');
 const { startCleanupJobs }   = require('./src/jobs/cleanup.job');
 const { startKeepAlive }     = require('./src/jobs/keepAlive.job');
 const { startAutoCancelJob } = require('./src/jobs/autoCancel.job');
+const { startAdminAlertsJob } = require('./src/jobs/adminAlerts.job');
 const { register: registerOrderListeners } = require('./src/events/listeners/order.listener');
 const { register: registerStockListeners } = require('./src/events/listeners/stock.listener');
 const { register: registerPriceListeners } = require('./src/events/listeners/price.listener');
@@ -114,6 +115,7 @@ const startServer = async () => {
     startCleanupJobs();
     startAutoCancelJob();
     startKeepAlive();
+    startAdminAlertsJob();
 
     const server = app.listen(PORT, () => {
       logger.info(`

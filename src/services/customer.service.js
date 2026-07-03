@@ -56,6 +56,7 @@ const getOrderStats = async (userId, branchId = null) => {
         _id: null,
         totalOrders: { $sum: 1 },
         totalSpend: { $sum: '$total' },
+        totalVat: { $sum: { $ifNull: ['$vatAmount', 0] } },
         avgOrderValue: { $avg: '$total' },
         firstOrderDate: { $min: '$createdAt' },
         lastOrderDate: { $max: '$createdAt' }
@@ -72,6 +73,7 @@ const getOrderStats = async (userId, branchId = null) => {
   return {
     totalOrders: s.totalOrders || 0,
     totalSpend: s.totalSpend || 0,
+    totalVat: s.totalVat || 0,
     avgOrderValue: s.avgOrderValue ? Math.round(s.avgOrderValue) : 0,
     firstOrderDate: s.firstOrderDate || null,
     lastOrderDate: s.lastOrderDate || null,

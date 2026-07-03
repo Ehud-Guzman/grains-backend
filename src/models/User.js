@@ -74,6 +74,7 @@ const userSchema = new mongoose.Schema({
     ref: 'Branch'
   }],
   isB2B: { type: Boolean, default: false }, // true = business customer with KRA PIN
+  kraPin: { type: String, trim: true, uppercase: true, default: null }, // buyer KRA PIN, reused to prefill checkout
   orderHistory: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Order' }],
   onboarding: {
     type: onboardingSchema,

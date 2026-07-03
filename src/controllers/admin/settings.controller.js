@@ -135,11 +135,18 @@ const getReceiptConfig = async (req, res, next) => {
     let branchId = req.branchId;
     if (!branchId) {
       const defaultBranch = await getDefaultBranch();
-      if (!defaultBranch) return success(res, { kraPin: '', receiptFooterNote: '' });
+      if (!defaultBranch) return success(res, { kraPin: '', receiptFooterNote: '', cuSerialNumber: '' });
       branchId = defaultBranch._id;
     }
-    const s = await settingsService.getSettings(branchId);
-    return success(res, { kraPin: s.kraPin || '', receiptFooterNote: s.receiptFooterNote || '' });
+    const [s, g] = await Promise.all([
+      settingsService.getSettings(branchId),
+      require('../../services/globalSettings.service').getSettings(),
+    ]);
+    return success(res, {
+      kraPin: s.kraPin || '',
+      receiptFooterNote: s.receiptFooterNote || '',
+      cuSerialNumber: g?.etims?.enabled ? (g.etims.deviceId || '') : '',
+    });
   } catch (err) { next(err); }
 };
 

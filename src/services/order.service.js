@@ -29,6 +29,17 @@ const { paginate, buildPaginationMeta } = require('../utils/paginate');
 const { validateReason } = require('../utils/validateReason');
 const couponService = require('./coupon.service');
 
+// A customer's preferred rider is informational only — admin still confirms the
+// real assignment via assignDriver(). Silently drops anything that doesn't
+// resolve to an available driver in this branch rather than failing the order.
+const resolvePreferredDriver = async (preferredDriverId, branchId) => {
+  if (!preferredDriverId || !mongoose.Types.ObjectId.isValid(preferredDriverId)) return null;
+  const driver = await User.findOne({
+    _id: preferredDriverId, role: ROLES.DRIVER, branchId, isLocked: false,
+  }).select('_id').lean();
+  return driver ? driver._id : null;
+};
+
 const orderHasHeldStock = (order) => (
   [STOCK_RESERVATION_STATUSES.HELD, STOCK_RESERVATION_STATUSES.CONSUMED]
     .includes(order.stockReservationStatus || STOCK_RESERVATION_STATUSES.NONE)
@@ -363,6 +374,8 @@ const createGuestOrder = async (orderData, branchId) => {
   const vatBase    = Math.max(0, subtotal - couponDiscount);
   const vatAmount  = vatEnabled ? Math.round(vatBase * vatRate / 100) : 0;
 
+  const preferredDriverId = await resolvePreferredDriver(orderData.preferredDriverId, branchId);
+
   const session = await mongoose.startSession();
   session.startTransaction();
 
@@ -400,6 +413,7 @@ const createGuestOrder = async (orderData, branchId) => {
       stockReservationStatus: STOCK_RESERVATION_STATUSES.NONE,
       specialInstructions: orderData.specialInstructions || null,
       buyerKraPin: orderData.buyerKraPin?.trim() || null,
+      preferredDriverId,
       deliveryCoordinates: orderData.deliveryCoordinates?.lat
         ? { lat: orderData.deliveryCoordinates.lat, lng: orderData.deliveryCoordinates.lng }
         : { lat: null, lng: null },
@@ -484,6 +498,8 @@ const createCustomerOrder = async (orderData, userId, branchId) => {
   const vatBase    = Math.max(0, subtotal - couponDiscount);
   const vatAmount  = vatEnabled ? Math.round(vatBase * vatRate / 100) : 0;
 
+  const preferredDriverId = await resolvePreferredDriver(orderData.preferredDriverId, branchId);
+
   const session = await mongoose.startSession();
   session.startTransaction();
 
@@ -511,6 +527,7 @@ const createCustomerOrder = async (orderData, userId, branchId) => {
       stockReservationStatus: STOCK_RESERVATION_STATUSES.NONE,
       specialInstructions: orderData.specialInstructions || null,
       buyerKraPin: orderData.buyerKraPin?.trim() || null,
+      preferredDriverId,
       deliveryCoordinates: orderData.deliveryCoordinates?.lat
         ? { lat: orderData.deliveryCoordinates.lat, lng: orderData.deliveryCoordinates.lng }
         : { lat: null, lng: null },
@@ -560,6 +577,8 @@ const getById = async (orderId, branchId) => {
     .populate('userId', 'name phone email')
     .populate('guestId', 'name phone location')
     .populate('paymentId')
+    .populate('driverId', 'name vehicleInfo')
+    .populate('preferredDriverId', 'name vehicleInfo')
     .lean();
 
   if (!order) throw new AppError('Order not found', 404, 'ORDER_NOT_FOUND');
@@ -613,7 +632,7 @@ const getAll = async (filters = {}, query = {}, branchId) => {
 };
 
 // ── GET MY ORDERS (CUSTOMER) ──────────────────────────────────────────────────
-const CUSTOMER_ORDER_FIELDS = 'orderRef orderItems subtotal deliveryFee vatEnabled vatRate vatAmount total deliveryMethod deliveryAddress paymentMethod paymentStatus status rejectionReason specialInstructions buyerKraPin branchId createdAt updatedAt statusHistory';
+const CUSTOMER_ORDER_FIELDS = 'orderRef orderItems subtotal deliveryFee vatEnabled vatRate vatAmount total deliveryMethod deliveryAddress paymentMethod paymentStatus status rejectionReason specialInstructions buyerKraPin branchId createdAt updatedAt statusHistory driverId preferredDriverId deliveredAt';
 
 const getMyOrders = async (userId, query = {}, branchId) => {
   // Auto-cancel is handled by autoCancel.job.js — no per-request call needed
@@ -632,6 +651,8 @@ const getMyOrders = async (userId, query = {}, branchId) => {
     Order.countDocuments(filter),
     Order.find(filter)
       .select(CUSTOMER_ORDER_FIELDS)
+      .populate('driverId', 'name vehicleInfo')
+      .populate('preferredDriverId', 'name vehicleInfo')
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit)
@@ -650,6 +671,8 @@ const getMyOrderById = async (userId, orderId) => {
 
   const order = await Order.findOne({ _id: orderId, userId })
     .select(CUSTOMER_ORDER_FIELDS)
+    .populate('driverId', 'name vehicleInfo')
+    .populate('preferredDriverId', 'name vehicleInfo')
     .lean();
 
   if (!order) throw new AppError('Order not found', 404, 'NOT_FOUND');

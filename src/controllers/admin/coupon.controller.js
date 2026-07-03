@@ -10,6 +10,13 @@ const getAll = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+const getPerformance = async (req, res, next) => {
+  try {
+    const coupons = await couponService.getPerformance(req.branchId);
+    return success(res, coupons);
+  } catch (err) { next(err); }
+};
+
 const getById = async (req, res, next) => {
   try {
     const coupon = await couponService.getById(req.params.id, req.branchId);
@@ -72,4 +79,4 @@ const validatePublic = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-module.exports = { getAll, getById, create, update, remove, validatePublic };
+module.exports = { getAll, getPerformance, getById, create, update, remove, validatePublic };

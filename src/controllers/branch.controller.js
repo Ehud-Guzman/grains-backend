@@ -1,4 +1,5 @@
 const branchService = require('../services/branch.service');
+const driverService = require('../services/driver.service');
 const { success } = require('../utils/apiResponse');
 const { AppError } = require('../middleware/errorHandler.middleware');
 
@@ -28,4 +29,12 @@ const getNearestBranch = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-module.exports = { getPublicBranches, getNearestBranch };
+// GET /api/branches/:branchId/riders — available riders for checkout selection
+const getAvailableRiders = async (req, res, next) => {
+  try {
+    const riders = await driverService.getAvailablePublic(req.params.branchId);
+    return success(res, riders);
+  } catch (err) { next(err); }
+};
+
+module.exports = { getPublicBranches, getNearestBranch, getAvailableRiders };

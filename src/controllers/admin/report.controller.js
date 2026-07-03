@@ -39,6 +39,14 @@ const getStockValuation = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+const getStockTurnoverReport = async (req, res, next) => {
+  try {
+    const { period, from, to } = req.query;
+    const data = await reportService.getStockTurnoverReport(period, from, to, req.branchId);
+    return success(res, data);
+  } catch (err) { next(err); }
+};
+
 const getStockMovementReport = async (req, res, next) => {
   try {
     const { period, from, to } = req.query;
@@ -73,9 +81,8 @@ const getOnboardingAnalytics = async (req, res, next) => {
 const exportReport = async (req, res, next) => {
   try {
     const { type } = req.params;
-    const { period, from, to } = req.query;
 
-    const { csv, filename } = await reportService.exportReport(type, { period, from, to }, req.branchId);
+    const { csv, filename } = await reportService.exportReport(type, req.query, req.branchId);
 
     res.setHeader('Content-Type', 'text/csv');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
@@ -121,6 +128,7 @@ module.exports = {
   getBestSellers,
   getSlowMovers,
   getStockValuation,
+  getStockTurnoverReport,
   getStockMovementReport,
   getCustomerReport,
   getOrdersByStatus,

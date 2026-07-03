@@ -235,11 +235,12 @@ const handleCallback = async (callbackData) => {
         received: paidAmount
       });
       await Payment.findByIdAndUpdate(payment._id, { status: PAYMENT_STATUSES.FAILED });
-      await Order.findByIdAndUpdate(payment.orderId, { paymentStatus: PAYMENT_STATUSES.FAILED });
+      const failedOrder = await Order.findByIdAndUpdate(payment.orderId, { paymentStatus: PAYMENT_STATUSES.FAILED }).select('branchId');
       await activityLogService.log({
         actorId:    payment.orderId,
         actorRole:  'customer',
         action:     LOG_ACTIONS.PAYMENT_FAILED,
+        branchId:   failedOrder?.branchId || null,
         targetId:   payment._id,
         targetType: 'Payment',
         detail:     { reason: 'AMOUNT_MISMATCH', expected: payment.amount, received: paidAmount }
@@ -318,14 +319,15 @@ const handleCallback = async (callbackData) => {
       status: PAYMENT_STATUSES.FAILED
     });
 
-    await Order.findByIdAndUpdate(payment.orderId, {
+    const failedOrder = await Order.findByIdAndUpdate(payment.orderId, {
       paymentStatus: PAYMENT_STATUSES.FAILED
-    });
+    }).select('branchId');
 
     await activityLogService.log({
       actorId:    payment.orderId,
       actorRole:  'customer',
       action:     LOG_ACTIONS.PAYMENT_FAILED,
+      branchId:   failedOrder?.branchId || null,
       targetId:   payment._id,
       targetType: 'Payment',
       detail:     { resultCode: ResultCode, resultDesc: ResultDesc }

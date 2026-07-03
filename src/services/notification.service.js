@@ -52,6 +52,35 @@ const sendSMS = async (to, message) => {
   await atSMS.send(opts);
 };
 
+// Bulk send — one AT call per batch of recipients (chunked to keep each request
+// a sane size). Returns { sent, failed } — never throws, since a broadcast to
+// hundreds of numbers must not abort partway on one bad batch.
+const BROADCAST_BATCH_SIZE = 100;
+
+const sendBulkSMS = async (recipients, message) => {
+  if (!atSMS) {
+    logger.warn('[SMS] Africa\'s Talking not configured — check AT_USERNAME and AT_API_KEY in .env');
+    return { sent: 0, failed: recipients.length };
+  }
+  const phones = [...new Set(recipients.map(normalisePhone).filter(Boolean))];
+  let sent = 0;
+  let failed = 0;
+
+  for (let i = 0; i < phones.length; i += BROADCAST_BATCH_SIZE) {
+    const batch = phones.slice(i, i + BROADCAST_BATCH_SIZE);
+    const opts = { to: batch, message };
+    if (process.env.AT_SENDER_ID) opts.from = process.env.AT_SENDER_ID;
+    try {
+      await atSMS.send(opts);
+      sent += batch.length;
+    } catch (err) {
+      logger.error('[SMS] Broadcast batch failed', { err: err.message, batchSize: batch.length });
+      failed += batch.length;
+    }
+  }
+  return { sent, failed };
+};
+
 const sendEmail = async ({ to, subject, html }) => {
   if (!emailTransporter) {
     logger.warn('[Email] Gmail not configured — check GMAIL_USER and GMAIL_APP_PASSWORD in .env');
@@ -287,4 +316,6 @@ module.exports = {
   dispatchOrderRejected,
   dispatchOrderDispatched,
   sendEmail,
+  sendSMS,
+  sendBulkSMS,
 };

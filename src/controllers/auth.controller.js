@@ -141,8 +141,8 @@ const getProfile = async (req, res, next) => {
 
 const updateProfile = async (req, res, next) => {
   try {
-    const { name, email, addresses } = req.body;
-    const profile = await authService.updateProfile(req.user.id, { name, email, addresses }, req.ip);
+    const { name, email, addresses, kraPin } = req.body;
+    const profile = await authService.updateProfile(req.user.id, { name, email, addresses, kraPin }, req.ip);
     return success(res, profile, 'Profile updated');
   } catch (err) { next(err); }
 };

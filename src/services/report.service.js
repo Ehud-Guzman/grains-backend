@@ -356,6 +356,72 @@ const getStockValuation = async (branchId) => {
   };
 };
 
+// ── STOCK TURNOVER REPORT ─────────────────────────────────────────────────────
+// Units sold in the period vs current stock on hand, per SKU. A proxy ratio —
+// no daily inventory snapshots exist, so "average inventory" isn't available;
+// current stock is used as the denominator instead (standard when only point-in-time
+// stock counts are on hand). Low ratio + high stock = excess/slow-moving inventory.
+const getStockTurnoverReport = async (period, from, to, branchId) => {
+  const { start, end } = getDateRange(period, from, to);
+  const branchFilter = branchId ? { branchId: new mongoose.Types.ObjectId(String(branchId)) } : {};
+  const periodDays = Math.max(1, Math.round((end - start) / (24 * 60 * 60 * 1000)));
+
+  const REVENUE_STATUSES = ['approved', 'preparing', 'out_for_delivery', 'completed'];
+
+  const sold = await Order.aggregate([
+    { $match: { ...branchFilter, status: { $in: REVENUE_STATUSES }, createdAt: { $gte: start, $lte: end } } },
+    { $unwind: '$orderItems' },
+    {
+      $group: {
+        _id: {
+          productId: '$orderItems.productId',
+          variety: '$orderItems.variety',
+          packaging: '$orderItems.packaging',
+        },
+        unitsSold: { $sum: '$orderItems.quantity' },
+      },
+    },
+  ]);
+  const soldMap = new Map(sold.map(s => [`${s._id.productId}::${s._id.variety}::${s._id.packaging}`, s.unitsSold]));
+
+  const productFilter = { isActive: true };
+  if (branchId) productFilter.branchId = branchId;
+  const products = await Product.find(productFilter).select('name category varieties').lean();
+
+  const rows = [];
+  for (const product of products) {
+    for (const variety of product.varieties) {
+      for (const pkg of variety.packaging) {
+        if (pkg.quoteOnly) continue;
+        const key = `${product._id}::${variety.varietyName}::${pkg.size}`;
+        const unitsSold = soldMap.get(key) || 0;
+        const currentStock = pkg.stock || 0;
+        if (unitsSold === 0 && currentStock === 0) continue;
+
+        const turnoverRatio = currentStock > 0 ? Math.round((unitsSold / currentStock) * 100) / 100 : null;
+        const dailyRate = unitsSold / periodDays;
+        const daysOfSupply = dailyRate > 0 ? Math.round(currentStock / dailyRate) : null;
+
+        rows.push({
+          productId: product._id,
+          productName: product.name,
+          category: product.category,
+          varietyName: variety.varietyName,
+          packagingSize: pkg.size,
+          unitsSold,
+          currentStock,
+          turnoverRatio, // units sold per unit currently in stock, over the period
+          daysOfSupply,  // null = no sales in period, so supply is effectively infinite
+        });
+      }
+    }
+  }
+
+  rows.sort((a, b) => (b.turnoverRatio ?? -1) - (a.turnoverRatio ?? -1));
+
+  return { period: { start, end }, periodDays, rows };
+};
+
 // ── STOCK MOVEMENT REPORT ─────────────────────────────────────────────────────
 // UX B5 - all stock changes in a date range by product
 const getStockMovementReport = async (period, from, to, branchId) => {
@@ -561,6 +627,87 @@ const exportReport = async (type, params, branchId) => {
         { label: 'Total Value (KES)', key: 'totalValueKES' }
       ]);
       return { csv, filename: `stock-valuation-${Date.now()}.csv` };
+    }
+
+    case 'stock-turnover': {
+      const data = await getStockTurnoverReport(period, from, to, branchId);
+      const csv = toCSV(data.rows, [
+        { label: 'Product', key: 'productName' },
+        { label: 'Category', key: 'category' },
+        { label: 'Variety', key: 'varietyName' },
+        { label: 'Packaging', key: 'packagingSize' },
+        { label: 'Units Sold', key: 'unitsSold' },
+        { label: 'Current Stock', key: 'currentStock' },
+        { label: 'Turnover Ratio', key: 'turnoverRatio' },
+        { label: 'Days of Supply', key: 'daysOfSupply' }
+      ]);
+      return { csv, filename: `stock-turnover-${Date.now()}.csv` };
+    }
+
+    case 'kpis': {
+      const data = await getDashboardKPIs(branchId);
+      const csv = toCSV([{
+        ordersToday: data.ordersToday,
+        pendingOrders: data.pendingOrders,
+        revenueToday: data.revenueToday,
+        revenueThisMonth: data.revenueThisMonth,
+        lowStockCount: data.lowStockCount,
+        paidRevenue: data.cashFlow.paidRevenue,
+        paidOrders: data.cashFlow.paidOrders,
+        unpaidRevenue: data.cashFlow.unpaidRevenue,
+        unpaidOrders: data.cashFlow.unpaidOrders,
+      }], [
+        { label: 'Orders Today', key: 'ordersToday' },
+        { label: 'Pending Orders', key: 'pendingOrders' },
+        { label: 'Revenue Today (KES)', key: 'revenueToday' },
+        { label: 'Revenue This Month (KES)', key: 'revenueThisMonth' },
+        { label: 'Low Stock Items', key: 'lowStockCount' },
+        { label: 'Paid Revenue This Month (KES)', key: 'paidRevenue' },
+        { label: 'Paid Orders This Month', key: 'paidOrders' },
+        { label: 'Unpaid Revenue This Month (KES)', key: 'unpaidRevenue' },
+        { label: 'Unpaid Orders This Month', key: 'unpaidOrders' },
+      ]);
+      return { csv, filename: `dashboard-kpis-${Date.now()}.csv` };
+    }
+
+    case 'slow-movers': {
+      const data = await getSlowMovers(params.days || 30, branchId);
+      const csv = toCSV(data.slowMovers, [
+        { label: 'Product', key: 'name' },
+        { label: 'Category', key: 'category' },
+        { label: 'Variety Count', key: 'varietyCount' },
+        { label: 'Days Without Sale', key: 'daysWithoutSale' }
+      ]);
+      return { csv, filename: `slow-movers-${Date.now()}.csv` };
+    }
+
+    case 'margins': {
+      const data = await getMarginReport(period, from, to, branchId);
+      const csv = toCSV(data.rows, [
+        { label: 'Product', key: 'productName' },
+        { label: 'Variety', key: 'variety' },
+        { label: 'Packaging', key: 'packaging' },
+        { label: 'Units Sold', key: 'unitsSold' },
+        { label: 'Revenue (KES)', key: 'revenue' },
+        { label: 'Estimated Cost (KES)', key: 'estimatedCost' },
+        { label: 'Gross Profit (KES)', key: 'grossProfit' },
+        { label: 'Margin %', key: 'marginPct' }
+      ]);
+      return { csv, filename: `margins-report-${Date.now()}.csv` };
+    }
+
+    case 'riders': {
+      const data = await getRiderReport(period, from, to, branchId);
+      const csv = toCSV(data.riders, [
+        { label: 'Driver', key: 'driverName' },
+        { label: 'Phone', key: 'driverPhone' },
+        { label: 'Deliveries', key: 'deliveries' },
+        { label: 'Avg Delivery (min)', key: 'avgDeliveryMinutes' },
+        { label: 'Fastest (min)', key: 'minDeliveryMinutes' },
+        { label: 'Slowest (min)', key: 'maxDeliveryMinutes' },
+        { label: 'Total Revenue (KES)', key: 'totalRevenue' }
+      ]);
+      return { csv, filename: `riders-report-${Date.now()}.csv` };
     }
 
     case 'customers': {
@@ -1005,6 +1152,7 @@ module.exports = {
   getBestSellers,
   getSlowMovers,
   getStockValuation,
+  getStockTurnoverReport,
   getStockMovementReport,
   getCustomerReport,
   getOrdersByStatus,

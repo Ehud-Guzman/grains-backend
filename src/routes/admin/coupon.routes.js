@@ -10,6 +10,7 @@ const { createCouponValidator, updateCouponValidator } = require('../../validato
 router.use(verifyToken, adminLimiter);
 
 router.get('/',     requireMinRole('supervisor'), couponController.getAll);
+router.get('/performance', requireMinRole('supervisor'), couponController.getPerformance);
 router.get('/:id',  requireMinRole('supervisor'), couponController.getById);
 router.post('/',    requireMinRole('admin'),       createCouponValidator, validate, couponController.create);
 router.put('/:id',  requireMinRole('admin'),       updateCouponValidator, validate, couponController.update);

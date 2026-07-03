@@ -192,6 +192,8 @@ const update = async (productId, data, adminId, branchId, actorRole = 'admin') =
 
   delete data.createdBy;
   delete data.branchId; // cannot change branch of an existing product
+  const seasonTag = data.seasonTag || null;
+  delete data.seasonTag; // not a Product field — only used to tag this update's PriceLog entries
   if (Array.isArray(data.imageURLs)) data.imageURLs = normalizeImageUrls(data.imageURLs);
   if (Array.isArray(data.varieties)) {
     data.varieties = data.varieties.map(variety => ({
@@ -218,6 +220,7 @@ const update = async (productId, data, adminId, branchId, actorRole = 'admin') =
           oldPrice,
           newPrice: pkg.priceKES,
           changedBy: adminId,
+          seasonTag,
         }).catch(() => {});
 
         appEvents.emit(PRICE_EVENTS.CHANGED, {

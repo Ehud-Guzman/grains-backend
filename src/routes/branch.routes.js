@@ -11,4 +11,7 @@ router.get('/', branchController.getPublicBranches);
 // GET /api/branches/nearest?lat=X&lng=Y — nearest branch for customer location
 router.get('/nearest', branchController.getNearestBranch);
 
+// GET /api/branches/:branchId/riders — available riders for checkout selection
+router.get('/:branchId/riders', branchController.getAvailableRiders);
+
 module.exports = router;

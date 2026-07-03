@@ -1,4 +1,6 @@
+const mongoose = require('mongoose');
 const Coupon = require('../models/Coupon');
+const Order = require('../models/Order');
 const { AppError } = require('../middleware/errorHandler.middleware');
 
 // ── VALIDATE & COMPUTE DISCOUNT ───────────────────────────────────────────────
@@ -120,4 +122,42 @@ const remove = async (id, branchId) => {
   if (!coupon) throw new AppError('Coupon not found', 404, 'COUPON_NOT_FOUND');
 };
 
-module.exports = { validate, incrementUsage, releaseUsage, getAll, getById, create, update, remove };
+// ── PERFORMANCE ────────────────────────────────────────────────────────────────
+// Redemption + revenue-impact stats per coupon, joined onto the coupon list.
+// "Redemptions" only counts orders that actually generated revenue (excludes
+// pending/rejected/cancelled) — usedCount on the Coupon doc is the raw counter
+// used for enforcing usageLimit and can include since-cancelled orders.
+const getPerformance = async (branchId) => {
+  const REVENUE_STATUSES = ['approved', 'preparing', 'out_for_delivery', 'completed'];
+  const branchFilter = branchId ? { branchId: new mongoose.Types.ObjectId(String(branchId)) } : {};
+
+  const [coupons, stats] = await Promise.all([
+    getAll(branchId),
+    Order.aggregate([
+      { $match: { ...branchFilter, status: { $in: REVENUE_STATUSES }, couponCode: { $ne: null } } },
+      {
+        $group: {
+          _id: '$couponCode',
+          redemptions: { $sum: 1 },
+          totalDiscount: { $sum: { $ifNull: ['$couponDiscount', 0] } },
+          totalRevenue: { $sum: '$total' },
+        },
+      },
+    ]),
+  ]);
+
+  const statsMap = new Map(stats.map(s => [s._id, s]));
+
+  return coupons.map(c => {
+    const s = statsMap.get(c.code) || { redemptions: 0, totalDiscount: 0, totalRevenue: 0 };
+    return {
+      ...c,
+      redemptions: s.redemptions,
+      totalDiscount: s.totalDiscount,
+      totalRevenue: s.totalRevenue,
+      avgOrderValue: s.redemptions > 0 ? Math.round(s.totalRevenue / s.redemptions) : 0,
+    };
+  });
+};
+
+module.exports = { validate, incrementUsage, releaseUsage, getAll, getById, create, update, remove, getPerformance };

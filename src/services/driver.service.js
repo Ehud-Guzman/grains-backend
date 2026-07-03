@@ -259,6 +259,20 @@ const getMyStats = async (driverId) => {
   return { active, completedToday, totalCompleted };
 };
 
+// ── PUBLIC: AVAILABLE RIDERS (for checkout selection) ─────────────────────────
+// Minimal fields only — never expose phone or other contact info publicly.
+const getAvailablePublic = async (branchId) => {
+  return User.find({
+    role: ROLES.DRIVER,
+    branchId,
+    isLocked: false,
+    isAvailableForDelivery: true,
+  })
+    .select('name vehicleInfo')
+    .sort({ name: 1 })
+    .lean();
+};
+
 module.exports = {
   getAllDrivers,
   getDriverById,
@@ -271,5 +285,6 @@ module.exports = {
   updateVehicleInfo,
   toggleAvailability,
   getMyOrders,
-  getMyStats
+  getMyStats,
+  getAvailablePublic
 };
