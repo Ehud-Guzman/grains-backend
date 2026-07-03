@@ -45,6 +45,14 @@ const getMyOrders = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+// GET /api/orders/my/:id - customer auth required
+const getMyOrder = async (req, res, next) => {
+  try {
+    const order = await orderService.getMyOrderById(req.user.id, req.params.id);
+    return success(res, order);
+  } catch (err) { next(err); }
+};
+
 // PATCH /api/orders/:id/cancel - customer auth required
 const cancelOrder = async (req, res, next) => {
   try {
@@ -61,4 +69,4 @@ const getMyStats = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-module.exports = { createGuestOrder, trackOrder, createCustomerOrder, getMyOrders, cancelOrder, getMyStats };
+module.exports = { createGuestOrder, trackOrder, createCustomerOrder, getMyOrders, getMyOrder, cancelOrder, getMyStats };

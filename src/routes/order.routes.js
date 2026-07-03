@@ -24,8 +24,11 @@ router.post('/', verifyToken, requireRole('customer'), checkMaintenanceMode, cus
 // GET /api/orders/my
 router.get('/my', verifyToken, requireRole('customer'), orderController.getMyOrders);
 
-// GET /api/orders/my/stats — must be BEFORE /:id routes to avoid conflict
+// GET /api/orders/my/stats — must be BEFORE /my/:id to avoid conflict
 router.get('/my/stats', verifyToken, requireRole('customer'), orderController.getMyStats);
+
+// GET /api/orders/my/:id — single order, scoped to the requesting customer
+router.get('/my/:id', verifyToken, requireRole('customer'), orderController.getMyOrder);
 
 // PATCH /api/orders/:id/cancel
 router.patch('/:id/cancel', verifyToken, requireRole('customer'), orderController.cancelOrder);

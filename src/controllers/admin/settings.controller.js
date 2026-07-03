@@ -1,14 +1,28 @@
+const mongoose = require('mongoose');
 const settingsService = require('../../services/settings.service');
 const { getDefaultBranch } = require('../../services/defaultBranch.service');
 const { calculateDeliveryFee } = require('../../services/order.service');
 const { success } = require('../../utils/apiResponse');
 const { AppError } = require('../../middleware/errorHandler.middleware');
+const Branch = require('../../models/Branch');
 
-// GET /api/settings  (public — uses default branch)
+// Resolve the branch for public storefront requests: an explicitly requested
+// ?branchId (must be a valid, active branch) wins; otherwise the default
+// branch. An invalid/inactive branchId falls back to default rather than
+// erroring — the storefront must always render.
+const resolvePublicBranch = async (requestedBranchId) => {
+  if (requestedBranchId && mongoose.Types.ObjectId.isValid(requestedBranchId)) {
+    const branch = await Branch.findOne({ _id: requestedBranchId, isActive: true })
+      .select('name slug location isDefault').lean();
+    if (branch) return branch;
+  }
+  return getDefaultBranch();
+};
+
+// GET /api/settings?branchId=…  (public — requested branch or default)
 const getPublic = async (req, res, next) => {
   try {
-    // Public shop uses the default branch (fall back to any active branch, then built-in defaults)
-    const defaultBranch = await getDefaultBranch();
+    const defaultBranch = await resolvePublicBranch(req.query.branchId);
 
     if (!defaultBranch) {
       // No branches yet (first-time setup) — return built-in defaults so the frontend doesn't break
@@ -82,10 +96,10 @@ const getDeliveryFee = async (req, res, next) => {
       return next(new AppError('lat and lng query parameters are required', 400, 'INVALID_COORDS'));
     }
 
-    const defaultBranch = await getDefaultBranch();
-    if (!defaultBranch) return success(res, { fee: 0, distanceKm: null, zoneName: null });
+    const branch = await resolvePublicBranch(req.query.branchId);
+    if (!branch) return success(res, { fee: 0, distanceKm: null, zoneName: null });
 
-    const settings = await settingsService.getSettings(defaultBranch._id);
+    const settings = await settingsService.getSettings(branch._id);
     const result = calculateDeliveryFee(settings, 'delivery', { lat, lng });
 
     return success(res, result);

@@ -2,12 +2,70 @@ const Branch = require('../models/Branch');
 const User = require('../models/User');
 const { AppError } = require('../middleware/errorHandler.middleware');
 const activityLogService = require('./activityLog.service');
-const { invalidateDefaultBranchCache } = require('./defaultBranch.service');
+const { invalidateDefaultBranchCache, getDefaultBranch } = require('./defaultBranch.service');
+const settingsService = require('./settings.service');
+const haversine = require('../utils/haversine');
 
 // ── GET ALL BRANCHES ──────────────────────────────────────────────────────────
 const getAll = async (includeInactive = false) => {
   const query = includeInactive ? {} : { isActive: true };
   return Branch.find(query).sort({ name: 1 }).lean();
+};
+
+// ── PUBLIC: LIST ACTIVE BRANCHES (storefront picker) ─────────────────────────
+// Only safe-to-expose fields — no staff data, no internal config.
+const getPublicBranches = async () => {
+  return Branch.find({ isActive: true })
+    .select('name slug location isDefault')
+    .sort({ name: 1 })
+    .lean();
+};
+
+// ── PUBLIC: FIND NEAREST BRANCH ───────────────────────────────────────────────
+// Location-driven fulfilment: given customer coordinates, pick the branch that
+// will serve them. Rules:
+//   1. Prefer the nearest branch that can DELIVER to the customer
+//      (has coordinates configured, and distance <= its maxDeliveryKm if set).
+//   2. If no branch can deliver, return the nearest branch with coordinates —
+//      flagged deliveryAvailable: false so the UI offers pickup only.
+//   3. If no branch has coordinates configured at all, fall back to the
+//      default branch (same behaviour as before this feature existed).
+// Returns { branch, distanceKm, deliveryAvailable, resolvedBy }.
+const findNearestBranch = async (lat, lng) => {
+  const branches = await Branch.find({ isActive: true })
+    .select('name slug location isDefault')
+    .lean();
+
+  const candidates = [];
+  for (const branch of branches) {
+    // Settings are cached per branch, so this loop is cheap after the first call
+    const settings = await settingsService.getSettings(branch._id);
+    if (settings.branchLat == null || settings.branchLng == null) continue;
+
+    const distanceKm = haversine(settings.branchLat, settings.branchLng, lat, lng);
+    candidates.push({
+      branch,
+      distanceKm: Math.round(distanceKm * 10) / 10,
+      deliveryAvailable: settings.maxDeliveryKm == null || distanceKm <= settings.maxDeliveryKm
+    });
+  }
+
+  if (candidates.length === 0) {
+    const fallback = await getDefaultBranch();
+    if (!fallback) throw new AppError('No branches available', 404, 'NO_BRANCHES');
+    return {
+      branch: { _id: fallback._id, name: fallback.name, slug: fallback.slug, location: fallback.location, isDefault: fallback.isDefault },
+      distanceKm: null,
+      deliveryAvailable: true,
+      resolvedBy: 'default' // no branch has coordinates configured
+    };
+  }
+
+  candidates.sort((a, b) => a.distanceKm - b.distanceKm);
+  const deliverable = candidates.find(c => c.deliveryAvailable);
+  const chosen = deliverable || candidates[0];
+
+  return { ...chosen, resolvedBy: deliverable ? 'nearest-deliverable' : 'nearest-pickup-only' };
 };
 
 // ── GET SINGLE BRANCH ─────────────────────────────────────────────────────────
@@ -133,4 +191,4 @@ const assignUser = async (userId, branchId, adminId) => {
   return user;
 };
 
-module.exports = { getAll, getById, create, update, deactivate, getStaff, assignUser };
+module.exports = { getAll, getById, create, update, deactivate, getStaff, assignUser, getPublicBranches, findNearestBranch };

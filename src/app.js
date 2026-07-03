@@ -46,6 +46,7 @@ const customerAlertRoutes = require('./routes/customerAlert.routes');
 const savedListRoutes    = require('./routes/savedList.routes');
 const couponRoutes       = require('./routes/coupon.routes');
 const promotionRoutes    = require('./routes/promotion.routes');
+const branchRoutes       = require('./routes/branch.routes');
 
 // ── ADMIN ROUTES ──────────────────────────────────────────────────────────────
 const adminProductRoutes  = require('./routes/admin/product.routes');
@@ -248,6 +249,7 @@ app.use('/api/alerts',     customerAlertRoutes);
 app.use('/api/lists',      savedListRoutes);
 app.use('/api/coupons',    couponRoutes);
 app.use('/api/promotions', promotionRoutes);
+app.use('/api/branches',   branchRoutes);
 
 // ── ADMIN ROUTES ──────────────────────────────────────────────────────────────
 app.use('/api/admin/products',  adminProductRoutes);

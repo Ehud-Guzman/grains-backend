@@ -613,14 +613,14 @@ const getAll = async (filters = {}, query = {}, branchId) => {
 };
 
 // ── GET MY ORDERS (CUSTOMER) ──────────────────────────────────────────────────
+const CUSTOMER_ORDER_FIELDS = 'orderRef orderItems subtotal deliveryFee vatEnabled vatRate vatAmount total deliveryMethod deliveryAddress paymentMethod paymentStatus status rejectionReason specialInstructions buyerKraPin branchId createdAt updatedAt statusHistory';
+
 const getMyOrders = async (userId, query = {}, branchId) => {
   // Auto-cancel is handled by autoCancel.job.js — no per-request call needed
 
   const { page, limit, skip } = paginate(query);
   // Customers can see their orders across all branches (shared accounts)
   const filter = { userId };
-
-  const CUSTOMER_ORDER_FIELDS = 'orderRef orderItems subtotal deliveryFee vatEnabled vatRate vatAmount total deliveryMethod deliveryAddress paymentMethod paymentStatus status rejectionReason specialInstructions buyerKraPin branchId createdAt updatedAt statusHistory';
 
   const [total, orders] = await Promise.all([
     Order.countDocuments(filter),
@@ -633,6 +633,21 @@ const getMyOrders = async (userId, query = {}, branchId) => {
   ]);
 
   return { orders, pagination: buildPaginationMeta(page, limit, total) };
+};
+
+// ── GET SINGLE ORDER (CUSTOMER) ───────────────────────────────────────────────
+// Scoped to the requesting user — a customer can only fetch their own order.
+const getMyOrderById = async (userId, orderId) => {
+  if (!mongoose.Types.ObjectId.isValid(orderId)) {
+    throw new AppError('Order not found', 404, 'NOT_FOUND');
+  }
+
+  const order = await Order.findOne({ _id: orderId, userId })
+    .select(CUSTOMER_ORDER_FIELDS)
+    .lean();
+
+  if (!order) throw new AppError('Order not found', 404, 'NOT_FOUND');
+  return order;
 };
 
 // ── TRACK BY REF (GUEST) ──────────────────────────────────────────────────────
@@ -1132,6 +1147,7 @@ module.exports = {
   getById,
   getAll,
   getMyOrders,
+  getMyOrderById,
   getMyStats,
   trackByRef,
   approve,
