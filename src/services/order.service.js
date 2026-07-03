@@ -622,6 +622,12 @@ const getMyOrders = async (userId, query = {}, branchId) => {
   // Customers can see their orders across all branches (shared accounts)
   const filter = { userId };
 
+  // Search by order reference — lets a repeat customer jump straight to an
+  // old order instead of paging through their full history.
+  if (query.search) {
+    filter.orderRef = { $regex: query.search, $options: 'i' };
+  }
+
   const [total, orders] = await Promise.all([
     Order.countDocuments(filter),
     Order.find(filter)
