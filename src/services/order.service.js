@@ -344,6 +344,31 @@ const autoCancelExpiredPendingOrders = async (branchId) => {
   }
 };
 
+// ── DUPLICATE ORDER GUARD ─────────────────────────────────────────────────────
+// Idempotency guard: reject an exact-duplicate submission (double-click / network
+// retry resubmitting the same checkout) landing within a short window, since order
+// creation has no client-supplied idempotency key. Mirrors stock.service.js's
+// addDelivery duplicate guard.
+const DUPLICATE_ORDER_WINDOW_MS = 20000;
+const assertNoDuplicateOrder = async ({ branchId, userId = null, guestId = null, total, itemCount }) => {
+  if (!userId && !guestId) return; // brand-new guest — no prior order possible
+  const query = {
+    branchId,
+    userId,
+    guestId,
+    total,
+    createdAt: { $gte: new Date(Date.now() - DUPLICATE_ORDER_WINDOW_MS) }
+  };
+  const recent = await Order.findOne(query).sort({ createdAt: -1 }).select('orderItems').lean();
+  if (recent && recent.orderItems.length === itemCount) {
+    throw new AppError(
+      'An identical order was just placed — please wait before resubmitting',
+      409,
+      'DUPLICATE_SUBMISSION'
+    );
+  }
+};
+
 // ── CREATE GUEST ORDER ────────────────────────────────────────────────────────
 // SRS 5.2 + 5.5 - no login required
 const createGuestOrder = async (orderData, branchId) => {
@@ -392,6 +417,12 @@ const createGuestOrder = async (orderData, branchId) => {
   const vatAmount  = vatEnabled ? Math.round(vatBase * vatRate / 100) : 0;
 
   const preferredDriverId = await resolvePreferredDriver(orderData.preferredDriverId, branchId);
+  const total = round2(Math.max(0, subtotal + deliveryFee + vatAmount - couponDiscount));
+
+  const existingGuest = await Guest.findOne({ phone: orderData.phone }).select('_id').lean();
+  await assertNoDuplicateOrder({
+    branchId, guestId: existingGuest?._id || null, total, itemCount: items.length
+  });
 
   const session = await mongoose.startSession();
   session.startTransaction();
@@ -421,7 +452,7 @@ const createGuestOrder = async (orderData, branchId) => {
       vatAmount,
       couponCode,
       couponDiscount,
-      total: round2(Math.max(0, subtotal + deliveryFee + vatAmount - couponDiscount)),
+      total,
       deliveryMethod: orderData.deliveryMethod,
       deliveryAddress: orderData.deliveryAddress || null,
       paymentMethod: orderData.paymentMethod,
@@ -519,6 +550,9 @@ const createCustomerOrder = async (orderData, userId, branchId) => {
   const vatAmount  = vatEnabled ? Math.round(vatBase * vatRate / 100) : 0;
 
   const preferredDriverId = await resolvePreferredDriver(orderData.preferredDriverId, branchId);
+  const total = round2(Math.max(0, subtotal + deliveryFee + vatAmount - couponDiscount));
+
+  await assertNoDuplicateOrder({ branchId, userId, total, itemCount: items.length });
 
   const session = await mongoose.startSession();
   session.startTransaction();
@@ -538,7 +572,7 @@ const createCustomerOrder = async (orderData, userId, branchId) => {
       vatAmount,
       couponCode,
       couponDiscount,
-      total: round2(Math.max(0, subtotal + deliveryFee + vatAmount - couponDiscount)),
+      total,
       deliveryMethod: orderData.deliveryMethod,
       deliveryAddress: orderData.deliveryAddress || null,
       paymentMethod: orderData.paymentMethod,
@@ -841,22 +875,7 @@ const reject = async (orderId, adminId, reason, branchId, actorRole = 'superviso
     await order.save({ session });
     await session.commitTransaction();
 
-    if (order.paymentStatus === PAYMENT_STATUSES.PAID && order.paymentId) {
-      await Payment.findByIdAndUpdate(order.paymentId, {
-        status:       PAYMENT_STATUSES.REFUNDED,
-        refundedAt:   new Date(),
-        refundReason: reason
-      });
-      await activityLogService.log({
-        actorId:    adminId,
-        actorRole,
-        action:     LOG_ACTIONS.PAYMENT_REFUNDED,
-        branchId:   order.branchId,
-        targetId:   order.paymentId,
-        targetType: 'Payment',
-        detail:     { orderRef: order.orderRef, reason }
-      });
-    }
+    await refundPaymentIfPaid(order, adminId, actorRole, reason);
 
     await activityLogService.log({
       actorId: adminId,
@@ -876,6 +895,29 @@ const reject = async (orderId, adminId, reason, branchId, actorRole = 'superviso
     throw err;
   } finally {
     session.endSession();
+  }
+};
+
+// ── REFUND HELPER ──────────────────────────────────────────────────────────────
+// Mirrors the refund side-effect in reject(): any terminal transition away from
+// a paid order must flip the Payment to REFUNDED so the money owed is tracked,
+// not just the stock/coupon release.
+const refundPaymentIfPaid = async (order, actorId, actorRole, reason) => {
+  if (order.paymentStatus === PAYMENT_STATUSES.PAID && order.paymentId) {
+    await Payment.findByIdAndUpdate(order.paymentId, {
+      status:       PAYMENT_STATUSES.REFUNDED,
+      refundedAt:   new Date(),
+      refundReason: reason
+    });
+    await activityLogService.log({
+      actorId,
+      actorRole,
+      action:     LOG_ACTIONS.PAYMENT_REFUNDED,
+      branchId:   order.branchId,
+      targetId:   order.paymentId,
+      targetType: 'Payment',
+      detail:     { orderRef: order.orderRef, reason }
+    });
   }
 };
 
@@ -925,6 +967,10 @@ const updateStatus = async (orderId, newStatus, adminId, note = null, branchId, 
 
     await order.save({ session });
     await session.commitTransaction();
+
+    if (newStatus === ORDER_STATUSES.CANCELLED) {
+      await refundPaymentIfPaid(order, adminId, actorRole, note || 'Cancelled by staff');
+    }
 
     await activityLogService.log({
       actorId: adminId,
@@ -1000,6 +1046,8 @@ const cancel = async (orderId, userId) => {
     if (order.couponCode) await couponService.releaseUsage(order.couponCode, order.branchId, session);
     await order.save({ session });
     await session.commitTransaction();
+
+    await refundPaymentIfPaid(order, userId, 'customer', 'Cancelled by customer');
 
     await activityLogService.log({
       actorId: userId,

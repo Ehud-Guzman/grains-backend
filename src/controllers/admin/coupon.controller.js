@@ -68,7 +68,10 @@ const validatePublic = async (req, res, next) => {
   try {
     const { code, subtotal } = req.body;
     const userId = req.user?.id || null;
-    const branchId = req.branchId || (await require('../../services/defaultBranch.service').getDefaultBranch())?._id;
+    // Storefront guests/customers carry no JWT branchId (customer accounts are
+    // shared across branches) — the resolved shop branch travels in the body,
+    // same as order creation. req.branchId only applies to staff/driver JWTs.
+    const branchId = req.body.branchId || req.branchId || (await require('../../services/defaultBranch.service').getDefaultBranch())?._id;
     const { coupon, discountAmount } = await couponService.validate(code, branchId, userId, Number(subtotal));
     return success(res, {
       code: coupon.code,

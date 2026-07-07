@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const Branch = require('../models/Branch');
 const User = require('../models/User');
 const { AppError } = require('../middleware/errorHandler.middleware');
@@ -5,6 +6,8 @@ const activityLogService = require('./activityLog.service');
 const { invalidateDefaultBranchCache, getDefaultBranch } = require('./defaultBranch.service');
 const settingsService = require('./settings.service');
 const haversine = require('../utils/haversine');
+
+const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 // ── GET ALL BRANCHES ──────────────────────────────────────────────────────────
 const getAll = async (includeInactive = false) => {
@@ -80,16 +83,31 @@ const create = async (data, adminId) => {
   const existing = await Branch.findOne({ slug: data.slug });
   if (existing) throw new AppError('A branch with this slug already exists', 409, 'SLUG_TAKEN');
 
-  // If this is the first branch, make it default
-  const count = await Branch.countDocuments();
-  const isDefault = count === 0 ? true : (data.isDefault || false);
+  const nameTaken = await Branch.findOne({ name: new RegExp(`^${escapeRegex(data.name)}$`, 'i') });
+  if (nameTaken) throw new AppError('A branch with this name already exists', 409, 'NAME_TAKEN');
 
-  // If setting as default, unset any existing default
-  if (isDefault) {
-    await Branch.updateMany({ isDefault: true }, { isDefault: false });
+  const session = await mongoose.startSession();
+  session.startTransaction();
+  let branch;
+  try {
+    // If this is the first branch, make it default
+    const count = await Branch.countDocuments().session(session);
+    const isDefault = count === 0 ? true : (data.isDefault || false);
+
+    // If setting as default, unset any existing default — same transaction so a
+    // crash mid-swap can never leave the system with zero default branches.
+    if (isDefault) {
+      await Branch.updateMany({ isDefault: true }, { isDefault: false }, { session });
+    }
+
+    [branch] = await Branch.create([{ ...data, isDefault }], { session });
+    await session.commitTransaction();
+  } catch (err) {
+    await session.abortTransaction();
+    throw err;
+  } finally {
+    session.endSession();
   }
-
-  const branch = await Branch.create({ ...data, isDefault });
 
   await activityLogService.log({
     actorId: adminId,
@@ -109,18 +127,40 @@ const update = async (branchId, data, adminId) => {
   const branch = await Branch.findById(branchId);
   if (!branch) throw new AppError('Branch not found', 404, 'BRANCH_NOT_FOUND');
 
+  // Deactivating the default branch must always go through deactivate() — never
+  // let it happen silently as a side effect of an unrelated field edit.
+  if (data.isActive === false && branch.isDefault) {
+    throw new AppError('Cannot deactivate the default branch. Set another branch as default first.', 409, 'CANNOT_DEACTIVATE_DEFAULT');
+  }
+
   if (data.slug && data.slug !== branch.slug) {
     const existing = await Branch.findOne({ slug: data.slug, _id: { $ne: branchId } });
     if (existing) throw new AppError('A branch with this slug already exists', 409, 'SLUG_TAKEN');
   }
 
-  // If setting as default, unset any existing default
-  if (data.isDefault === true) {
-    await Branch.updateMany({ _id: { $ne: branchId }, isDefault: true }, { isDefault: false });
+  if (data.name && data.name !== branch.name) {
+    const nameTaken = await Branch.findOne({ name: new RegExp(`^${escapeRegex(data.name)}$`, 'i'), _id: { $ne: branchId } });
+    if (nameTaken) throw new AppError('A branch with this name already exists', 409, 'NAME_TAKEN');
   }
 
-  Object.assign(branch, data);
-  await branch.save();
+  const session = await mongoose.startSession();
+  session.startTransaction();
+  try {
+    // If setting as default, unset any existing default — same transaction as
+    // the save below so a crash mid-swap can't leave zero default branches.
+    if (data.isDefault === true) {
+      await Branch.updateMany({ _id: { $ne: branchId }, isDefault: true }, { isDefault: false }, { session });
+    }
+
+    Object.assign(branch, data);
+    await branch.save({ session });
+    await session.commitTransaction();
+  } catch (err) {
+    await session.abortTransaction();
+    throw err;
+  } finally {
+    session.endSession();
+  }
 
   await activityLogService.log({
     actorId: adminId,

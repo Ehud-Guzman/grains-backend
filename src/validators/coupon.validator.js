@@ -77,6 +77,10 @@ const validateCouponValidator = [
 
   body('subtotal')
     .isFloat({ min: 0 }).withMessage('Subtotal must be 0 or greater'),
+
+  body('branchId')
+    .optional({ nullable: true })
+    .isMongoId().withMessage('Invalid branch'),
 ];
 
 module.exports = { createCouponValidator, updateCouponValidator, validateCouponValidator };
