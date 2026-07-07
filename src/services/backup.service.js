@@ -18,6 +18,12 @@ const StockIntake = require('../models/StockIntake');
 const ActivityLog = require('../models/ActivityLog');
 const OrderCounter = require('../models/OrderCounter');
 const TokenBlacklist = require('../models/TokenBlacklist');
+const GlobalSettings = require('../models/GlobalSettings');
+const Coupon = require('../models/Coupon');
+const Promotion = require('../models/Promotion');
+const SavedList = require('../models/SavedList');
+const CustomerAlert = require('../models/CustomerAlert');
+const PriceLog = require('../models/PriceLog');
 const logger = require('../utils/logger');
 
 const gzip = promisify(zlib.gzip);
@@ -34,12 +40,13 @@ const BACKUP_DIR = path.resolve(
 );
 const MANIFEST_PATH = path.join(BACKUP_DIR, 'manifest.json');
 const RESTORE_MARKER = path.join(BACKUP_DIR, '.restore-in-progress');
-const BACKUP_VERSION = 2;
+const BACKUP_VERSION = 3;
 const COLLECTIONS = [
   { key: 'branches',        label: 'Branch',         model: Branch },
   { key: 'users',           label: 'User',           model: User },
   { key: 'guests',          label: 'Guest',          model: Guest },
   { key: 'settings',        label: 'Settings',       model: Settings },
+  { key: 'globalSettings',  label: 'GlobalSettings', model: GlobalSettings },
   { key: 'products',        label: 'Product',        model: Product },
   { key: 'orders',          label: 'Order',          model: Order },
   { key: 'payments',        label: 'Payment',        model: Payment },
@@ -48,7 +55,19 @@ const COLLECTIONS = [
   { key: 'activityLogs',    label: 'ActivityLog',    model: ActivityLog },
   { key: 'orderCounters',   label: 'OrderCounter',   model: OrderCounter },
   { key: 'tokenBlacklists', label: 'TokenBlacklist', model: TokenBlacklist },
+  { key: 'coupons',         label: 'Coupon',         model: Coupon },
+  { key: 'promotions',      label: 'Promotion',      model: Promotion },
+  { key: 'savedLists',      label: 'SavedList',      model: SavedList },
+  { key: 'customerAlerts',  label: 'CustomerAlert',  model: CustomerAlert },
+  { key: 'priceLogs',       label: 'PriceLog',       model: PriceLog },
 ];
+
+// Collections introduced in BACKUP_VERSION 3. Backups taken on an older
+// version never wrote these keys — restoring one must not fail validation
+// just because it predates these models existing.
+const V3_COLLECTION_KEYS = new Set([
+  'globalSettings', 'coupons', 'promotions', 'savedLists', 'customerAlerts', 'priceLogs',
+]);
 
 let storagePrepared = false;
 let restoreInProgress = false;
@@ -305,6 +324,15 @@ const decodeBackupBuffer = async (buffer, originalName = '') => {
     parsed = EJSON.parse(jsonBuffer.toString('utf8'));
   } catch {
     throw new AppError('Backup file is not valid JSON', 400, 'INVALID_BACKUP_FILE');
+  }
+
+  // Backups older than v3 predate the Coupon/Promotion/SavedList/CustomerAlert/
+  // PriceLog/GlobalSettings collections and never wrote those keys — backfill
+  // them as empty before shape validation so old backups still restore cleanly.
+  if ((parsed.meta?.version ?? 1) < 3 && parsed.data) {
+    for (const key of V3_COLLECTION_KEYS) {
+      if (!Array.isArray(parsed.data[key])) parsed.data[key] = [];
+    }
   }
 
   validateSnapshotShape(parsed);

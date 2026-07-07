@@ -957,7 +957,16 @@ const cancel = async (orderId, userId) => {
       throw new AppError('You can only cancel your own orders', 403, 'FORBIDDEN');
     }
 
-    validateTransition(order.status, ORDER_STATUSES.CANCELLED);
+    // Customers may only self-cancel while pending — once approved, staff have
+    // started fulfilling it, so cancellation past that point goes through admin
+    // (updateStatus, which allows cancelled from any non-terminal stage).
+    if (order.status !== ORDER_STATUSES.PENDING) {
+      throw new AppError(
+        `Cannot cancel an order that is already "${order.status}". Please contact us to cancel.`,
+        400,
+        'INVALID_STATUS_TRANSITION'
+      );
+    }
 
     order.status = ORDER_STATUSES.CANCELLED;
     order.statusHistory.push({
