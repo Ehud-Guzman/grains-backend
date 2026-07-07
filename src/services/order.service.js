@@ -88,11 +88,11 @@ const buildOrderItems = async (cartItems, options = {}) => {
     }
 
     // Apply volume pricing tier if configured
-    let unitPrice = packaging.priceKES;
+    let unitPrice = round2(packaging.priceKES);
     if (packaging.pricingTiers?.length > 0) {
       const sorted = [...packaging.pricingTiers].sort((a, b) => b.minQty - a.minQty);
       const tier = sorted.find(t => item.quantity >= t.minQty);
-      if (tier) unitPrice = tier.priceKES;
+      if (tier) unitPrice = round2(tier.priceKES);
     }
     const lineTotal = round2(unitPrice * item.quantity);
     subtotal += lineTotal;
@@ -319,6 +319,12 @@ const autoCancelExpiredPendingOrders = async (branchId) => {
       await order.save({ session });
       await session.commitTransaction();
 
+      // A PENDING order can already be PAID — order.status only advances to
+      // APPROVED on admin action, but an M-Pesa STK payment can succeed while
+      // an order still sits PENDING awaiting approval (handleCallback never
+      // touches order.status). Same gap as reject()/cancel() — see refundPaymentIfPaid.
+      await refundPaymentIfPaid(order, actorId, order.userId ? 'customer' : 'guest', note);
+
       await activityLogService.log({
         actorId,
         actorRole: order.userId ? 'customer' : 'guest',
@@ -329,7 +335,8 @@ const autoCancelExpiredPendingOrders = async (branchId) => {
         detail: {
           orderRef: order.orderRef,
           automatic: true,
-          reason: 'AUTO_CANCEL_EXPIRED_PENDING'
+          reason: 'AUTO_CANCEL_EXPIRED_PENDING',
+          ...(order.couponCode && { couponCode: order.couponCode, couponUsageReleased: true })
         }
       });
     } catch (err) {
@@ -414,7 +421,7 @@ const createGuestOrder = async (orderData, branchId) => {
   // so an exempt (e.g. by-product) line isn't taxed just because a discount was applied elsewhere.
   const discountShare = subtotal > 0 ? taxableSubtotal / subtotal : 0;
   const vatBase    = Math.max(0, taxableSubtotal - couponDiscount * discountShare);
-  const vatAmount  = vatEnabled ? Math.round(vatBase * vatRate / 100) : 0;
+  const vatAmount  = vatEnabled ? round2(vatBase * vatRate / 100) : 0;
 
   const preferredDriverId = await resolvePreferredDriver(orderData.preferredDriverId, branchId);
   const total = round2(Math.max(0, subtotal + deliveryFee + vatAmount - couponDiscount));
@@ -486,7 +493,10 @@ const createGuestOrder = async (orderData, branchId) => {
       branchId,
       targetId: order._id,
       targetType: 'Order',
-      detail: { orderRef, total: order.total, itemCount: items.length, stockReserved: true }
+      detail: {
+        orderRef, total: order.total, itemCount: items.length, stockReserved: true,
+        ...(couponCode && { couponCode, couponDiscount })
+      }
     });
 
     appEvents.emit(ORDER_EVENTS.PLACED, { order, branchId });
@@ -547,7 +557,7 @@ const createCustomerOrder = async (orderData, userId, branchId) => {
   // so an exempt (e.g. by-product) line isn't taxed just because a discount was applied elsewhere.
   const discountShare = subtotal > 0 ? taxableSubtotal / subtotal : 0;
   const vatBase    = Math.max(0, taxableSubtotal - couponDiscount * discountShare);
-  const vatAmount  = vatEnabled ? Math.round(vatBase * vatRate / 100) : 0;
+  const vatAmount  = vatEnabled ? round2(vatBase * vatRate / 100) : 0;
 
   const preferredDriverId = await resolvePreferredDriver(orderData.preferredDriverId, branchId);
   const total = round2(Math.max(0, subtotal + deliveryFee + vatAmount - couponDiscount));
@@ -606,7 +616,10 @@ const createCustomerOrder = async (orderData, userId, branchId) => {
       branchId,
       targetId: order._id,
       targetType: 'Order',
-      detail: { orderRef, total: order.total, itemCount: items.length, stockReserved: true }
+      detail: {
+        orderRef, total: order.total, itemCount: items.length, stockReserved: true,
+        ...(couponCode && { couponCode, couponDiscount })
+      }
     });
 
     appEvents.emit(ORDER_EVENTS.PLACED, { order, branchId });
@@ -884,7 +897,10 @@ const reject = async (orderId, adminId, reason, branchId, actorRole = 'superviso
       branchId: order.branchId,
       targetId: order._id,
       targetType: 'Order',
-      detail: { orderRef: order.orderRef, reason, stockReleased: true }
+      detail: {
+        orderRef: order.orderRef, reason, stockReleased: true,
+        ...(order.couponCode && { couponCode: order.couponCode, couponUsageReleased: true })
+      }
     });
 
     appEvents.emit(ORDER_EVENTS.REJECTED, { order, branchId: order.branchId });
@@ -983,7 +999,10 @@ const updateStatus = async (orderId, newStatus, adminId, note = null, branchId, 
         orderRef: order.orderRef,
         newStatus,
         note,
-        stockReleased: newStatus === ORDER_STATUSES.CANCELLED
+        stockReleased: newStatus === ORDER_STATUSES.CANCELLED,
+        ...(newStatus === ORDER_STATUSES.CANCELLED && order.couponCode && {
+          couponCode: order.couponCode, couponUsageReleased: true
+        })
       }
     });
 
@@ -1056,7 +1075,10 @@ const cancel = async (orderId, userId) => {
       branchId: order.branchId,
       targetId: order._id,
       targetType: 'Order',
-      detail: { orderRef: order.orderRef, stockReleased: true }
+      detail: {
+        orderRef: order.orderRef, stockReleased: true,
+        ...(order.couponCode && { couponCode: order.couponCode, couponUsageReleased: true })
+      }
     });
 
     return order;

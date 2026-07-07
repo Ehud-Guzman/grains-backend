@@ -443,10 +443,32 @@ const restoreBackup = async ({ file, confirmation, actorId, actorRole, ip }) => 
   settingsService.invalidateCache();
   globalSettingsService.invalidateCache();
 
+  const FINANCIAL_COLLECTIONS = new Set(['orders', 'payments', 'coupons', 'priceLogs']);
+  const financialWriteErrors = writeErrors.filter(e => FINANCIAL_COLLECTIONS.has(e.collection));
+
   if (writeErrors.length > 0) {
     logger.warn('[backup] Restore completed with partial write errors', {
       summary: writeErrors.map(e => `${e.collection}: ${e.inserted}/${e.total} inserted`).join(', ')
     });
+  }
+
+  // Financial-record loss on restore is a distinct, higher-urgency alert from the
+  // routine "a restore happened" notification below — writeErrors alone only
+  // reaches the admin who's looking at this API response/UI, not whoever monitors
+  // the alert channel.
+  if (financialWriteErrors.length > 0) {
+    alertService.sendAlert(
+      'BACKUP_RESTORE_DATA_LOSS',
+      {
+        'Actor ID': String(actorId),
+        'Actor role': actorRole,
+        'Restored file': file.originalname || 'uploaded-backup',
+        'Pre-restore backup': preRestoreBackup.id,
+        'Financial records lost': financialWriteErrors
+          .map(e => `${e.collection}: ${e.failed}/${e.total}`).join(', '),
+      },
+      String(actorId)
+    ).catch(() => {});
   }
 
   await ActivityLog.create({

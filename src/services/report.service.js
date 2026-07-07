@@ -12,6 +12,20 @@ const { NAIROBI_TZ, startOfDayEAT, endOfDayEAT, startOfMonthEAT } = require('../
 const startOfDay = startOfDayEAT;
 const endOfDay = endOfDayEAT;
 
+// Revenue is counted from approved onwards — pending orders aren't committed yet,
+// and cancelled/rejected orders never appear here. Used consistently across every
+// report that reports "revenue"/"spend" so figures reconcile with each other —
+// previously several reports (customer report/statement, margin, avg order value)
+// only counted 'completed', silently producing numbers that didn't match the
+// sales dashboard for the same period.
+const REVENUE_STATUSES = ['approved', 'preparing', 'out_for_delivery', 'completed'];
+
+// eTIMS only fiscalises orders once they reach out_for_delivery/completed (see
+// etims.service.js submitInvoice's invoiceable-state check) — the VAT report is a
+// KRA filing aid, so it must match exactly what's actually been reported to KRA,
+// not the broader REVENUE_STATUSES used for merchandising figures.
+const VAT_INVOICEABLE_STATUSES = ['out_for_delivery', 'completed'];
+
 const getDateRange = (period, from, to) => {
   const now = new Date();
   if (from && to) return { start: new Date(from), end: new Date(to) };
@@ -49,8 +63,6 @@ const getDashboardKPIs = async (branchId) => {
   const branchFilter = branchId ? { branchId: new mongoose.Types.ObjectId(String(branchId)) } : {};
 
   const ACTIVE_STATUSES = ['pending', 'approved', 'preparing', 'out_for_delivery', 'completed'];
-  // Revenue is counted from approved onwards — pending orders aren't committed yet
-  const REVENUE_STATUSES = ['approved', 'preparing', 'out_for_delivery', 'completed'];
 
   const [
     ordersToday,
@@ -137,8 +149,6 @@ const getSalesReport = async (period, from, to, branchId) => {
   const { start, end } = getDateRange(period, from, to);
   const branchFilter = branchId ? { branchId: new mongoose.Types.ObjectId(String(branchId)) } : {};
 
-  const REVENUE_STATUSES = ['approved', 'preparing', 'out_for_delivery', 'completed'];
-
   const [summary, byCategory, byDay, orderVolume] = await Promise.all([
     // Overall summary
     Order.aggregate([
@@ -154,10 +164,26 @@ const getSalesReport = async (period, from, to, branchId) => {
       }
     ]),
 
-    // Revenue by product category
+    // Revenue by product category — net of proportionally-shared coupon discount
+    // (see getMarginReport's netRevenue comment) so this reconciles with summary.totalRevenue
     Order.aggregate([
       { $match: { ...branchFilter, status: { $in: REVENUE_STATUSES }, createdAt: { $gte: start, $lte: end } } },
       { $unwind: '$orderItems' },
+      {
+        $addFields: {
+          'orderItems.netRevenue': {
+            $subtract: [
+              '$orderItems.lineTotal',
+              {
+                $multiply: [
+                  { $cond: [{ $gt: ['$subtotal', 0] }, { $divide: ['$orderItems.lineTotal', '$subtotal'] }, 0] },
+                  { $ifNull: ['$couponDiscount', 0] },
+                ],
+              },
+            ],
+          },
+        },
+      },
       {
         $lookup: {
           from: 'products',
@@ -170,7 +196,7 @@ const getSalesReport = async (period, from, to, branchId) => {
       {
         $group: {
           _id: '$product.category',
-          revenue: { $sum: '$orderItems.lineTotal' },
+          revenue: { $sum: '$orderItems.netRevenue' },
           unitsSold: { $sum: '$orderItems.quantity' },
           orderCount: { $sum: 1 }
         }
@@ -244,11 +270,25 @@ const getBestSellers = async (period, from, to, limit = 10, branchId) => {
   const { start, end } = getDateRange(period, from, to);
   const branchFilter = branchId ? { branchId: new mongoose.Types.ObjectId(String(branchId)) } : {};
 
-  const REVENUE_STATUSES = ['approved', 'preparing', 'out_for_delivery', 'completed'];
-
   const results = await Order.aggregate([
     { $match: { ...branchFilter, status: { $in: REVENUE_STATUSES }, createdAt: { $gte: start, $lte: end } } },
     { $unwind: '$orderItems' },
+    // Net-of-discount revenue — see getMarginReport's netRevenue comment
+    {
+      $addFields: {
+        'orderItems.netRevenue': {
+          $subtract: [
+            '$orderItems.lineTotal',
+            {
+              $multiply: [
+                { $cond: [{ $gt: ['$subtotal', 0] }, { $divide: ['$orderItems.lineTotal', '$subtotal'] }, 0] },
+                { $ifNull: ['$couponDiscount', 0] },
+              ],
+            },
+          ],
+        },
+      },
+    },
     {
       $group: {
         _id: {
@@ -258,7 +298,7 @@ const getBestSellers = async (period, from, to, limit = 10, branchId) => {
           packaging: '$orderItems.packaging'
         },
         unitsSold: { $sum: '$orderItems.quantity' },
-        revenue: { $sum: '$orderItems.lineTotal' },
+        revenue: { $sum: '$orderItems.netRevenue' },
         orderCount: { $sum: 1 }
       }
     },
@@ -316,7 +356,10 @@ const getSlowMovers = async (days = 30, branchId) => {
 };
 
 // ── STOCK VALUATION ───────────────────────────────────────────────────────────
-// UX B5 - current stock × price per size = estimated stock value
+// UX B5 - current stock × cost price per size = estimated stock value (at cost,
+// not retail — retail would bake the full margin into "money tied up in inventory").
+// Falls back to priceKES per-row when costPriceKES isn't set, flagged via
+// usedRetailFallback so the totals' completeness is visible rather than silently mixed.
 const getStockValuation = async (branchId) => {
   const filter = { isActive: true };
   if (branchId) filter.branchId = branchId;
@@ -326,20 +369,25 @@ const getStockValuation = async (branchId) => {
 
   const rows = [];
   let totalValue = 0;
+  let rowsMissingCostPrice = 0;
 
   for (const product of products) {
     for (const variety of product.varieties) {
       for (const pkg of variety.packaging) {
         if (pkg.quoteOnly || !pkg.priceKES) continue;
-        const value = pkg.stock * pkg.priceKES;
+        const usedRetailFallback = !pkg.costPriceKES;
+        const unitValue = usedRetailFallback ? pkg.priceKES : pkg.costPriceKES;
+        const value = pkg.stock * unitValue;
         totalValue += value;
+        if (usedRetailFallback) rowsMissingCostPrice += 1;
         rows.push({
           productName: product.name,
           category: product.category,
           varietyName: variety.varietyName,
           packagingSize: pkg.size,
           stock: pkg.stock,
-          priceKES: pkg.priceKES,
+          unitValueKES: unitValue,
+          usedRetailFallback,
           totalValueKES: value
         });
       }
@@ -352,7 +400,8 @@ const getStockValuation = async (branchId) => {
   return {
     rows,
     totalStockValueKES: totalValue,
-    itemCount: rows.length
+    itemCount: rows.length,
+    rowsMissingCostPrice
   };
 };
 
@@ -365,8 +414,6 @@ const getStockTurnoverReport = async (period, from, to, branchId) => {
   const { start, end } = getDateRange(period, from, to);
   const branchFilter = branchId ? { branchId: new mongoose.Types.ObjectId(String(branchId)) } : {};
   const periodDays = Math.max(1, Math.round((end - start) / (24 * 60 * 60 * 1000)));
-
-  const REVENUE_STATUSES = ['approved', 'preparing', 'out_for_delivery', 'completed'];
 
   const sold = await Order.aggregate([
     { $match: { ...branchFilter, status: { $in: REVENUE_STATUSES }, createdAt: { $gte: start, $lte: end } } },
@@ -465,7 +512,7 @@ const getCustomerReport = async (branchId) => {
   const branchFilter = branchId ? { branchId: new mongoose.Types.ObjectId(String(branchId)) } : {};
 
   const stats = await Order.aggregate([
-    { $match: { ...branchFilter, status: 'completed', userId: { $ne: null } } },
+    { $match: { ...branchFilter, status: { $in: REVENUE_STATUSES }, userId: { $ne: null } } },
     {
       $group: {
         _id: '$userId',
@@ -563,7 +610,7 @@ const getOrdersByStatus = async (period, from, to, branchId) => {
 
     // Average order value
     Order.aggregate([
-      { $match: { ...branchFilter, status: 'completed', createdAt: { $gte: start, $lte: end } } },
+      { $match: { ...branchFilter, status: { $in: REVENUE_STATUSES }, createdAt: { $gte: start, $lte: end } } },
       { $group: { _id: null, avg: { $avg: '$total' } } }
     ])
   ]);
@@ -582,11 +629,17 @@ const getOrdersByStatus = async (period, from, to, branchId) => {
 const toCSV = (data, columns) => {
   if (!data || data.length === 0) return columns.map(c => c.label).join(',') + '\n';
 
+  // Formula-injection guard: a cell starting with =/+/-/@ is interpreted as a
+  // formula by Excel/Sheets when the CSV is opened. Several columns here come
+  // from user-controlled text (product/customer/driver names, adjustment reason
+  // strings) — prefix with a literal-text apostrophe so it renders as data, not code.
+  const escapeCsvCell = (str) => /^[=+\-@]/.test(str) ? `'${str}` : str;
+
   const header = columns.map(c => `"${c.label}"`).join(',');
   const rows = data.map(row =>
     columns.map(c => {
       const val = c.key.split('.').reduce((obj, k) => obj?.[k], row);
-      const str = val === null || val === undefined ? '' : String(val);
+      const str = val === null || val === undefined ? '' : escapeCsvCell(String(val));
       return `"${str.replace(/"/g, '""')}"`;
     }).join(',')
   );
@@ -870,11 +923,30 @@ const getMarginReport = async (period, from, to, branchId) => {
     {
       $match: {
         ...branchFilter,
-        status: { $in: ['completed'] },
+        status: { $in: REVENUE_STATUSES },
         createdAt: { $gte: start, $lte: end },
       },
     },
     { $unwind: '$orderItems' },
+    // Net-of-discount revenue per line: couponDiscount is order-level, shared
+    // proportionally by each item's share of the order subtotal — same allocation
+    // order.service.js/etims.service.js use — so this reconciles with order.total
+    // instead of overstating revenue on orders where a coupon was applied.
+    {
+      $addFields: {
+        'orderItems.netRevenue': {
+          $subtract: [
+            '$orderItems.lineTotal',
+            {
+              $multiply: [
+                { $cond: [{ $gt: ['$subtotal', 0] }, { $divide: ['$orderItems.lineTotal', '$subtotal'] }, 0] },
+                { $ifNull: ['$couponDiscount', 0] },
+              ],
+            },
+          ],
+        },
+      },
+    },
     {
       $group: {
         _id: {
@@ -884,7 +956,7 @@ const getMarginReport = async (period, from, to, branchId) => {
           packaging:   '$orderItems.packaging',
         },
         unitsSold: { $sum: '$orderItems.quantity' },
-        revenue:   { $sum: '$orderItems.lineTotal' },
+        revenue:   { $sum: '$orderItems.netRevenue' },
         unitPrice: { $first: '$orderItems.unitPrice' },
       },
     },
@@ -1079,7 +1151,7 @@ const getVatReport = async (period, from, to, branchId) => {
     {
       $match: {
         ...branchFilter,
-        status: 'completed',
+        status: { $in: VAT_INVOICEABLE_STATUSES },
         vatEnabled: true,
         createdAt: { $gte: start, $lte: end },
       },
@@ -1134,7 +1206,7 @@ const getCustomerStatement = async (userId, period, from, to, branchId) => {
   const orders = await Order.find({
     ...branchFilter,
     userId,
-    status: 'completed',
+    status: { $in: REVENUE_STATUSES },
     createdAt: { $gte: start, $lte: end },
   })
     .select('orderRef createdAt subtotal deliveryFee vatAmount couponDiscount total paymentMethod paymentStatus')

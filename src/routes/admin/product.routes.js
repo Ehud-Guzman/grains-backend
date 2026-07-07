@@ -112,6 +112,9 @@ router.get('/', requireMinRole('admin'), productController.getAllAdmin);
 // GET /api/admin/products/:id
 router.get('/:id', requireMinRole('admin'), productController.getById);
 
+// GET /api/admin/products/:id/price-log — branch-scoped price-change audit trail
+router.get('/:id/price-log', requireMinRole('admin'), productController.getPriceHistoryAdmin);
+
 // ── WRITE (superadmin CANNOT perform) ────────────────────────────────────────
 
 // POST /api/admin/products

@@ -6,6 +6,8 @@ const { LOG_ACTIONS } = require('../utils/constants');
 const { AppError } = require('../middleware/errorHandler.middleware');
 const { invalidateCache } = require('./product.service');
 const { normalizeImageUrls } = require('../utils/imageUrl');
+const priceLogService = require('./priceLog.service');
+const logger = require('../utils/logger');
 
 const HEADER_ROW = [
   'Product Name *',
@@ -442,12 +444,45 @@ const importProducts = async (fileBuffer, adminId, options = {}) => {
           if (!dryRun) {
             const mergedImages = mergeUniqueStrings(existing.imageURLs, productData.imageURLs);
             const mergedVarieties = buildMergedVarieties(existing.varieties, varieties);
+
+            // Snapshot old prices before mutation so a bulk-import price change is
+            // logged to PriceLog the same way a single-product admin edit is —
+            // otherwise mass repricing via import leaves no audit trail at all.
+            const oldPriceMap = {};
+            for (const v of (existing.varieties || [])) {
+              for (const pkg of (v.packaging || [])) {
+                oldPriceMap[`${v.varietyName}::${pkg.size}`] = pkg.priceKES;
+              }
+            }
+
             await Product.findByIdAndUpdate(existing._id, {
               ...payload,
               imageURLs: mergedImages,
               varieties: mergedVarieties,
               updatedAt: new Date()
             }, { runValidators: true });
+
+            for (const v of mergedVarieties) {
+              for (const pkg of (v.packaging || [])) {
+                const key = `${v.varietyName}::${pkg.size}`;
+                const oldPrice = oldPriceMap[key];
+                if (oldPrice !== undefined && oldPrice !== pkg.priceKES && pkg.priceKES > 0) {
+                  priceLogService.logChange({
+                    productId: existing._id,
+                    branchId: branch._id,
+                    varietyName: v.varietyName,
+                    packaging: pkg.size,
+                    oldPrice,
+                    newPrice: pkg.priceKES,
+                    changedBy: adminId,
+                    seasonTag: null,
+                  }).catch(err => logger.error('[priceLog] Failed to log bulk-import price change', {
+                    productId: existing._id, err: err.message
+                  }));
+                }
+              }
+            }
+
             await activityLogService.log({
               actorId: adminId,
               actorRole,

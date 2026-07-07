@@ -33,7 +33,7 @@ const setAvailability = async (req, res, next) => {
 const getMyOrders = async (req, res, next) => {
   try {
     const pagination = { page: req.query.page, limit: req.query.limit };
-    const result = await driverService.getMyOrders(req.user.id, req.query, pagination);
+    const result = await driverService.getMyOrders(req.user.id, req.query, pagination, req.branchId);
     return paginated(res, result.orders, result.pagination);
   } catch (err) { next(err); }
 };

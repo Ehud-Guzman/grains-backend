@@ -105,6 +105,14 @@ const addImagesToProduct = async (productId, urls, branchId) => {
   return productService.addImages(productId, urls, branchId);
 };
 
+// ── ADMIN: PRICE HISTORY (audit trail — branch-scoped, includes changedBy) ────
+const getPriceHistoryAdmin = async (req, res, next) => {
+  try {
+    const history = await priceLogService.getHistoryAdmin(req.params.id, req.branchId);
+    return success(res, history);
+  } catch (err) { next(err); }
+};
+
 // ── PRICE HISTORY (public — for chart on product detail page) ─────────────────
 const getPriceHistory = async (req, res, next) => {
   try {
@@ -147,6 +155,7 @@ module.exports = {
   duplicate,
   deleteProduct,
   addImagesToProduct,
+  getPriceHistoryAdmin,
   getPriceHistory,
   getPriceChanges,
   getBestTimeBadge,

@@ -33,9 +33,14 @@ const validate = async (code, branchId, userId, subtotal) => {
     );
   }
 
+  // Cent precision (not whole-KES rounding) so this matches subtotal/lineTotal's
+  // own precision — rounding to the shilling here made vatAmount/couponDiscount
+  // drift from a cents-aware recomputation by up to ~0.5 KES per order, which
+  // compounded in aggregate reporting/eTIMS reconciliation.
+  const round2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
   const discountAmount = coupon.discountType === 'percentage'
-    ? Math.round(subtotal * Math.min(coupon.discountValue, 100) / 100)
-    : Math.round(Math.min(coupon.discountValue, subtotal));
+    ? round2(subtotal * Math.min(coupon.discountValue, 100) / 100)
+    : round2(Math.min(coupon.discountValue, subtotal));
 
   return { coupon, discountAmount };
 };

@@ -44,36 +44,57 @@ const buildPayload = (order, tin, bhfId) => {
   const cfmDt  = now.toISOString().replace(/[-:T.Z]/g, '').slice(0, 14); // YYYYMMDDHHmmss
   const salesDt = new Date(order.createdAt).toISOString().slice(0, 10).replace(/-/g, ''); // YYYYMMDD
 
-  // VAT is only owed on taxable lines (e.g. by-products are exempt) — allocate
-  // order.vatAmount across taxable items only, largest-remainder on the last one.
-  const taxableItemsTotal = order.orderItems
-    .filter(item => item.taxable !== false)
-    .reduce((sum, item) => sum + item.lineTotal, 0);
-  const lastTaxableIdx = order.orderItems.reduce(
-    (lastIdx, item, idx) => (item.taxable !== false ? idx : lastIdx), -1
+  // Allocate couponDiscount and vatAmount across items to the cent using the
+  // largest-remainder (Hamilton) method: floor each item's proportional share,
+  // then hand out the leftover cents one at a time to the items with the largest
+  // fractional remainder. This keeps sum(itemDiscounts) === couponDiscount and
+  // sum(itemTaxes) === vatAmount exactly, while bounding any single item's
+  // rounding overshoot to at most 1 cent — unlike dumping the whole remainder on
+  // an arbitrary "last" item, which could push that item's discount past its own
+  // lineTotal (producing a negative taxable base) or its tax far from
+  // taxblAmt × rate on orders with many lines.
+  const items = order.orderItems;
+  const isTaxableItem = item => item.taxable !== false;
+
+  // ── Discount allocation ──
+  const discRawCents = items.map(item => (subtotal > 0 ? couponDiscount * (item.lineTotal / subtotal) * 100 : 0));
+  const discFlooredCents = discRawCents.map(Math.floor);
+  let discRemainderCents = Math.round(couponDiscount * 100) - discFlooredCents.reduce((a, b) => a + b, 0);
+  const discOrder = items
+    .map((_, idx) => idx)
+    .sort((a, b) => (discRawCents[b] - discFlooredCents[b]) - (discRawCents[a] - discFlooredCents[a]));
+  const itemDiscountCents = [...discFlooredCents];
+  for (let i = 0; i < discRemainderCents && i < discOrder.length; i++) itemDiscountCents[discOrder[i]] += 1;
+  const itemDiscounts = itemDiscountCents.map(c => c / 100);
+
+  // Post-discount taxable base per item (defensive floor — largest-remainder keeps
+  // per-item overshoot to ≤1 cent, so this should never actually clamp in practice).
+  const taxblAmts = items.map((item, idx) => Math.max(0, Math.round((item.lineTotal - itemDiscounts[idx]) * 100) / 100));
+
+  // ── Tax allocation — shared by post-discount taxable base, not gross lineTotal,
+  // so it tracks the same base order.vatAmount was itself computed from. ──
+  const taxableBaseTotal = items.reduce((sum, item, idx) => sum + (isTaxableItem(item) ? taxblAmts[idx] : 0), 0);
+  const taxEnabled = vatEnabled && vatRate > 0;
+  const taxRawCents = items.map((item, idx) =>
+    (taxEnabled && isTaxableItem(item) && taxableBaseTotal > 0)
+      ? vatAmount * (taxblAmts[idx] / taxableBaseTotal) * 100
+      : 0
   );
+  const taxFlooredCents = taxRawCents.map(Math.floor);
+  let taxRemainderCents = taxEnabled ? Math.round(vatAmount * 100) - taxFlooredCents.reduce((a, b) => a + b, 0) : 0;
+  const taxOrder = items
+    .map((_, idx) => idx)
+    .filter(idx => isTaxableItem(items[idx]))
+    .sort((a, b) => (taxRawCents[b] - taxFlooredCents[b]) - (taxRawCents[a] - taxFlooredCents[a]));
+  const itemTaxCents = [...taxFlooredCents];
+  for (let i = 0; i < taxRemainderCents && i < taxOrder.length; i++) itemTaxCents[taxOrder[i]] += 1;
+  const itemTaxes = itemTaxCents.map(c => c / 100);
 
-  let allocatedDiscount = 0;
-  let allocatedTax = 0;
-
-  const itemList = order.orderItems.map((item, idx) => {
-    const isLast = idx === order.orderItems.length - 1;
-    const isTaxable = item.taxable !== false;
-    const share = subtotal > 0 ? item.lineTotal / subtotal : 0;
-
-    const itemDiscount = isLast
-      ? Math.round((couponDiscount - allocatedDiscount) * 100) / 100
-      : Math.round(couponDiscount * share * 100) / 100;
-    allocatedDiscount += itemDiscount;
-
-    const taxblAmt = Math.max(0, Math.round((item.lineTotal - itemDiscount) * 100) / 100);
-
-    const taxShare = taxableItemsTotal > 0 ? item.lineTotal / taxableItemsTotal : 0;
-    const itemTax = vatEnabled && vatRate > 0 && isTaxable
-      ? (idx === lastTaxableIdx ? Math.round((vatAmount - allocatedTax) * 100) / 100 : Math.round(vatAmount * taxShare * 100) / 100)
-      : 0;
-    allocatedTax += itemTax;
-
+  const itemList = items.map((item, idx) => {
+    const isTaxable = isTaxableItem(item);
+    const itemDiscount = itemDiscounts[idx];
+    const taxblAmt = taxblAmts[idx];
+    const itemTax = itemTaxes[idx];
     const dcRt = item.lineTotal > 0 ? Math.round((itemDiscount / item.lineTotal) * 10000) / 100 : 0;
 
     return {
@@ -89,7 +110,7 @@ const buildPayload = (order, tin, bhfId) => {
       dcRt,
       dcAmt:     itemDiscount,
       taxblAmt,
-      taxTyCd:   vatEnabled && vatRate > 0 && isTaxable ? 'B' : 'E', // B = 16% VAT, E = exempt
+      taxTyCd:   taxEnabled && isTaxable ? 'B' : 'E', // B = 16% VAT, E = exempt
       taxAmt:    itemTax,
       totAmt:    Math.round((taxblAmt + itemTax) * 100) / 100,
     };
@@ -197,7 +218,24 @@ const submitInvoice = async (orderId) => {
     return;
   }
 
-  await Order.findByIdAndUpdate(orderId, { etimsStatus: 'pending' });
+  // Atomic claim: the checks above are read-then-act and can race (the 30-min
+  // retry job firing at the same moment as a manual admin resubmit, or a
+  // double-click), which would otherwise submit the same order to KRA twice.
+  // Only the invocation whose findOneAndUpdate actually matches (i.e. wins the
+  // race) proceeds — a second concurrent caller's filter fails once the first
+  // has already flipped etimsStatus to 'pending'.
+  const claimed = await Order.findOneAndUpdate(
+    {
+      _id: orderId,
+      etimsStatus: { $nin: ['submitted', 'pending'] },
+      $or: [{ etimsInvoiceNumber: null }, { etimsInvoiceNumber: '' }, { etimsInvoiceNumber: { $exists: false } }],
+    },
+    { $set: { etimsStatus: 'pending' } }
+  );
+  if (!claimed) {
+    logger.info('[eTIMS] Skipping — already claimed/submitted by a concurrent invocation', { orderId, orderRef: order.orderRef });
+    return;
+  }
 
   try {
     const payload  = buildPayload(order, tin, bhfId);

@@ -8,6 +8,7 @@ const { normalizeImageUrls } = require('../utils/imageUrl');
 const { deleteImages } = require('./upload.service');
 const priceLogService = require('./priceLog.service');
 const { appEvents, PRICE_EVENTS, STOCK_EVENTS } = require('../events/appEvents');
+const logger = require('../utils/logger');
 
 const exposePublicStockFields = (product) => product;
 
@@ -61,7 +62,7 @@ const getAll = async (filters = {}, query = {}, branchId) => {
   const [total, products] = await Promise.all([
     Product.countDocuments(matchStage),
     Product.find(matchStage)
-      .select('name category description imageURLs isActive varieties')
+      .select('name category description imageURLs isActive taxable varieties')
       .sort(filters.search ? { score: { $meta: 'textScore' } } : { createdAt: -1 })
       .skip(skip)
       .limit(limit)
@@ -212,16 +213,21 @@ const update = async (productId, data, adminId, branchId, actorRole = 'admin') =
       const key = `${v.varietyName}::${pkg.size}`;
       const oldPrice = oldPriceMap[key];
       if (oldPrice !== undefined && oldPrice !== pkg.priceKES && pkg.priceKES > 0) {
+        // Use the product's own branchId, not the acting admin's — superadmin
+        // tokens carry branchId: null, which would otherwise fail PriceLog's
+        // required branchId validation and silently drop the audit entry.
         priceLogService.logChange({
           productId: product._id,
-          branchId,
+          branchId: product.branchId,
           varietyName: v.varietyName,
           packaging: pkg.size,
           oldPrice,
           newPrice: pkg.priceKES,
           changedBy: adminId,
           seasonTag,
-        }).catch(() => {});
+        }).catch(err => logger.error('[priceLog] Failed to log price change', {
+          productId: product._id, err: err.message
+        }));
 
         appEvents.emit(PRICE_EVENTS.CHANGED, {
           productId: product._id,

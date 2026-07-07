@@ -22,6 +22,21 @@ const getHistory = async (productId, { varietyName, packaging } = {}) => {
     .lean();
 };
 
+// ── ADMIN: GET PRICE HISTORY FOR A PRODUCT (BRANCH-SCOPED) ───────────────────
+// Unlike getHistory (the public "best time to buy" lookup), this is branch-scoped
+// so a branch admin can't read another branch's PriceLog entries for the same
+// product name, and includes the changedBy actor for audit purposes.
+const getHistoryAdmin = async (productId, branchId) => {
+  const filter = { productId };
+  if (branchId) filter.branchId = branchId;
+
+  return PriceLog.find(filter)
+    .populate('changedBy', 'name role')
+    .sort({ changedAt: -1 })
+    .limit(200)
+    .lean();
+};
+
 // ── BEST-TIME-TO-BUY BADGE ────────────────────────────────────────────────────
 // Returns { isBestTime, avg90d, currentPrice, percentBelow } for a specific packaging.
 // "Best time" = current price is at least 5 % below the 90-day average.
@@ -95,4 +110,4 @@ const getBatchPriceChanges = async (productIds) => {
   return out;
 };
 
-module.exports = { logChange, getHistory, getBestTimeBadge, getBatchPriceChanges };
+module.exports = { logChange, getHistory, getHistoryAdmin, getBestTimeBadge, getBatchPriceChanges };

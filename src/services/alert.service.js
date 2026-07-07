@@ -39,6 +39,7 @@ const THROTTLE_MS = {
   ROLE_VIOLATION:     15 * 60 * 1000,   // 15 min per userId+route
   SERVER_ERROR:        5 * 60 * 1000,   //  5 min global counter window
   BACKUP_RESTORED:     0,               // always send
+  BACKUP_RESTORE_DATA_LOSS: 0,          // always send
 };
 
 // SERVER_ERROR is counter-based: send the alert only after this many errors
@@ -81,6 +82,11 @@ const ALERT_CONFIG = {
     severity: 'high',
     title: 'System Backup Restore Executed',
     sms: (d) => `[SECURITY] DB backup restored by ${d['Actor role']} (${d['Actor ID']}). Database was fully reloaded.`,
+  },
+  BACKUP_RESTORE_DATA_LOSS: {
+    severity: 'high',
+    title: 'Backup Restore Lost Financial Records',
+    sms: (d) => `[ALERT] Restore by ${d['Actor role']} dropped financial records: ${d['Financial records lost']}. Pre-restore backup: ${d['Pre-restore backup']}.`,
   },
 };
 

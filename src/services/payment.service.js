@@ -472,20 +472,25 @@ const manualConfirmPayment = async (orderId, adminId, transactionRef, actorRole 
       'RECEIVED_AMOUNT_REQUIRED'
     );
   }
-  if (Math.round(receivedAmount) < Math.round(order.total)) {
+  // Ceil, not round, to match the amount actually demanded on the M-Pesa side
+  // (Payment.amount is stored via Math.ceil(order.total) at STK-push time, and the
+  // callback checks paidAmount against that same ceiling) — using a looser rounding
+  // rule here could let a manual confirmation accept 1 KES less than M-Pesa would.
+  const expectedAmount = Math.ceil(order.total);
+  if (Math.round(receivedAmount) < expectedAmount) {
     throw new AppError(
-      `Received amount (KES ${Math.round(receivedAmount)}) is less than the order total (KES ${Math.round(order.total)}). Correct the amount or contact a supervisor.`,
+      `Received amount (KES ${Math.round(receivedAmount)}) is less than the order total (KES ${expectedAmount}). Correct the amount or contact a supervisor.`,
       400,
       isMpesa ? 'MPESA_AMOUNT_MISMATCH' : 'CASH_UNDERPAYMENT'
     );
   }
-  if (Math.round(receivedAmount) > Math.round(order.total)) {
+  if (Math.round(receivedAmount) > expectedAmount) {
     logger.warn('[MANUAL CONFIRM] Overpayment on manual confirmation — manual reconciliation required', {
       orderId:  order._id,
       method:   order.paymentMethod,
-      expected: order.total,
+      expected: expectedAmount,
       received: receivedAmount,
-      delta:    Math.round(receivedAmount) - Math.round(order.total)
+      delta:    Math.round(receivedAmount) - expectedAmount
     });
   }
 

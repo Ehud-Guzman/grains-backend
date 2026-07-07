@@ -219,10 +219,15 @@ const toggleAvailability = async (driverId, available) => {
 };
 
 // ── DRIVER'S OWN ORDERS (for driver portal) ───────────────────────────────────
-const getMyOrders = async (driverId, filters = {}, query = {}) => {
+const getMyOrders = async (driverId, filters = {}, query = {}, branchId = null) => {
   const { page, limit, skip } = paginate(query);
 
+  // Defense-in-depth: assignDriver() already only assigns drivers from the
+  // acting admin's own branch, so this shouldn't be reachable today — but
+  // without this filter here too, any future assignment path that skips that
+  // check would silently leak another branch's order totals/addresses to a driver.
   const match = { driverId };
+  if (branchId) match.branchId = branchId;
   if (filters.status) {
     match.status = filters.status;
   } else {
