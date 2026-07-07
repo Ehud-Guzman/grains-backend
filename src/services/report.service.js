@@ -28,7 +28,11 @@ const VAT_INVOICEABLE_STATUSES = ['out_for_delivery', 'completed'];
 
 const getDateRange = (period, from, to) => {
   const now = new Date();
-  if (from && to) return { start: new Date(from), end: new Date(to) };
+  // Callers (e.g. the customer-statement date pickers) send date-only strings
+  // like "2026-07-07" — new Date() parses that as UTC midnight (=03:00 EAT),
+  // so without snapping to EAT day boundaries the "to" date would cut off
+  // right after midnight, silently excluding almost the entire final day.
+  if (from && to) return { start: startOfDay(new Date(from)), end: endOfDay(new Date(to)) };
   if (period === 'today') return { start: startOfDay(now), end: endOfDay(now) };
   if (period === 'week') {
     const start = new Date(now);
@@ -122,9 +126,14 @@ const getDashboardKPIs = async (branchId) => {
     ])
   ]);
 
-  const paidFlow    = cashFlow.find(r => r._id === 'paid')    || { total: 0, count: 0 };
-  const unpaidFlow  = cashFlow.find(r => r._id === 'unpaid')  || { total: 0, count: 0 };
-  const partialFlow = cashFlow.find(r => r._id === 'partial') || { total: 0, count: 0 };
+  // Bucket by "paid" vs "everything else" rather than naming each non-paid
+  // paymentStatus explicitly — PAYMENT_STATUSES has unpaid/pending/paid/failed/refunded,
+  // and missing any of them here would silently drop that revenue from both
+  // tiles (previously happened to pending/failed/refunded orders).
+  const paidFlow = cashFlow.find(r => r._id === 'paid') || { total: 0, count: 0 };
+  const unpaidFlow = cashFlow
+    .filter(r => r._id !== 'paid')
+    .reduce((acc, r) => ({ total: acc.total + r.total, count: acc.count + r.count }), { total: 0, count: 0 });
 
   return {
     ordersToday,
@@ -136,8 +145,8 @@ const getDashboardKPIs = async (branchId) => {
     cashFlow: {
       paidRevenue:    paidFlow.total,
       paidOrders:     paidFlow.count,
-      unpaidRevenue:  unpaidFlow.total + partialFlow.total,
-      unpaidOrders:   unpaidFlow.count + partialFlow.count,
+      unpaidRevenue:  unpaidFlow.total,
+      unpaidOrders:   unpaidFlow.count,
     }
   };
 };
@@ -684,7 +693,7 @@ const exportReport = async (type, params, branchId) => {
         { label: 'Variety', key: 'varietyName' },
         { label: 'Packaging', key: 'packagingSize' },
         { label: 'Stock', key: 'stock' },
-        { label: 'Price (KES)', key: 'priceKES' },
+        { label: 'Unit Value (KES)', key: 'unitValueKES' },
         { label: 'Total Value (KES)', key: 'totalValueKES' }
       ]);
       return { csv, filename: `stock-valuation-${Date.now()}.csv` };
