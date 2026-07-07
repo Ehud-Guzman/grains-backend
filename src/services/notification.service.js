@@ -310,11 +310,43 @@ const dispatchOrderDispatched = async (order, branchId) => {
   }
 };
 
+// 5. Password reset OTP — security-critical, so it always goes out on every
+// channel the user has (unlike order notifications, it isn't gated by the
+// per-branch smsEnabled/emailEnabled toggles, and customers have no branchId
+// to look those up by anyway).
+const dispatchPasswordResetOtp = async (user, otp) => {
+  try {
+    const shop = 'Vittorios Grains & Cereals';
+
+    if (user.phone) {
+      await sendSMS(user.phone,
+        `Your ${shop} password reset code is ${otp}. It expires in 10 minutes. If you didn't request this, ignore this message.`
+      );
+    }
+
+    if (user.email) {
+      await sendEmail({
+        to: user.email,
+        subject: `Password Reset Code – ${shop}`,
+        html: emailShell(shop, 'Kenya', `
+          <p>Hi <strong>${user.name}</strong>,</p>
+          <p>Use the code below to reset your password. It expires in 10 minutes.</p>
+          <p style="font-size:28px;font-weight:700;letter-spacing:4px;color:#1a5c38;margin:20px 0">${otp}</p>
+          <p>If you didn't request this, you can safely ignore this email.</p>
+        `),
+      });
+    }
+  } catch (err) {
+    logger.error('[notification] dispatchPasswordResetOtp failed', { err: err.message });
+  }
+};
+
 module.exports = {
   dispatchOrderPlaced,
   dispatchOrderApproved,
   dispatchOrderRejected,
   dispatchOrderDispatched,
+  dispatchPasswordResetOtp,
   sendEmail,
   sendSMS,
   sendBulkSMS,

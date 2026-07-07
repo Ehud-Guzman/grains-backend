@@ -2,11 +2,20 @@ const rateLimit = require('express-rate-limit');
 const alertService = require('../services/alert.service');
 const { RATE_LIMITS } = require('../utils/constants');
 
+const OBJECT_ID_RE = /^[0-9a-fA-F]{24}$/;
+
 // Key by branchId + IP so branches don't throttle each other.
 // branchId comes from the JWT (set by verifyToken as req.branchId) for
-// authenticated routes, or from ?branchId query param for public routes.
+// authenticated routes, or from ?branchId query param for public routes — the
+// query param is validated as a plausible Mongo ObjectId first, since it's
+// client-controlled on unauthenticated routes: without this check, an attacker
+// could vary ?branchId= on every request to mint a fresh rate-limit bucket each
+// time, completely defeating the per-branch+IP cap.
 const keyByBranchAndIp = (req) => {
-  const branchId = req.branchId || req.query?.branchId || 'public';
+  const queryBranchId = typeof req.query?.branchId === 'string' && OBJECT_ID_RE.test(req.query.branchId)
+    ? req.query.branchId
+    : null;
+  const branchId = req.branchId || queryBranchId || 'public';
   return `${branchId}:${req.ip}`;
 };
 
@@ -88,4 +97,20 @@ const stkLimiter = rateLimit({
   }
 });
 
-module.exports = { publicLimiter, authLimiter, adminLimiter, callbackLimiter, stkLimiter };
+// Guest order tracking (phone + order ref lookup) — unauthenticated and a prime
+// enumeration target (sequential, guessable order refs), so it gets its own
+// tighter cap keyed by IP alone rather than the shared, branch-keyed publicLimiter.
+const trackLimiter = rateLimit({
+  windowMs: RATE_LIMITS.WINDOW_MS,
+  max: RATE_LIMITS.TRACK_MAX,
+  keyGenerator: (req) => req.ip,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    error: 'RATE_LIMIT_EXCEEDED',
+    message: 'Too many tracking requests, please try again in a minute'
+  }
+});
+
+module.exports = { publicLimiter, authLimiter, adminLimiter, callbackLimiter, stkLimiter, trackLimiter };

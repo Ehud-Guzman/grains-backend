@@ -55,14 +55,24 @@ const deductStock = async (
   const reason = options.reason || `Order ${orderId} approved`;
 
   // findOneAndUpdate with $inc is atomic - prevents race conditions (SRS 5.4 + UX C1)
+  // NOTE: the outer filter must correlate varietyName + packaging.size + stock guard
+  // on the SAME varieties array element via a single $elemMatch. Matching them as
+  // independent top-level predicates would let a different variety's packaging (e.g.
+  // another size sharing the same packagingSize string) satisfy the stock>=quantity
+  // guard, allowing the real target to be decremented below zero.
   const product = await Product.findOneAndUpdate(
     {
       _id: productId,
-      'varieties.varietyName': varietyName,
-      'varieties.packaging': {
+      branchId,
+      varieties: {
         $elemMatch: {
-          size: packagingSize,
-          stock: { $gte: quantity } // only update if enough stock - prevents oversell
+          varietyName,
+          packaging: {
+            $elemMatch: {
+              size: packagingSize,
+              stock: { $gte: quantity } // only update if enough stock - prevents oversell
+            }
+          }
         }
       }
     },
@@ -83,7 +93,7 @@ const deductStock = async (
   if (!product) {
     // Check if it's a stock issue or product issue
     const exists = await Product.findOne(
-      { _id: productId, 'varieties.varietyName': varietyName },
+      { _id: productId, branchId, 'varieties.varietyName': varietyName },
       null,
       { session }
     );
@@ -134,8 +144,13 @@ const releaseStock = async (productId, varietyName, packagingSize, quantity, ord
   const product = await Product.findOneAndUpdate(
     {
       _id: productId,
-      'varieties.varietyName': varietyName,
-      'varieties.packaging.size': packagingSize
+      branchId,
+      varieties: {
+        $elemMatch: {
+          varietyName,
+          packaging: { $elemMatch: { size: packagingSize } }
+        }
+      }
     },
     {
       $inc: { 'varieties.$[v].packaging.$[p].stock': quantity }
@@ -176,14 +191,42 @@ const releaseStock = async (productId, varietyName, packagingSize, quantity, ord
 
 // ── ADD DELIVERY ──────────────────────────────────────────────────────────────
 // SRS 5.4 - supervisor+ adds new stock after a delivery
-const addDelivery = async (productId, varietyName, packagingSize, quantity, reason, supplierId, performedBy, branchId, actorRole = 'supervisor') => {
+const addDelivery = async (productId, varietyName, packagingSize, quantity, reason, supplierId, performedBy, branchId, actorRole = 'supervisor', sourceIntakeId = null) => {
   if (quantity <= 0) throw new AppError('Quantity must be greater than 0', 400, 'INVALID_QUANTITY');
+
+  // Idempotency guard: reject an exact-duplicate submission (double-click / network
+  // retry resubmitting the same delivery) landing within a short window, since this
+  // write has no client-supplied idempotency key.
+  const DUPLICATE_WINDOW_MS = 15000;
+  const recentDuplicate = await StockLog.findOne({
+    branchId,
+    productId,
+    varietyName,
+    packagingSize,
+    changeType: STOCK_CHANGE_TYPES.DELIVERY,
+    quantityChange: quantity,
+    performedBy,
+    timestamp: { $gte: new Date(Date.now() - DUPLICATE_WINDOW_MS) }
+  }).sort({ timestamp: -1 });
+
+  if (recentDuplicate) {
+    throw new AppError(
+      'An identical delivery was just recorded — please wait before resubmitting',
+      409,
+      'DUPLICATE_SUBMISSION'
+    );
+  }
 
   const product = await Product.findOneAndUpdate(
     {
       _id: productId,
-      'varieties.varietyName': varietyName,
-      'varieties.packaging.size': packagingSize
+      branchId,
+      varieties: {
+        $elemMatch: {
+          varietyName,
+          packaging: { $elemMatch: { size: packagingSize } }
+        }
+      }
     },
     {
       $inc: { 'varieties.$[v].packaging.$[p].stock': quantity }
@@ -216,6 +259,16 @@ const addDelivery = async (productId, varietyName, packagingSize, quantity, reas
     performedBy
   });
 
+  // Optional audit-trail link back to the raw truck arrival this delivery packs out —
+  // closes the reconciliation gap between StockIntake and actual sellable stock.
+  if (sourceIntakeId) {
+    const StockIntake = require('../models/StockIntake');
+    await StockIntake.findOneAndUpdate(
+      { _id: sourceIntakeId, branchId },
+      { $push: { linkedDeliveries: { productId, varietyName, packagingSize, quantity, performedBy, appliedAt: new Date() } } }
+    );
+  }
+
   await activityLogService.log({
     actorId: performedBy,
     actorRole,
@@ -223,7 +276,7 @@ const addDelivery = async (productId, varietyName, packagingSize, quantity, reas
     branchId,
     targetId: productId,
     targetType: 'Product',
-    detail: { varietyName, packagingSize, quantity, balanceAfter, supplierId }
+    detail: { varietyName, packagingSize, quantity, balanceAfter, supplierId, sourceIntakeId: sourceIntakeId || undefined }
   });
 
   appEvents.emit(STOCK_EVENTS.UPDATED, {
@@ -243,7 +296,7 @@ const manualAdjustment = async (productId, varietyName, packagingSize, newQuanti
 
   // Get current stock first
   const current = await Product.findOne(
-    { _id: productId, 'varieties.varietyName': varietyName },
+    { _id: productId, branchId, 'varieties.varietyName': varietyName },
     { 'varieties.$': 1 }
   );
 
@@ -258,8 +311,13 @@ const manualAdjustment = async (productId, varietyName, packagingSize, newQuanti
   const product = await Product.findOneAndUpdate(
     {
       _id: productId,
-      'varieties.varietyName': varietyName,
-      'varieties.packaging.size': packagingSize
+      branchId,
+      varieties: {
+        $elemMatch: {
+          varietyName,
+          packaging: { $elemMatch: { size: packagingSize } }
+        }
+      }
     },
     {
       $set: { 'varieties.$[v].packaging.$[p].stock': newQuantity }
@@ -317,7 +375,8 @@ const batchUpdate = async (updates, performedBy, branchId) => {
   for (const u of updates) {
     const result = await addDelivery(
       u.productId, u.varietyName, u.packagingSize,
-      u.quantity, u.reason, u.supplierId || null, performedBy, branchId
+      u.quantity, u.reason, u.supplierId || null, performedBy, branchId,
+      undefined, u.sourceIntakeId || null
     );
     results.push(result);
   }

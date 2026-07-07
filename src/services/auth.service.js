@@ -7,10 +7,15 @@ const { AppError } = require('../middleware/errorHandler.middleware');
 const { ROLES, LOG_ACTIONS, AUTH_LIMITS } = require('../utils/constants');
 const activityLogService = require('./activityLog.service');
 const alertService = require('./alert.service');
+const notificationService = require('./notification.service');
 const logger = require('../utils/logger');
 
 const MAX_FAILED_LOGINS = AUTH_LIMITS.MAX_FAILED_LOGINS;
 const BCRYPT_WORK_FACTOR = AUTH_LIMITS.BCRYPT_WORK_FACTOR;
+const OTP_EXPIRY_MINUTES = AUTH_LIMITS.OTP_EXPIRY_MINUTES;
+const OTP_MAX_ATTEMPTS = AUTH_LIMITS.OTP_MAX_ATTEMPTS;
+
+const GENERIC_RESET_ERROR = 'Invalid or expired code. Please request a new one.';
 
 // ── GENERATE TOKENS ───────────────────────────────────────────────────────────
 const generateTokens = (user, branchId = null) => {
@@ -514,6 +519,93 @@ const changePassword = async (userId, currentPassword, newPassword, ip = null) =
   return { success: true };
 };
 
+// ── FORGOT PASSWORD ───────────────────────────────────────────────────────────
+// Always returns the same generic result regardless of whether the phone is
+// registered, so the response can't be used to enumerate accounts.
+const forgotPassword = async (phone, ip = null) => {
+  const user = await User.findOne({ phone });
+
+  // Locked accounts can still request a code — proving phone/email ownership
+  // via OTP is exactly how a legitimately locked-out customer recovers, and
+  // resetPassword() below unlocks the account on a successful reset.
+  if (user) {
+    const otp = String(Math.floor(100000 + Math.random() * 900000));
+    const passwordResetOtpHash = await bcrypt.hash(otp, BCRYPT_WORK_FACTOR);
+
+    await User.findByIdAndUpdate(user._id, {
+      passwordResetOtpHash,
+      passwordResetExpires: new Date(Date.now() + OTP_EXPIRY_MINUTES * 60 * 1000),
+      passwordResetAttempts: 0
+    });
+
+    notificationService.dispatchPasswordResetOtp(user, otp)
+      .catch(err => logger.error('[auth] Failed to dispatch reset OTP', { err: err.message }));
+
+    await activityLogService.log({
+      actorId: user._id,
+      actorRole: user.role,
+      action: LOG_ACTIONS.PASSWORD_RESET_REQUESTED,
+      targetId: user._id,
+      targetType: 'User',
+      ip
+    }).catch(err => logger.error('[auth] Activity log write failed', { err: err.message }));
+  }
+
+  return { success: true, message: 'If an account exists for this number, a reset code has been sent.' };
+};
+
+// ── RESET PASSWORD (via OTP) ──────────────────────────────────────────────────
+const resetPassword = async (phone, otp, newPassword, ip = null) => {
+  const user = await User.findOne({ phone });
+
+  if (!user || !user.passwordResetOtpHash || !user.passwordResetExpires) {
+    throw new AppError(GENERIC_RESET_ERROR, 400, 'INVALID_RESET_CODE');
+  }
+
+  if (user.passwordResetExpires < new Date()) {
+    await User.findByIdAndUpdate(user._id, {
+      passwordResetOtpHash: null, passwordResetExpires: null, passwordResetAttempts: 0
+    });
+    throw new AppError(GENERIC_RESET_ERROR, 400, 'INVALID_RESET_CODE');
+  }
+
+  if (user.passwordResetAttempts >= OTP_MAX_ATTEMPTS) {
+    await User.findByIdAndUpdate(user._id, {
+      passwordResetOtpHash: null, passwordResetExpires: null, passwordResetAttempts: 0
+    });
+    throw new AppError(GENERIC_RESET_ERROR, 400, 'INVALID_RESET_CODE');
+  }
+
+  const isMatch = await bcrypt.compare(otp, user.passwordResetOtpHash);
+  if (!isMatch) {
+    await User.findByIdAndUpdate(user._id, { $inc: { passwordResetAttempts: 1 } });
+    throw new AppError(GENERIC_RESET_ERROR, 400, 'INVALID_RESET_CODE');
+  }
+
+  validatePasswordStrength(newPassword);
+
+  const passwordHash = await bcrypt.hash(newPassword, BCRYPT_WORK_FACTOR);
+  await User.findByIdAndUpdate(user._id, {
+    passwordHash,
+    isLocked: false,
+    failedLoginCount: 0,
+    passwordResetOtpHash: null,
+    passwordResetExpires: null,
+    passwordResetAttempts: 0
+  });
+
+  await activityLogService.log({
+    actorId: user._id,
+    actorRole: user.role,
+    action: LOG_ACTIONS.PASSWORD_RESET_COMPLETED,
+    targetId: user._id,
+    targetType: 'User',
+    ip
+  }).catch(err => logger.error('[auth] Activity log write failed', { err: err.message }));
+
+  return { success: true };
+};
+
 // ── GET PROFILE ───────────────────────────────────────────────────────────────
 const getProfile = async (userId) => {
   const user = await User.findById(userId).select('-passwordHash -failedLoginCount').lean();
@@ -620,6 +712,8 @@ module.exports = {
   unlockAccount,
   incrementFailedLogin,
   changePassword,
+  forgotPassword,
+  resetPassword,
   getProfile,
   updateProfile,
   getOnboarding,

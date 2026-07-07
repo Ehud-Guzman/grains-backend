@@ -229,12 +229,23 @@ const handleCallback = async (callbackData) => {
 
     // Verify Safaricom paid the correct amount — reject underpayments
     if (!paidAmount || Math.ceil(paidAmount) < Math.ceil(payment.amount)) {
+      // Atomic compare-and-swap on the status we read at the top of this function —
+      // if a concurrent duplicate delivery of this same callback already moved the
+      // payment out of that status, this is a no-op and we treat it as already handled.
+      const claimed = await Payment.findOneAndUpdate(
+        { _id: payment._id, status: payment.status },
+        { status: PAYMENT_STATUSES.FAILED },
+        { new: true }
+      );
+      if (!claimed) {
+        logger.info('[M-PESA] Duplicate callback ignored (amount-mismatch path)', { CheckoutRequestID });
+        return { success: true, message: 'Already processed' };
+      }
       logger.warn('[M-PESA] Amount mismatch', {
         CheckoutRequestID,
         expected: payment.amount,
         received: paidAmount
       });
-      await Payment.findByIdAndUpdate(payment._id, { status: PAYMENT_STATUSES.FAILED });
       const failedOrder = await Order.findByIdAndUpdate(payment.orderId, { paymentStatus: PAYMENT_STATUSES.FAILED }).select('branchId');
       await activityLogService.log({
         actorId:    payment.orderId,
@@ -263,28 +274,44 @@ const handleCallback = async (callbackData) => {
     // money was received and a manual refund to the customer is needed.
     const relatedOrder = await Order.findById(payment.orderId).select('status');
     if (relatedOrder && ['cancelled', 'rejected'].includes(relatedOrder.status)) {
+      const claimed = await Payment.findOneAndUpdate(
+        { _id: payment._id, status: payment.status },
+        {
+          status:             PAYMENT_STATUSES.REFUNDED,
+          mpesaTransactionId,
+          paidAt:             new Date(),
+          safaricomTimestamp,
+          refundedAt:         new Date(),
+          refundReason:       `Order was ${relatedOrder.status} before payment confirmed`
+        },
+        { new: true }
+      );
+      if (!claimed) {
+        logger.info('[M-PESA] Duplicate callback ignored (order-terminal path)', { CheckoutRequestID });
+        return { success: true, message: 'Already processed' };
+      }
       logger.warn('[M-PESA] Payment received for terminal order — marking refunded', {
         orderId: payment.orderId,
         orderStatus: relatedOrder.status,
         mpesaTransactionId
       });
-      await Payment.findByIdAndUpdate(payment._id, {
-        status:             PAYMENT_STATUSES.REFUNDED,
-        mpesaTransactionId,
-        paidAt:             new Date(),
-        safaricomTimestamp,
-        refundedAt:         new Date(),
-        refundReason:       `Order was ${relatedOrder.status} before payment confirmed`
-      });
       return { success: false, status: 'order_terminal', mpesaTransactionId };
     }
 
-    await Payment.findByIdAndUpdate(payment._id, {
-      status:            PAYMENT_STATUSES.PAID,
-      mpesaTransactionId,
-      paidAt:            new Date(),
-      safaricomTimestamp
-    });
+    const claimed = await Payment.findOneAndUpdate(
+      { _id: payment._id, status: payment.status },
+      {
+        status:            PAYMENT_STATUSES.PAID,
+        mpesaTransactionId,
+        paidAt:            new Date(),
+        safaricomTimestamp
+      },
+      { new: true }
+    );
+    if (!claimed) {
+      logger.info('[M-PESA] Duplicate callback ignored (success path)', { CheckoutRequestID });
+      return { success: true, message: 'Already processed' };
+    }
 
     await Order.findByIdAndUpdate(payment.orderId, {
       paymentStatus: PAYMENT_STATUSES.PAID
@@ -315,9 +342,15 @@ const handleCallback = async (callbackData) => {
     // 1    — insufficient funds
     // 2001 — wrong PIN
 
-    await Payment.findByIdAndUpdate(payment._id, {
-      status: PAYMENT_STATUSES.FAILED
-    });
+    const claimed = await Payment.findOneAndUpdate(
+      { _id: payment._id, status: payment.status },
+      { status: PAYMENT_STATUSES.FAILED },
+      { new: true }
+    );
+    if (!claimed) {
+      logger.info('[M-PESA] Duplicate callback ignored (failure path)', { CheckoutRequestID });
+      return { success: true, message: 'Already processed' };
+    }
 
     const failedOrder = await Order.findByIdAndUpdate(payment.orderId, {
       paymentStatus: PAYMENT_STATUSES.FAILED
@@ -427,29 +460,34 @@ const manualConfirmPayment = async (orderId, adminId, transactionRef, actorRole 
     }
   }
 
-  // Reject cash underpayments — admin must pass the received amount and it must cover the order total
-  if (!isMpesa && receivedAmount != null) {
-    if (Math.round(receivedAmount) < Math.round(order.total)) {
-      throw new AppError(
-        `Received amount (KES ${Math.round(receivedAmount)}) is less than the order total (KES ${Math.round(order.total)}). Correct the amount or contact a supervisor.`,
-        400,
-        'CASH_UNDERPAYMENT'
-      );
-    }
-    if (Math.round(receivedAmount) > Math.round(order.total)) {
-      logger.warn('[CASH] Overpayment on manual confirmation — manual reconciliation required', {
-        orderId:  order._id,
-        expected: order.total,
-        received: receivedAmount,
-        delta:    Math.round(receivedAmount) - Math.round(order.total)
-      });
-    }
+  // Require and cross-check the received amount for BOTH payment methods — a
+  // manual confirmation must reconcile against a real amount, not just a receipt
+  // code. Previously this check only ran for cash (!isMpesa), so an admin could
+  // mark any M-Pesa order fully PAID by supplying just a well-formatted, unused
+  // receipt string with zero cross-check against order.total.
+  if (receivedAmount == null) {
+    throw new AppError(
+      'The amount received must be provided to confirm this payment',
+      400,
+      'RECEIVED_AMOUNT_REQUIRED'
+    );
   }
-
-  // Update or create payment record
-  let payment = order.paymentId
-    ? await Payment.findById(order.paymentId)
-    : null;
+  if (Math.round(receivedAmount) < Math.round(order.total)) {
+    throw new AppError(
+      `Received amount (KES ${Math.round(receivedAmount)}) is less than the order total (KES ${Math.round(order.total)}). Correct the amount or contact a supervisor.`,
+      400,
+      isMpesa ? 'MPESA_AMOUNT_MISMATCH' : 'CASH_UNDERPAYMENT'
+    );
+  }
+  if (Math.round(receivedAmount) > Math.round(order.total)) {
+    logger.warn('[MANUAL CONFIRM] Overpayment on manual confirmation — manual reconciliation required', {
+      orderId:  order._id,
+      method:   order.paymentMethod,
+      expected: order.total,
+      received: receivedAmount,
+      delta:    Math.round(receivedAmount) - Math.round(order.total)
+    });
+  }
 
   const paymentUpdate = {
     status:      PAYMENT_STATUSES.PAID,
@@ -457,6 +495,24 @@ const manualConfirmPayment = async (orderId, adminId, transactionRef, actorRole 
     paidAt:      new Date(),
     ...(ref && { mpesaTransactionId: ref })
   };
+
+  // Claim the order FIRST, atomically — this is the actual race guard. Only the
+  // request that wins this conditional update goes on to create/update a Payment
+  // record; a concurrent loser exits here, before ever writing one. Previously the
+  // atomic order-claim ran AFTER creating/updating the Payment, so two racing
+  // confirmations on a COD order with no Payment yet could both pass the earlier
+  // read and both create their own orphaned duplicate PAID Payment document.
+  const claimedOrder = await Order.findOneAndUpdate(
+    { _id: orderId, paymentStatus: { $ne: PAYMENT_STATUSES.PAID } },
+    { paymentStatus: PAYMENT_STATUSES.PAID }
+  );
+  if (!claimedOrder) {
+    throw new AppError('Payment is already confirmed', 400, 'ALREADY_PAID');
+  }
+
+  let payment = claimedOrder.paymentId
+    ? await Payment.findById(claimedOrder.paymentId)
+    : null;
 
   if (payment) {
     await Payment.findByIdAndUpdate(payment._id, paymentUpdate);
@@ -468,15 +524,7 @@ const manualConfirmPayment = async (orderId, adminId, transactionRef, actorRole 
       currency: 'KES',
       ...paymentUpdate
     });
-  }
-
-  // Atomic: only flip to PAID if still not already paid — prevents double-confirmation race
-  const updated = await Order.findOneAndUpdate(
-    { _id: orderId, paymentStatus: { $ne: PAYMENT_STATUSES.PAID } },
-    { paymentStatus: PAYMENT_STATUSES.PAID, paymentId: payment._id }
-  );
-  if (!updated) {
-    throw new AppError('Payment is already confirmed', 400, 'ALREADY_PAID');
+    await Order.findByIdAndUpdate(orderId, { paymentId: payment._id });
   }
 
   await activityLogService.log({

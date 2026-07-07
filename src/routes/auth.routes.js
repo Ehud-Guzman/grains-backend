@@ -1,7 +1,10 @@
 const express = require('express');
 const router = express.Router();
 const authController = require('../controllers/auth.controller');
-const { registerValidator, loginValidator, refreshValidator } = require('../validators/auth.validator');
+const {
+  registerValidator, loginValidator, refreshValidator,
+  forgotPasswordValidator, resetPasswordValidator
+} = require('../validators/auth.validator');
 const { validate } = require('../middleware/validate.middleware');
 const { verifyToken, optionalAuth } = require('../middleware/auth.middleware');
 const { authLimiter } = require('../middleware/rateLimit.middleware');
@@ -39,6 +42,12 @@ router.post('/switch-branch', verifyToken, authController.switchBranch);
 
 // POST /api/auth/logout — send { refreshToken } in body to blacklist it
 router.post('/logout', optionalAuth, authController.logout);
+
+// POST /api/auth/forgot-password — request an OTP via SMS/email (generic response, no enumeration)
+router.post('/forgot-password', authLimiter, forgotPasswordValidator, validate, authController.forgotPassword);
+
+// POST /api/auth/reset-password — exchange phone + OTP for a new password
+router.post('/reset-password', authLimiter, resetPasswordValidator, validate, authController.resetPassword);
 
 // ── AUTHENTICATED ROUTES ──────────────────────────────────────────────────────
 

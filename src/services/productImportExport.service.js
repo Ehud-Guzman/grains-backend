@@ -20,6 +20,7 @@ const HEADER_ROW = [
   'Low Stock Alert',
   'Quote Only (TRUE/FALSE)',
   'Image URLs (JSON array)', // column L — optional, populated by generate-xlsx.js
+  'Taxable (TRUE/FALSE)', // column M — product-level; blank/missing defaults to TRUE
 ];
 
 const validateHeaders = (headerRow = []) => {
@@ -44,9 +45,10 @@ const exportProducts = async (branchId = null) => {
 
   for (const product of products) {
     const varieties = product.varieties || [];
+    const taxableFlag = product.taxable !== false ? 'TRUE' : 'FALSE';
     if (varieties.length === 0) {
       rows.push([product.name, product.category, product.description || '',
-        product.isActive ? 'TRUE' : 'FALSE', '', '', '', '', '', '', '', '']);
+        product.isActive ? 'TRUE' : 'FALSE', '', '', '', '', '', '', '', '', taxableFlag]);
       continue;
     }
     for (const variety of varieties) {
@@ -55,7 +57,7 @@ const exportProducts = async (branchId = null) => {
         rows.push([product.name, product.category, product.description || '',
           product.isActive ? 'TRUE' : 'FALSE', variety.varietyName || '',
           variety.description || '', '', '', '', '', '',
-          JSON.stringify(normalizeImageUrls(variety.imageURLs || product.imageURLs || []))]);
+          JSON.stringify(normalizeImageUrls(variety.imageURLs || product.imageURLs || [])), taxableFlag]);
         continue;
       }
       for (const pkg of packaging) {
@@ -69,6 +71,7 @@ const exportProducts = async (branchId = null) => {
           pkg.lowStockThreshold ?? 10,
           pkg.quoteOnly ? 'TRUE' : 'FALSE',
           JSON.stringify(normalizeImageUrls(variety.imageURLs || product.imageURLs || [])),
+          taxableFlag,
         ]);
       }
     }
@@ -79,7 +82,7 @@ const exportProducts = async (branchId = null) => {
   ws['!cols'] = [
     { wch: 22 }, { wch: 15 }, { wch: 30 }, { wch: 16 },
     { wch: 20 }, { wch: 25 }, { wch: 14 }, { wch: 12 },
-    { wch: 14 }, { wch: 14 }, { wch: 20 }, { wch: 60 },
+    { wch: 14 }, { wch: 14 }, { wch: 20 }, { wch: 60 }, { wch: 16 },
   ];
   XLSX.utils.book_append_sheet(wb, ws, 'Products');
 
@@ -106,22 +109,24 @@ const getTemplate = () => {
   const sampleRows = [
     HEADER_ROW,
     // Maize — Yellow variety — 3 packaging sizes (3 rows)
-    ['Maize', 'Cereals', 'Quality dried maize', 'TRUE', 'Yellow Maize', 'Grade A', '50kg',  3800, 120, 20, 'FALSE', ''],
-    ['Maize', 'Cereals', 'Quality dried maize', 'TRUE', 'Yellow Maize', 'Grade A', '90kg',  6500,  45, 10, 'FALSE', ''],
-    ['Maize', 'Cereals', 'Quality dried maize', 'TRUE', 'Yellow Maize', 'Grade A', 'Bulk',    '',  '',  5, 'TRUE',  ''],
+    ['Maize', 'Cereals', 'Quality dried maize', 'TRUE', 'Yellow Maize', 'Grade A', '50kg',  3800, 120, 20, 'FALSE', '', 'TRUE'],
+    ['Maize', 'Cereals', 'Quality dried maize', 'TRUE', 'Yellow Maize', 'Grade A', '90kg',  6500,  45, 10, 'FALSE', '', 'TRUE'],
+    ['Maize', 'Cereals', 'Quality dried maize', 'TRUE', 'Yellow Maize', 'Grade A', 'Bulk',    '',  '',  5, 'TRUE',  '', 'TRUE'],
     // Maize — White variety — 2 packaging sizes (2 rows)
-    ['Maize', 'Cereals', 'Quality dried maize', 'TRUE', 'White Maize',  'Premium', '50kg',  4000,  80, 15, 'FALSE', ''],
-    ['Maize', 'Cereals', 'Quality dried maize', 'TRUE', 'White Maize',  'Premium', '90kg',  7000,  30, 10, 'FALSE', ''],
+    ['Maize', 'Cereals', 'Quality dried maize', 'TRUE', 'White Maize',  'Premium', '50kg',  4000,  80, 15, 'FALSE', '', 'TRUE'],
+    ['Maize', 'Cereals', 'Quality dried maize', 'TRUE', 'White Maize',  'Premium', '90kg',  7000,  30, 10, 'FALSE', '', 'TRUE'],
     // Beans — Rose Coco — 1 packaging size
-    ['Beans', 'Beans',   'Fresh dried beans',   'TRUE', 'Rose Coco',    '',        '50kg',  7500,  60, 10, 'FALSE', ''],
+    ['Beans', 'Beans',   'Fresh dried beans',   'TRUE', 'Rose Coco',    '',        '50kg',  7500,  60, 10, 'FALSE', '', 'TRUE'],
     // Beans — Mwitemania — 1 packaging size
-    ['Beans', 'Beans',   'Fresh dried beans',   'TRUE', 'Mwitemania',   '',        '50kg',  8000,  40, 10, 'FALSE', ''],
+    ['Beans', 'Beans',   'Fresh dried beans',   'TRUE', 'Mwitemania',   '',        '50kg',  8000,  40, 10, 'FALSE', '', 'TRUE'],
+    // Wheat Bran — VAT-exempt by-product example
+    ['Wheat Bran', 'By-products', 'Milling by-product', 'TRUE', 'Standard', '', '50kg', 1200, 200, 20, 'FALSE', '', 'FALSE'],
   ];
   const ws = XLSX.utils.aoa_to_sheet(sampleRows);
   ws['!cols'] = [
     { wch: 22 }, { wch: 15 }, { wch: 30 }, { wch: 16 },
     { wch: 20 }, { wch: 25 }, { wch: 14 }, { wch: 12 },
-    { wch: 14 }, { wch: 14 }, { wch: 20 }, { wch: 60 },
+    { wch: 14 }, { wch: 14 }, { wch: 20 }, { wch: 60 }, { wch: 16 },
   ];
   XLSX.utils.book_append_sheet(wb, ws, 'Products');
   return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
@@ -330,6 +335,9 @@ const importProducts = async (fileBuffer, adminId, options = {}) => {
     const threshold   = row[9] !== '' ? Number(row[9]) : 10;
     const quoteOnly   = String(row[10] || '').trim().toUpperCase() === 'TRUE';
     const imageURLs   = parseImageURLs(row[11]); // column L
+    // Blank/missing column M (older export files) defaults to taxable — matches Product schema default.
+    const taxableRaw  = String(row[12] || '').trim().toUpperCase();
+    const taxable     = taxableRaw === '' ? true : taxableRaw === 'TRUE';
 
     const key = productName.toLowerCase();
 
@@ -339,6 +347,7 @@ const importProducts = async (fileBuffer, adminId, options = {}) => {
         category,
         description: productDesc,
         isActive,
+        taxable,
         imageURLs: [],
         varieties: new Map(),
       });
@@ -346,6 +355,7 @@ const importProducts = async (fileBuffer, adminId, options = {}) => {
 
     const product = productMap.get(key);
     product.isActive = isActive;
+    product.taxable = taxable;
     product.category = category;
     if (productDesc) product.description = productDesc;
     // Collect product-level images (de-duplicated)
@@ -403,6 +413,7 @@ const importProducts = async (fileBuffer, adminId, options = {}) => {
           category: productData.category,
           description: productData.description || '',
           isActive: productData.isActive,
+          taxable: productData.taxable,
           imageURLs: productData.imageURLs,
           varieties,
           branchId: branch._id,

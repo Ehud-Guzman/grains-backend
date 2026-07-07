@@ -88,7 +88,7 @@ router.post(
       // If productId provided, persist URLs to the product document immediately
       let product = null;
       if (productId) {
-        product = await productController.addImagesToProduct(productId, urls);
+        product = await productController.addImagesToProduct(productId, urls, req.branchId);
       }
 
       // Return in standard API response format { success, data: { urls } }

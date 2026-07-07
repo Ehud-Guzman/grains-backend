@@ -6,15 +6,16 @@ const { checkMaintenanceMode } = require('../middleware/maintenance.middleware')
 const { requireRole } = require('../middleware/role.middleware');
 const { validate } = require('../middleware/validate.middleware');
 const { guestOrderValidator, customerOrderValidator } = require('../validators/order.validator');
-const { publicLimiter } = require('../middleware/rateLimit.middleware');
+const { publicLimiter, trackLimiter } = require('../middleware/rateLimit.middleware');
 
 // ── PUBLIC ────────────────────────────────────────────────────────────────────
 
 // POST /api/orders/guest
 router.post('/guest', checkMaintenanceMode, guestOrderValidator, validate, orderController.createGuestOrder);
 
-// GET /api/orders/track?phone=&ref=
-router.get('/track', publicLimiter, orderController.trackOrder);
+// GET /api/orders/track?phone=&ref= — its own tighter, IP-only limiter (see
+// rateLimit.middleware.js) since this is an unauthenticated enumeration target.
+router.get('/track', trackLimiter, orderController.trackOrder);
 
 // ── CUSTOMER AUTH REQUIRED ────────────────────────────────────────────────────
 

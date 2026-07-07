@@ -26,8 +26,8 @@ const getLogs = async (req, res, next) => {
 
 const addDelivery = async (req, res, next) => {
   try {
-    const { productId, varietyName, packagingSize, quantity, reason, supplierId } = req.body;
-    const result = await stockService.addDelivery(productId, varietyName, packagingSize, quantity, reason, supplierId, req.user.id, req.branchId, req.user.role);
+    const { productId, varietyName, packagingSize, quantity, reason, supplierId, sourceIntakeId } = req.body;
+    const result = await stockService.addDelivery(productId, varietyName, packagingSize, quantity, reason, supplierId, req.user.id, req.branchId, req.user.role, sourceIntakeId || null);
     return success(res, result, 'Stock delivery recorded');
   } catch (err) { next(err); }
 };

@@ -11,5 +11,6 @@ const guestSchema = new mongoose.Schema({
 
 // Index
 guestSchema.index({ phone: 1 });
+guestSchema.index({ createdAt: 1 }); // cleanup.job.js's daily stale-guest sweep
 
 module.exports = mongoose.model('Guest', guestSchema);

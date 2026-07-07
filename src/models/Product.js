@@ -1,10 +1,5 @@
 const mongoose = require('mongoose');
 
-const discountRuleSchema = new mongoose.Schema({
-  minQuantityKg:   { type: Number, required: true, min: 1 },
-  discountPercent: { type: Number, required: true, min: 0.1, max: 100 }
-}, { _id: false });
-
 const pricingTierSchema = new mongoose.Schema({
   minQty:   { type: Number, required: true, min: 1 },
   priceKES: { type: Number, required: true, min: 0 },
@@ -33,9 +28,9 @@ const productSchema = new mongoose.Schema({
   description: { type: String, trim: true },
   imageURLs: [{ type: String }],
   isActive: { type: Boolean, default: true },
+  taxable: { type: Boolean, default: true }, // false for VAT-exempt products (e.g. by-products)
   varieties: [varietySchema],
   branchId: { type: mongoose.Schema.Types.ObjectId, ref: 'Branch', required: true },
-  discountRules: { type: [discountRuleSchema], default: [] },
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true }
 }, {
   timestamps: true

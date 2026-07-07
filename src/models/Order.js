@@ -14,7 +14,8 @@ const orderItemSchema = new mongoose.Schema({
   packaging: { type: String, required: true },
   quantity: { type: Number, required: true, min: 1 },
   unitPrice: { type: Number, required: true },
-  lineTotal: { type: Number, required: true }
+  lineTotal: { type: Number, required: true },
+  taxable: { type: Boolean, default: true } // snapshot of product.taxable at order time
 }, { _id: false });
 
 const statusHistorySchema = new mongoose.Schema({
@@ -73,8 +74,13 @@ const orderSchema = new mongoose.Schema({
   deliveryDistanceKm: { type: Number, default: null },
   deliveredAt: { type: Date, default: null },
 
-  // KRA eTIMS fiscal invoice
-  etimsStatus:        { type: String, enum: ['pending', 'submitted', 'failed'] },
+  // KRA eTIMS fiscal invoice — 'not_required' is the default for orders that
+  // haven't reached an invoiceable state yet (or never will: pending/rejected/
+  // cancelled); submitInvoice() moves it not_required -> pending -> submitted|failed.
+  // Existing orders created before this default was added stay `undefined` in the
+  // DB rather than being retroactively backfilled — code that checks this field
+  // must treat undefined and 'not_required' as equivalent ("nothing to show").
+  etimsStatus:        { type: String, enum: ['not_required', 'pending', 'submitted', 'failed'], default: 'not_required' },
   etimsInvoiceNumber: { type: String },
   etimsControlNumber: { type: String }
 }, {
@@ -92,5 +98,6 @@ orderSchema.index({ status: 1 });
 orderSchema.index({ createdAt: -1 });
 orderSchema.index({ orderRef: 1 }, { unique: true });
 orderSchema.index({ branchId: 1, paymentStatus: 1 }); // payment reconciliation queries
+orderSchema.index({ driverId: 1, status: 1 }); // driver "my orders"/"my stats" + admin rider report
 
 module.exports = mongoose.model('Order', orderSchema);

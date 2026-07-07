@@ -41,6 +41,23 @@ const stockIntakeSchema = new mongoose.Schema({
   processedBy:    { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
   processedNotes: { type: String, trim: true, default: '' },
 
+  // ── RECONCILIATION LINK ───────────────────────────────────────────────────────
+  // Populated by stock.service.js#addDelivery when a delivery is recorded against
+  // this intake (optional sourceIntakeId param) — lets an admin see what this raw
+  // arrival actually became in sellable stock, and whether anything was ever applied.
+  linkedDeliveries: {
+    type: [{
+      productId:     { type: mongoose.Schema.Types.ObjectId, ref: 'Product', required: true },
+      varietyName:   { type: String, required: true },
+      packagingSize: { type: String, required: true },
+      quantity:      { type: Number, required: true },
+      performedBy:   { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+      appliedAt:     { type: Date, default: Date.now },
+      _id: false
+    }],
+    default: []
+  },
+
   // ── AUDIT ─────────────────────────────────────────────────────────────────────
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
 }, {

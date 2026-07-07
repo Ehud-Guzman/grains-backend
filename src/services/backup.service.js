@@ -6,6 +6,8 @@ const { promisify } = require('util');
 const { EJSON, ObjectId } = require('bson');
 const { AppError } = require('../middleware/errorHandler.middleware');
 const alertService = require('./alert.service');
+const settingsService = require('./settings.service');
+const globalSettingsService = require('./globalSettings.service');
 const Branch = require('../models/Branch');
 const User = require('../models/User');
 const Guest = require('../models/Guest');
@@ -433,6 +435,13 @@ const restoreBackup = async ({ file, confirmation, actorId, actorRole, ip }) => 
     restoreInProgress = false;
     try { await fs.unlink(RESTORE_MARKER); } catch { /* already gone or never written */ }
   }
+
+  // restoreCollections wrote Settings/GlobalSettings directly via the model —
+  // bypassing settingsService/globalSettingsService entirely — so the in-memory
+  // caches (which have no TTL) would otherwise keep serving pre-restore values
+  // indefinitely, potentially contradicting what was just restored.
+  settingsService.invalidateCache();
+  globalSettingsService.invalidateCache();
 
   if (writeErrors.length > 0) {
     logger.warn('[backup] Restore completed with partial write errors', {

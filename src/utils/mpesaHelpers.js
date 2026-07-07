@@ -43,12 +43,17 @@ const generatePassword = (shortcode, passkey, timestamp) => {
 const validateSafaricomIP = (req) => {
   if (process.env.MPESA_ENV !== 'production') return true;
 
-  const ip = req.ip;
-  const isValid = !!ip && SAFARICOM_IPS.some(allowedIP => ip.includes(allowedIP));
+  // Exact match only — ip.includes(allowedIP) would also match e.g.
+  // "196.201.214.2001" or any spoofed string that merely contains an allowed IP
+  // as a substring. Normalize the IPv4-mapped IPv6 form (::ffff:1.2.3.4) first,
+  // since that's how some proxy/runtime configs report an IPv4 client.
+  const rawIp = req.ip || '';
+  const ip = rawIp.startsWith('::ffff:') ? rawIp.slice(7) : rawIp;
+  const isValid = !!ip && SAFARICOM_IPS.includes(ip);
 
   if (!isValid) {
     const logger = require('./logger');
-    logger.warn('[M-PESA] Callback from unrecognized IP', { ip });
+    logger.warn('[M-PESA] Callback from unrecognized IP', { ip: rawIp });
   }
 
   return isValid;

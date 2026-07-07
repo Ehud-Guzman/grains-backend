@@ -132,6 +132,26 @@ const changePassword = async (req, res, next) => {
   }
 };
 
+const forgotPassword = async (req, res, next) => {
+  try {
+    const { phone } = req.body;
+    const result = await authService.forgotPassword(phone, req.ip);
+    return success(res, null, result.message);
+  } catch (err) {
+    next(err);
+  }
+};
+
+const resetPassword = async (req, res, next) => {
+  try {
+    const { phone, otp, newPassword } = req.body;
+    await authService.resetPassword(phone, otp, newPassword, req.ip);
+    return success(res, null, 'Password reset successfully. You can now log in.');
+  } catch (err) {
+    next(err);
+  }
+};
+
 const getProfile = async (req, res, next) => {
   try {
     const profile = await authService.getProfile(req.user.id);
@@ -210,6 +230,8 @@ module.exports = {
   refresh,
   logout,
   changePassword,
+  forgotPassword,
+  resetPassword,
   getProfile,
   updateProfile,
   getOnboarding,

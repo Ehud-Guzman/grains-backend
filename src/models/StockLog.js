@@ -22,7 +22,7 @@ const stockLogSchema = new mongoose.Schema({
 
 // Indexes
 stockLogSchema.index({ branchId: 1, timestamp: -1 });
-stockLogSchema.index({ productId: 1, varietyName: 1, packagingSize: 1 });
+stockLogSchema.index({ productId: 1, varietyName: 1, packagingSize: 1, timestamp: -1 }); // getLogs() always sorts by timestamp after this filter
 stockLogSchema.index({ timestamp: -1 });
 stockLogSchema.index({ performedBy: 1 });
 

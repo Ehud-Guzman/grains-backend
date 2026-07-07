@@ -40,4 +40,32 @@ const refreshValidator = [
   body('refreshToken').optional()
 ];
 
-module.exports = { registerValidator, loginValidator, refreshValidator };
+const forgotPasswordValidator = [
+  body('phone')
+    .trim()
+    .notEmpty().withMessage('Phone number is required')
+    .matches(/^(\+254|0)[17]\d{8}$/).withMessage('Enter a valid Kenyan phone number (e.g. 0712345678)'),
+];
+
+const resetPasswordValidator = [
+  body('phone')
+    .trim()
+    .notEmpty().withMessage('Phone number is required')
+    .matches(/^(\+254|0)[17]\d{8}$/).withMessage('Enter a valid Kenyan phone number (e.g. 0712345678)'),
+
+  body('otp')
+    .trim()
+    .notEmpty().withMessage('Reset code is required')
+    .matches(/^\d{6}$/).withMessage('Reset code must be 6 digits'),
+
+  body('newPassword')
+    .notEmpty().withMessage('New password is required')
+    .isLength({ min: 8 }).withMessage('Password must be at least 8 characters')
+    .matches(/[A-Z]/).withMessage('Password must contain at least one uppercase letter')
+    .matches(/[0-9]/).withMessage('Password must contain at least one number'),
+];
+
+module.exports = {
+  registerValidator, loginValidator, refreshValidator,
+  forgotPasswordValidator, resetPasswordValidator
+};

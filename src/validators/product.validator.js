@@ -51,7 +51,11 @@ const createProductValidator = [
 
   body('isActive')
     .optional()
-    .isBoolean().withMessage('isActive must be true or false')
+    .isBoolean().withMessage('isActive must be true or false'),
+
+  body('taxable')
+    .optional()
+    .isBoolean().withMessage('taxable must be true or false')
 ];
 
 const updateProductValidator = [
@@ -71,7 +75,11 @@ const updateProductValidator = [
 
   body('isActive')
     .optional()
-    .isBoolean().withMessage('isActive must be true or false')
+    .isBoolean().withMessage('isActive must be true or false'),
+
+  body('taxable')
+    .optional()
+    .isBoolean().withMessage('taxable must be true or false')
 ];
 
 module.exports = { createProductValidator, updateProductValidator };

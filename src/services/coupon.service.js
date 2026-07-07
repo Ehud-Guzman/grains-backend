@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 const Coupon = require('../models/Coupon');
 const Order = require('../models/Order');
 const { AppError } = require('../middleware/errorHandler.middleware');
+const { endOfDayEAT } = require('../utils/businessTime');
 
 // ── VALIDATE & COMPUTE DISCOUNT ───────────────────────────────────────────────
 // Returns { coupon, discountAmount } or throws AppError.
@@ -11,7 +12,12 @@ const validate = async (code, branchId, userId, subtotal) => {
   if (!coupon || !coupon.isActive) {
     throw new AppError('Coupon code is invalid or expired.', 400, 'COUPON_INVALID');
   }
-  if (coupon.expiresAt && new Date() > new Date(coupon.expiresAt)) {
+  // The admin UI only collects a date (type="date", no time component), which
+  // serializes to midnight UTC — comparing that instant directly against "now"
+  // would expire the coupon 21 hours into what the admin intended as its last
+  // valid day (00:00 UTC = 03:00 EAT). Treat expiresAt as valid through end of
+  // that calendar day in Nairobi time instead.
+  if (coupon.expiresAt && new Date() > endOfDayEAT(new Date(coupon.expiresAt))) {
     throw new AppError('This coupon has expired.', 400, 'COUPON_EXPIRED');
   }
   if (coupon.usageLimit !== null && coupon.usedCount >= coupon.usageLimit) {

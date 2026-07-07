@@ -35,13 +35,57 @@ const getAll = async (filters = {}, query = {}, branchId = null) => {
       .lean()
   ]);
 
-  // Enrich with order stats
-  const enriched = await Promise.all(users.map(async (user) => {
-    const stats = await getOrderStats(user._id, branchId);
-    return { ...user, ...stats };
+  // Enrich with order stats via one grouped aggregation across this page's users,
+  // instead of one aggregate query per user (was 1+N round trips per page load).
+  const userIds = users.map(u => u._id);
+  const orderMatch = { userId: { $in: userIds }, status: 'completed' };
+  if (branchId) orderMatch.branchId = new mongoose.Types.ObjectId(branchId);
+
+  const statsRows = userIds.length > 0 ? await Order.aggregate([
+    { $match: orderMatch },
+    {
+      $group: {
+        _id: '$userId',
+        totalOrders: { $sum: 1 },
+        totalSpend: { $sum: '$total' },
+        totalVat: { $sum: { $ifNull: ['$vatAmount', 0] } },
+        avgOrderValue: { $avg: '$total' },
+        firstOrderDate: { $min: '$createdAt' },
+        lastOrderDate: { $max: '$createdAt' }
+      }
+    }
+  ]) : [];
+
+  const statsByUserId = new Map(statsRows.map(row => [String(row._id), row]));
+  const enriched = users.map((user) => ({
+    ...user,
+    ...formatOrderStats(statsByUserId.get(String(user._id)))
   }));
 
   return { customers: enriched, pagination: buildPaginationMeta(page, limit, total) };
+};
+
+// ── FORMAT AGGREGATE STATS ROW ────────────────────────────────────────────────
+// Shared shape between the single-user path (getOrderStats) and the batched
+// per-page path (getAll) — same fields, same segment badges, same zero-defaults.
+const formatOrderStats = (s = {}) => {
+  const lastOrder = s.lastOrderDate;
+  const daysSinceLastOrder = lastOrder
+    ? Math.floor((Date.now() - new Date(lastOrder)) / (1000 * 60 * 60 * 24))
+    : null;
+
+  return {
+    totalOrders: s.totalOrders || 0,
+    totalSpend: s.totalSpend || 0,
+    totalVat: s.totalVat || 0,
+    avgOrderValue: s.avgOrderValue ? Math.round(s.avgOrderValue) : 0,
+    firstOrderDate: s.firstOrderDate || null,
+    lastOrderDate: s.lastOrderDate || null,
+    daysSinceLastOrder,
+    // Segment badges - SRS 5.5 + UX B4
+    isRepeat: (s.totalOrders || 0) >= 3,
+    isInactive: daysSinceLastOrder !== null && daysSinceLastOrder >= 30
+  };
 };
 
 // ── GET ORDER STATS FOR A USER ────────────────────────────────────────────────
@@ -64,24 +108,7 @@ const getOrderStats = async (userId, branchId = null) => {
     }
   ]);
 
-  const s = stats[0] || {};
-  const lastOrder = s.lastOrderDate;
-  const daysSinceLastOrder = lastOrder
-    ? Math.floor((Date.now() - new Date(lastOrder)) / (1000 * 60 * 60 * 24))
-    : null;
-
-  return {
-    totalOrders: s.totalOrders || 0,
-    totalSpend: s.totalSpend || 0,
-    totalVat: s.totalVat || 0,
-    avgOrderValue: s.avgOrderValue ? Math.round(s.avgOrderValue) : 0,
-    firstOrderDate: s.firstOrderDate || null,
-    lastOrderDate: s.lastOrderDate || null,
-    daysSinceLastOrder,
-    // Segment badges - SRS 5.5 + UX B4
-    isRepeat: (s.totalOrders || 0) >= 3,
-    isInactive: daysSinceLastOrder !== null && daysSinceLastOrder >= 30
-  };
+  return formatOrderStats(stats[0]);
 };
 
 // ── GET CUSTOMER PROFILE ──────────────────────────────────────────────────────

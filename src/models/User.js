@@ -62,6 +62,9 @@ const userSchema = new mongoose.Schema({
   isLocked: { type: Boolean, default: false },
   failedLoginCount: { type: Number, default: 0 },
   lastLoginAt: { type: Date, default: null },
+  passwordResetOtpHash: { type: String, default: null },
+  passwordResetExpires: { type: Date, default: null },
+  passwordResetAttempts: { type: Number, default: 0 },
   branchId: { type: mongoose.Schema.Types.ObjectId, ref: 'Branch', default: null }, // null = superadmin (no branch)
   // Extra capabilities granted by superadmin (additive — never restricts role permissions)
   customPermissions: {
@@ -87,7 +90,7 @@ const userSchema = new mongoose.Schema({
 // Indexes
 userSchema.index({ phone: 1 }, { unique: true });
 userSchema.index({ email: 1 }, { unique: true, partialFilterExpression: { email: { $type: 'string' } } });
-userSchema.index({ role: 1 });
+userSchema.index({ role: 1, createdAt: -1 }); // covers role-only queries too (prefix), plus role+sort admin/customer lists
 userSchema.index({ branchId: 1 });
 userSchema.index({ branchId: 1, createdAt: -1 }); // branch-scoped new-user reports
 

@@ -174,10 +174,12 @@ describe('order.service — customer cancel', () => {
   });
 
   test('a different customer cannot cancel this order', async () => {
+    // 404, not 403 — a distinct "forbidden" response would let a logged-in
+    // customer enumerate which order IDs exist by reading the status code.
     const otherCustomer = await createUser(branch._id, { role: 'customer', branchId: null });
     await assert.rejects(
       orderService.cancel(order._id, otherCustomer._id),
-      (err) => err.errorCode === 'FORBIDDEN'
+      (err) => err.errorCode === 'ORDER_NOT_FOUND'
     );
   });
 

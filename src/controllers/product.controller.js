@@ -101,8 +101,8 @@ const deleteProduct = async (req, res, next) => {
 };
 
 // ── ADMIN: ADD IMAGES TO PRODUCT ──────────────────────────────────────────────
-const addImagesToProduct = async (productId, urls) => {
-  return productService.addImages(productId, urls);
+const addImagesToProduct = async (productId, urls, branchId) => {
+  return productService.addImages(productId, urls, branchId);
 };
 
 // ── PRICE HISTORY (public — for chart on product detail page) ─────────────────

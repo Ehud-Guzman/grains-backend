@@ -424,15 +424,22 @@ const getStockTurnoverReport = async (period, from, to, branchId) => {
 
 // ── STOCK MOVEMENT REPORT ─────────────────────────────────────────────────────
 // UX B5 - all stock changes in a date range by product
+const STOCK_MOVEMENT_ROW_CAP = 10000;
+
 const getStockMovementReport = async (period, from, to, branchId) => {
   const { start, end } = getDateRange(period, from, to);
   const filter = { timestamp: { $gte: start, $lte: end } };
   if (branchId) filter.branchId = branchId;
 
+  // Date range is already bounded (getDateRange defaults to 30 days), but a
+  // "year" period or a wide custom from/to on a busy branch could still return
+  // an unbounded number of rows fully populated into memory — cap it and tell
+  // the caller if the range needs narrowing, rather than truncating silently.
   const logs = await StockLog.find(filter)
     .populate('productId', 'name category')
     .populate('performedBy', 'name role')
     .sort({ timestamp: -1 })
+    .limit(STOCK_MOVEMENT_ROW_CAP)
     .lean();
 
   // Summary by change type
@@ -445,7 +452,8 @@ const getStockMovementReport = async (period, from, to, branchId) => {
     period: { start, end },
     summary,
     logs,
-    count: logs.length
+    count: logs.length,
+    truncated: logs.length === STOCK_MOVEMENT_ROW_CAP
   };
 };
 

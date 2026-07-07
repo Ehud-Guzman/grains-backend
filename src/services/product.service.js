@@ -359,16 +359,16 @@ const duplicate = async (productId, adminId, branchId, actorRole = 'admin') => {
 };
 
 // ── ADD IMAGES TO PRODUCT ─────────────────────────────────────────────────────
-const addImages = async (productId, urls) => {
+const addImages = async (productId, urls, branchId) => {
   if (!productId || !Array.isArray(urls) || urls.length === 0) {
-    throw new Error('Invalid productId or image URLs');
+    throw new AppError('Invalid productId or image URLs', 400, 'INVALID_INPUT');
   }
-  const product = await Product.findByIdAndUpdate(
-    productId,
+  const product = await Product.findOneAndUpdate(
+    { _id: productId, branchId },
     { $push: { imageURLs: { $each: urls } } },
     { new: true }
   );
-  if (!product) throw new Error('Product not found');
+  if (!product) throw new AppError('Product not found', 404, 'PRODUCT_NOT_FOUND');
   return product;
 };
 

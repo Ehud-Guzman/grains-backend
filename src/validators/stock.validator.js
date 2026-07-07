@@ -23,7 +23,11 @@ const deliveryValidator = [
 
   body('supplierId')
     .optional({ nullable: true })
-    .isMongoId().withMessage('Invalid supplier ID')
+    .isMongoId().withMessage('Invalid supplier ID'),
+
+  body('sourceIntakeId')
+    .optional({ nullable: true })
+    .isMongoId().withMessage('Invalid intake ID')
 ];
 
 const adjustmentValidator = [

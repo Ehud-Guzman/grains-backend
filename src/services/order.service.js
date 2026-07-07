@@ -28,6 +28,12 @@ const { formatPhone } = require('../utils/mpesaHelpers');
 const { paginate, buildPaginationMeta } = require('../utils/paginate');
 const { validateReason } = require('../utils/validateReason');
 const couponService = require('./coupon.service');
+const { startOfMonthEAT } = require('../utils/businessTime');
+
+// Guards against float noise (e.g. 120.10 * 3 === 360.29999999999995) leaking into
+// stored order totals and downstream CSV/eTIMS output — not a business-rounding
+// rule, just IEEE-754 cleanup to the nearest cent.
+const round2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
 
 // A customer's preferred rider is informational only — admin still confirms the
 // real assignment via assignDriver(). Silently drops anything that doesn't
@@ -51,6 +57,7 @@ const buildOrderItems = async (cartItems, options = {}) => {
   const { branchId = null, session = null } = options;
   const items = [];
   let subtotal = 0;
+  let taxableSubtotal = 0;
 
   // One query for all unique products instead of one query per item.
   // Deduplicating IDs handles carts with the same product in multiple varieties.
@@ -87,8 +94,10 @@ const buildOrderItems = async (cartItems, options = {}) => {
       const tier = sorted.find(t => item.quantity >= t.minQty);
       if (tier) unitPrice = tier.priceKES;
     }
-    const lineTotal = unitPrice * item.quantity;
+    const lineTotal = round2(unitPrice * item.quantity);
     subtotal += lineTotal;
+    const taxable = product.taxable !== false;
+    if (taxable) taxableSubtotal += lineTotal;
 
     items.push({
       productId: product._id,
@@ -97,11 +106,12 @@ const buildOrderItems = async (cartItems, options = {}) => {
       packaging: item.packaging,
       quantity: item.quantity,
       unitPrice, // snapshot at time of order (tier-adjusted)
-      lineTotal
+      lineTotal,
+      taxable
     });
   }
 
-  return { items, subtotal };
+  return { items, subtotal: round2(subtotal), taxableSubtotal: round2(taxableSubtotal) };
 };
 
 const reserveOrderStock = async (order, actorId, actorRole, session) => {
@@ -295,6 +305,7 @@ const autoCancelExpiredPendingOrders = async (branchId) => {
       const actorId = order.userId || order.guestId;
       const note = `Auto-cancelled after ${settings.autoCancelHours} hour(s) in pending status`;
 
+      validateTransition(order.status, ORDER_STATUSES.CANCELLED);
       order.status = ORDER_STATUSES.CANCELLED;
       order.statusHistory.push({
         status: ORDER_STATUSES.CANCELLED,
@@ -323,7 +334,10 @@ const autoCancelExpiredPendingOrders = async (branchId) => {
       });
     } catch (err) {
       await session.abortTransaction();
-      throw err;
+      // Don't let one order's failure (e.g. a write conflict with a concurrent
+      // admin approve()) abort the rest of this cycle's batch — log and move on,
+      // the next 5-minute run will pick this order back up if it's still eligible.
+      logger.error('[autoCancel] Failed to auto-cancel order', { orderId: _id, err: err.message });
     } finally {
       session.endSession();
     }
@@ -340,7 +354,7 @@ const createGuestOrder = async (orderData, branchId) => {
   const settings = await settingsService.getSettings(branchId);
   assertShopCanAcceptOrders(settings);
 
-  const { items, subtotal } = await buildOrderItems(orderData.orderItems, { branchId });
+  const { items, subtotal, taxableSubtotal } = await buildOrderItems(orderData.orderItems, { branchId });
   assertOrderMatchesSettings({
     settings,
     deliveryMethod: orderData.deliveryMethod,
@@ -371,7 +385,10 @@ const createGuestOrder = async (orderData, branchId) => {
 
   const vatEnabled = settings.vatEnabled === true;
   const vatRate    = vatEnabled ? (Number(settings.vatRate) || 0) : 0;
-  const vatBase    = Math.max(0, subtotal - couponDiscount);
+  // Coupon discount is shared proportionally between taxable and exempt value
+  // so an exempt (e.g. by-product) line isn't taxed just because a discount was applied elsewhere.
+  const discountShare = subtotal > 0 ? taxableSubtotal / subtotal : 0;
+  const vatBase    = Math.max(0, taxableSubtotal - couponDiscount * discountShare);
   const vatAmount  = vatEnabled ? Math.round(vatBase * vatRate / 100) : 0;
 
   const preferredDriverId = await resolvePreferredDriver(orderData.preferredDriverId, branchId);
@@ -404,7 +421,7 @@ const createGuestOrder = async (orderData, branchId) => {
       vatAmount,
       couponCode,
       couponDiscount,
-      total: Math.max(0, subtotal + deliveryFee + vatAmount - couponDiscount),
+      total: round2(Math.max(0, subtotal + deliveryFee + vatAmount - couponDiscount)),
       deliveryMethod: orderData.deliveryMethod,
       deliveryAddress: orderData.deliveryAddress || null,
       paymentMethod: orderData.paymentMethod,
@@ -464,7 +481,7 @@ const createCustomerOrder = async (orderData, userId, branchId) => {
   if (!user) throw new AppError('User not found', 404, 'USER_NOT_FOUND');
 
   const settings = await settingsService.getSettings(branchId);
-  const { items, subtotal } = await buildOrderItems(orderData.orderItems, { branchId });
+  const { items, subtotal, taxableSubtotal } = await buildOrderItems(orderData.orderItems, { branchId });
   assertShopCanAcceptOrders(settings);
   assertOrderMatchesSettings({
     settings,
@@ -495,7 +512,10 @@ const createCustomerOrder = async (orderData, userId, branchId) => {
 
   const vatEnabled = settings.vatEnabled === true;
   const vatRate    = vatEnabled ? (Number(settings.vatRate) || 0) : 0;
-  const vatBase    = Math.max(0, subtotal - couponDiscount);
+  // Coupon discount is shared proportionally between taxable and exempt value
+  // so an exempt (e.g. by-product) line isn't taxed just because a discount was applied elsewhere.
+  const discountShare = subtotal > 0 ? taxableSubtotal / subtotal : 0;
+  const vatBase    = Math.max(0, taxableSubtotal - couponDiscount * discountShare);
   const vatAmount  = vatEnabled ? Math.round(vatBase * vatRate / 100) : 0;
 
   const preferredDriverId = await resolvePreferredDriver(orderData.preferredDriverId, branchId);
@@ -518,7 +538,7 @@ const createCustomerOrder = async (orderData, userId, branchId) => {
       vatAmount,
       couponCode,
       couponDiscount,
-      total: Math.max(0, subtotal + deliveryFee + vatAmount - couponDiscount),
+      total: round2(Math.max(0, subtotal + deliveryFee + vatAmount - couponDiscount)),
       deliveryMethod: orderData.deliveryMethod,
       deliveryAddress: orderData.deliveryAddress || null,
       paymentMethod: orderData.paymentMethod,
@@ -951,10 +971,10 @@ const cancel = async (orderId, userId) => {
 
   try {
     const order = await Order.findById(orderId).session(session);
-    if (!order) throw new AppError('Order not found', 404, 'ORDER_NOT_FOUND');
-
-    if (!order.userId || order.userId.toString() !== userId.toString()) {
-      throw new AppError('You can only cancel your own orders', 403, 'FORBIDDEN');
+    // Same 404 for "doesn't exist" and "isn't yours" — a distinct 403 would let a
+    // logged-in customer enumerate which order IDs exist by reading the status code.
+    if (!order || !order.userId || order.userId.toString() !== userId.toString()) {
+      throw new AppError('Order not found', 404, 'ORDER_NOT_FOUND');
     }
 
     // Customers may only self-cancel while pending — once approved, staff have
@@ -1141,9 +1161,11 @@ const assignDriver = async (orderId, driverId, adminId, branchId, actorRole = 'a
 // category breakdown derived from completed/approved orders.
 const getMyStats = async (userId) => {
   const now = new Date();
-  const thisMonthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-  const lastMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-  const lastMonthEnd   = new Date(now.getFullYear(), now.getMonth(), 1);
+  // EAT-aware month boundaries (not server/UTC) — matches getDashboardKPIs, so an
+  // order placed late at night in Nairobi lands in the same month everywhere.
+  const thisMonthStart = startOfMonthEAT(now);
+  const lastMonthStart = startOfMonthEAT(new Date(thisMonthStart.getTime() - 1));
+  const lastMonthEnd   = thisMonthStart;
 
   const COUNTED_STATUSES = ['pending', 'approved', 'preparing', 'out_for_delivery', 'completed'];
 

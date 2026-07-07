@@ -6,6 +6,7 @@ const settingsService = require('./settings.service');
 const stockService = require('./stock.service');
 const notificationService = require('./notification.service');
 const logger = require('../utils/logger');
+const { startOfDayEAT } = require('../utils/businessTime');
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const PAYMENT_FAILURE_WINDOW_MS = 24 * MS_PER_DAY;
@@ -48,13 +49,30 @@ const getRecentPaymentFailures = async (branchId) => {
     .lean();
 };
 
+// ── RECENT ETIMS SUBMISSION FAILURES ──────────────────────────────────────────
+// etimsRetry.job.js keeps retrying these in the background, but a submission
+// that keeps failing was previously only visible by opening that one order's
+// own detail page — surfaced here too, alongside the other pull-based alerts.
+const getRecentEtimsFailures = async (branchId) => {
+  const match = { etimsStatus: 'failed' };
+  if (branchId) match.branchId = new mongoose.Types.ObjectId(String(branchId));
+
+  return Order.find(match)
+    .sort({ updatedAt: -1 })
+    .limit(20)
+    .select('orderRef total updatedAt')
+    .lean();
+};
+
 // ── ORDER SPIKE DETECTION ─────────────────────────────────────────────────────
 // Compares today's order count to the trailing 7-day daily average (excluding today).
 const getOrderSpike = async (branchId) => {
   const match = {};
   if (branchId) match.branchId = new mongoose.Types.ObjectId(String(branchId));
 
-  const startOfToday = new Date(); startOfToday.setHours(0, 0, 0, 0);
+  // EAT-aware, not server/UTC — matches getDashboardKPIs, so "today" here agrees
+  // with what the dashboard's own KPI card calls today.
+  const startOfToday = startOfDayEAT();
   const sevenDaysAgo = new Date(startOfToday.getTime() - 7 * MS_PER_DAY);
 
   const [todayCount, priorWeek] = await Promise.all([
@@ -70,11 +88,12 @@ const getOrderSpike = async (branchId) => {
 
 // ── UNIFIED DASHBOARD (pull) ──────────────────────────────────────────────────
 const getDashboardAlerts = async (branchId) => {
-  const [lowStock, dormantCustomers, paymentFailures, orderSpike] = await Promise.all([
+  const [lowStock, dormantCustomers, paymentFailures, orderSpike, etimsFailures] = await Promise.all([
     stockService.getLowStock(branchId),
     getDormantCustomers(branchId),
     getRecentPaymentFailures(branchId),
     getOrderSpike(branchId),
+    getRecentEtimsFailures(branchId),
   ]);
 
   return {
@@ -82,6 +101,7 @@ const getDashboardAlerts = async (branchId) => {
     dormantCustomers,
     paymentFailures: { count: paymentFailures.length, items: paymentFailures },
     orderSpike,
+    etimsFailures: { count: etimsFailures.length, items: etimsFailures },
   };
 };
 

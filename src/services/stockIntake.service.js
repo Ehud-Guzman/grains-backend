@@ -5,6 +5,7 @@ const activityLogService = require('./activityLog.service');
 const { LOG_ACTIONS } = require('../utils/constants');
 const { paginate, buildPaginationMeta } = require('../utils/paginate');
 const generateIntakeRef = require('../utils/generateIntakeRef');
+const logger = require('../utils/logger');
 
 // ── CREATE ────────────────────────────────────────────────────────────────────
 const create = async (data, userId, branchId) => {
@@ -120,6 +121,17 @@ const markProcessed = async (id, userId, branchId, processedNotes = '') => {
   intake.processedNotes = processedNotes?.trim() || '';
   await intake.save();
 
+  // Visibility flag only — deliberately not a hard block, since a single truck
+  // arrival can be packed into stock across several separate "add delivery" actions
+  // (or none, if goods were rejected/returned). Surfaces in the audit trail so an
+  // admin can spot an intake that was closed out without ever reaching stock.
+  const stockLinked = intake.linkedDeliveries.length > 0;
+  if (!stockLinked) {
+    logger.warn('[STOCK INTAKE] Marked processed with no linked stock delivery', {
+      intakeRef: intake.intakeRef, branchId
+    });
+  }
+
   await activityLogService.log({
     actorId:    userId,
     actorRole:  'supervisor',
@@ -132,6 +144,7 @@ const markProcessed = async (id, userId, branchId, processedNotes = '') => {
       supplier:       intake.supplier,
       itemCount:      intake.items.length,
       processedNotes: processedNotes || '',
+      stockLinked,
     },
   });
 
