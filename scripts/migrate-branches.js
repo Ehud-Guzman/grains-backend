@@ -12,7 +12,7 @@
  *   node scripts/migrate-branches.js
  *
  * Override defaults with env vars before running:
- *   BRANCH_NAME="Vittorios Main Branch" BRANCH_SLUG="main" BRANCH_LOCATION="Bungoma, Kenya" node scripts/migrate-branches.js
+ *   BRANCH_NAME="Vittorios Main Branch" BRANCH_SLUG="main" BRANCH_LOCATION="Nairobi, Kenya" node scripts/migrate-branches.js
  */
 
 require('dotenv').config({ path: require('path').join(__dirname, '../.env') });
@@ -30,7 +30,7 @@ const OrderCounter = require('../src/models/OrderCounter');
 
 const BRANCH_NAME     = process.env.BRANCH_NAME     || 'Main Branch';
 const BRANCH_SLUG     = process.env.BRANCH_SLUG     || 'main';
-const BRANCH_LOCATION = process.env.BRANCH_LOCATION || 'Bungoma, Kenya';
+const BRANCH_LOCATION = process.env.BRANCH_LOCATION || 'Nairobi, Kenya';
 const BRANCH_PHONE    = process.env.BRANCH_PHONE    || '';
 
 async function run() {

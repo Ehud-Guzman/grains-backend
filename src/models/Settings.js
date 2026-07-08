@@ -14,7 +14,7 @@ const settingsSchema = new mongoose.Schema({
   shopPhones:   { type: [String], default: [] },
   shopEmail:    { type: String, default: 'vittoriostrades@gmail.com' },
   shopHours:    { type: String, default: 'Mon – Sat: 7:00 AM – 7:00 PM' },
-  shopLocation: { type: String, default: 'Bungoma, Kenya' },
+  shopLocation: { type: String, default: 'Nairobi, Kenya' },
   shopWhatsapp: { type: String, default: '' },
 
   // ── ORDER SETTINGS ────────────────────────────────────────────────────────

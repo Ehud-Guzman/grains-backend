@@ -150,10 +150,10 @@ const NAMES = [
 ];
 
 const LOCATIONS = [
-  'Bungoma Town', 'Webuye', 'Malaba', 'Tongaren', 'Chwele',
-  'Kimilili', 'Naitiri', 'Bumula', 'Sirisia', 'Bokoli',
-  'Kanduyi', 'Musikoma', 'Ndivisi', 'Kibingei', 'Bungoma CBD',
-  'Misikhu', 'Sangalo', 'Lukusi', 'Lwandanyi',
+  'Nairobi CBD', 'Westlands', 'Kasarani', 'Embakasi', 'Kilimani',
+  'Karen', 'Ruaka', 'Kayole', 'Roysambu', 'Langata',
+  'Dagoretti', 'Ngara', 'Buruburu', 'South B', 'Nairobi West',
+  'Kahawa', 'Umoja', 'Donholm', 'Ruiru',
 ];
 
 const PRODUCT_QUERIES = [
