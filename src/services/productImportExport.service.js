@@ -7,6 +7,7 @@ const { AppError } = require('../middleware/errorHandler.middleware');
 const { invalidateCache } = require('./product.service');
 const { normalizeImageUrls } = require('../utils/imageUrl');
 const priceLogService = require('./priceLog.service');
+const { appEvents, PRICE_EVENTS } = require('../events/appEvents');
 const logger = require('../utils/logger');
 
 const HEADER_ROW = [
@@ -445,13 +446,36 @@ const importProducts = async (fileBuffer, adminId, options = {}) => {
             const mergedImages = mergeUniqueStrings(existing.imageURLs, productData.imageURLs);
             const mergedVarieties = buildMergedVarieties(existing.varieties, varieties);
 
-            // Snapshot old prices before mutation so a bulk-import price change is
-            // logged to PriceLog the same way a single-product admin edit is —
-            // otherwise mass repricing via import leaves no audit trail at all.
+            // Snapshot old prices + stock before mutation. Prices are logged to
+            // PriceLog the same way a single-product admin edit is. Stock for
+            // packaging that already existed must never move via this bulk
+            // document overwrite — it's a read-modify-write with no atomicity
+            // and no StockLog entry, so a concurrent order's stock deduction
+            // could be silently clobbered by an import running at the same time.
             const oldPriceMap = {};
+            const oldStockMap = {};
             for (const v of (existing.varieties || [])) {
               for (const pkg of (v.packaging || [])) {
-                oldPriceMap[`${v.varietyName}::${pkg.size}`] = pkg.priceKES;
+                const key = `${v.varietyName}::${pkg.size}`;
+                oldPriceMap[key] = pkg.priceKES;
+                oldStockMap[key] = pkg.stock;
+              }
+            }
+
+            // Pull any requested stock change for existing packaging out of the
+            // bulk write and reapply it after save through stock.service.js
+            // (atomic $set + StockLog + correct back-in-stock event).
+            const pendingStockAdjustments = [];
+            for (const v of mergedVarieties) {
+              for (const pkg of (v.packaging || [])) {
+                const key = `${v.varietyName}::${pkg.size}`;
+                if (Object.prototype.hasOwnProperty.call(oldStockMap, key) && !pkg.quoteOnly) {
+                  const oldStock = oldStockMap[key];
+                  if (pkg.stock !== null && pkg.stock !== undefined && pkg.stock !== oldStock) {
+                    pendingStockAdjustments.push({ varietyName: v.varietyName, size: pkg.size, newQuantity: pkg.stock });
+                  }
+                  pkg.stock = oldStock;
+                }
               }
             }
 
@@ -461,6 +485,18 @@ const importProducts = async (fileBuffer, adminId, options = {}) => {
               varieties: mergedVarieties,
               updatedAt: new Date()
             }, { runValidators: true });
+
+            if (pendingStockAdjustments.length > 0) {
+              const stockService = require('./stock.service'); // lazy require — avoids circular dep at module load
+              for (const adj of pendingStockAdjustments) {
+                await stockService.manualAdjustment(
+                  existing._id, adj.varietyName, adj.size, adj.newQuantity,
+                  'Stock updated via product import', adminId, branch._id, actorRole
+                ).catch(err => logger.error('[import] Failed to apply stock adjustment', {
+                  productId: existing._id, varietyName: adj.varietyName, size: adj.size, err: err.message
+                }));
+              }
+            }
 
             for (const v of mergedVarieties) {
               for (const pkg of (v.packaging || [])) {
@@ -479,6 +515,19 @@ const importProducts = async (fileBuffer, adminId, options = {}) => {
                   }).catch(err => logger.error('[priceLog] Failed to log bulk-import price change', {
                     productId: existing._id, err: err.message
                   }));
+
+                  // Single-product edits fire this so price-drop subscribers get
+                  // notified — bulk import must do the same or those customers
+                  // never hear about a mass reprice.
+                  appEvents.emit(PRICE_EVENTS.CHANGED, {
+                    productId: existing._id,
+                    branchId: branch._id,
+                    varietyName: v.varietyName,
+                    packaging: pkg.size,
+                    oldPrice,
+                    newPrice: pkg.priceKES,
+                    changedBy: adminId,
+                  });
                 }
               }
             }

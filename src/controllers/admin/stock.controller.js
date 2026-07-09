@@ -43,7 +43,10 @@ const manualAdjustment = async (req, res, next) => {
 const batchUpdate = async (req, res, next) => {
   try {
     const result = await stockService.batchUpdate(req.body.updates, req.user.id, req.branchId);
-    return success(res, result, `${result.length} stock entries updated`);
+    const message = result.failed.length > 0
+      ? `${result.succeeded.length} entries updated, ${result.failed.length} failed`
+      : `${result.succeeded.length} stock entries updated`;
+    return success(res, result, message);
   } catch (err) { next(err); }
 };
 

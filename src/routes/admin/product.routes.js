@@ -9,6 +9,7 @@ const { createProductValidator, updateProductValidator } = require('../../valida
 const { adminLimiter } = require('../../middleware/rateLimit.middleware');
 const multer = require('multer');
 const cloudinary = require('cloudinary').v2;
+const { isValidImageBuffer } = require('../../utils/validateImageBuffer');
 
 // Cloudinary config — credentials from .env, never hardcoded
 cloudinary.config({
@@ -65,6 +66,11 @@ router.post(
 
       if (!req.files || req.files.length === 0) {
         return res.status(400).json({ success: false, message: 'No image files provided' });
+      }
+
+      const invalidFile = req.files.find(file => !isValidImageBuffer(file.buffer));
+      if (invalidFile) {
+        return res.status(400).json({ success: false, message: `"${invalidFile.originalname}" is not a valid JPEG, PNG, or WebP image` });
       }
 
       // Upload each file to Cloudinary

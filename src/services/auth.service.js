@@ -14,6 +14,7 @@ const MAX_FAILED_LOGINS = AUTH_LIMITS.MAX_FAILED_LOGINS;
 const BCRYPT_WORK_FACTOR = AUTH_LIMITS.BCRYPT_WORK_FACTOR;
 const OTP_EXPIRY_MINUTES = AUTH_LIMITS.OTP_EXPIRY_MINUTES;
 const OTP_MAX_ATTEMPTS = AUTH_LIMITS.OTP_MAX_ATTEMPTS;
+const OTP_RESEND_COOLDOWN_MS = AUTH_LIMITS.OTP_RESEND_COOLDOWN_MS;
 
 const GENERIC_RESET_ERROR = 'Invalid or expired code. Please request a new one.';
 
@@ -529,6 +530,20 @@ const forgotPassword = async (phone, ip = null) => {
   // via OTP is exactly how a legitimately locked-out customer recovers, and
   // resetPassword() below unlocks the account on a successful reset.
   if (user) {
+    // Per-phone resend cooldown — without this, only the shared IP-based rate
+    // limiter gates this endpoint, so a phone number can be SMS-bombed with
+    // reset codes (real cost once SMS leaves sandbox) and a user's in-flight
+    // code gets silently invalidated by every repeat request. Derived from
+    // passwordResetExpires rather than a new field: issuedAt = expiry - TTL.
+    if (user.passwordResetExpires) {
+      const issuedAt = user.passwordResetExpires.getTime() - OTP_EXPIRY_MINUTES * 60 * 1000;
+      if (Date.now() - issuedAt < OTP_RESEND_COOLDOWN_MS) {
+        // Same generic response as the success path — must not reveal that a
+        // code was already sent recently, or this becomes an enumeration signal.
+        return { success: true, message: 'If an account exists for this number, a reset code has been sent.' };
+      }
+    }
+
     const otp = String(Math.floor(100000 + Math.random() * 900000));
     const passwordResetOtpHash = await bcrypt.hash(otp, BCRYPT_WORK_FACTOR);
 

@@ -1,6 +1,7 @@
 const authService = require('../services/auth.service');
 const { success, error } = require('../utils/apiResponse');
 const { AUTH_LIMITS } = require('../utils/constants');
+const { isValidImageBuffer } = require('../utils/validateImageBuffer');
 
 // Refresh token cookie options — HttpOnly prevents JS access (XSS mitigation).
 // SameSite=None + Secure for cross-origin prod; Lax for same-origin dev.
@@ -185,6 +186,10 @@ const uploadAvatar = async (req, res, next) => {
   try {
     if (!req.file) {
       return res.status(400).json({ success: false, message: 'No image provided' });
+    }
+
+    if (!isValidImageBuffer(req.file.buffer)) {
+      return res.status(400).json({ success: false, message: 'File is not a valid JPEG, PNG, or WebP image' });
     }
 
     const cloudinary = require('cloudinary').v2;

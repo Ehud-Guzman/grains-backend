@@ -8,6 +8,7 @@ const { requireMinRole, requireBusinessRole } = require('../../middleware/role.m
 const { adminLimiter } = require('../../middleware/rateLimit.middleware');
 const { validate } = require('../../middleware/validate.middleware');
 const { createPromotionValidator, updatePromotionValidator } = require('../../validators/promotion.validator');
+const { isValidImageBuffer } = require('../../utils/validateImageBuffer');
 
 router.use(verifyToken, adminLimiter);
 
@@ -25,6 +26,9 @@ const upload = multer({
 router.post('/upload-image', requireBusinessRole('admin'), upload.single('image'), async (req, res, next) => {
   try {
     if (!req.file) return res.status(400).json({ success: false, message: 'No image file provided' });
+    if (!isValidImageBuffer(req.file.buffer)) {
+      return res.status(400).json({ success: false, message: 'File is not a valid JPEG, PNG, or WebP image' });
+    }
     const url = await new Promise((resolve, reject) => {
       const stream = cloudinary.uploader.upload_stream(
         { folder: 'grains-shop/promotions', transformation: [{ width: 1200, height: 630, crop: 'limit', quality: 'auto', fetch_format: 'auto' }] },

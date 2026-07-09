@@ -283,7 +283,7 @@ const addDelivery = async (productId, varietyName, packagingSize, quantity, reas
     productId, branchId, varietyName, packaging: packagingSize, newStock: balanceAfter,
   });
 
-  invalidateCache();
+  invalidateCache(branchId);
   return { product, balanceAfter };
 };
 
@@ -360,27 +360,48 @@ const manualAdjustment = async (productId, varietyName, packagingSize, newQuanti
     });
   }
 
-  invalidateCache();
+  invalidateCache(branchId);
   return { product, balanceAfter: newQuantity };
 };
 
 // ── BATCH UPDATE ──────────────────────────────────────────────────────────────
 // SRS 5.1 - update multiple products from one screen after delivery
+// Each entry runs independently (no shared transaction — addDelivery doesn't take
+// a session) so a failure partway through must not be reported as a total failure:
+// earlier entries already committed their stock + StockLog. Report exactly what
+// succeeded and what didn't rather than throwing on the first error.
 const batchUpdate = async (updates, performedBy, branchId) => {
   if (!Array.isArray(updates) || updates.length === 0) {
     throw new AppError('Updates array is required', 400, 'INVALID_INPUT');
   }
 
-  const results = [];
+  const succeeded = [];
+  const failed = [];
   for (const u of updates) {
-    const result = await addDelivery(
-      u.productId, u.varietyName, u.packagingSize,
-      u.quantity, u.reason, u.supplierId || null, performedBy, branchId,
-      undefined, u.sourceIntakeId || null
-    );
-    results.push(result);
+    try {
+      const result = await addDelivery(
+        u.productId, u.varietyName, u.packagingSize,
+        u.quantity, u.reason, u.supplierId || null, performedBy, branchId,
+        undefined, u.sourceIntakeId || null
+      );
+      succeeded.push({ productId: u.productId, varietyName: u.varietyName, packagingSize: u.packagingSize, ...result });
+    } catch (err) {
+      failed.push({
+        productId: u.productId, varietyName: u.varietyName, packagingSize: u.packagingSize,
+        message: err.message
+      });
+    }
   }
-  return results;
+
+  if (succeeded.length === 0) {
+    throw new AppError(
+      failed.length === 1 ? failed[0].message : `All ${failed.length} stock entries failed`,
+      409,
+      'BATCH_UPDATE_FAILED'
+    );
+  }
+
+  return { succeeded, failed };
 };
 
 // ── GET STOCK OVERVIEW ────────────────────────────────────────────────────────
@@ -388,11 +409,10 @@ const batchUpdate = async (updates, performedBy, branchId) => {
 const getOverview = async (filters = {}, branchId) => {
   const matchStage = {};
   if (branchId) matchStage.branchId = branchId;
-  if (filters.lowStock === 'true') {
-    matchStage['varieties.packaging'] = {
-      $elemMatch: { $expr: { $lte: ['$stock', '$lowStockThreshold'] } }
-    };
-  }
+  // Note: low-stock filtering happens in JS below, after flattening — $expr
+  // cannot be scoped to elements of a nested array (varieties.packaging) at the
+  // query level, so a Mongo-side pre-filter here would either match nothing or
+  // throw ("$expr can only be applied to the top-level document").
 
   const products = await Product.find(matchStage)
     .select('name category varieties isActive')

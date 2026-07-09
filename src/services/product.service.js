@@ -7,7 +7,7 @@ const { paginate, buildPaginationMeta } = require('../utils/paginate');
 const { normalizeImageUrls } = require('../utils/imageUrl');
 const { deleteImages } = require('./upload.service');
 const priceLogService = require('./priceLog.service');
-const { appEvents, PRICE_EVENTS, STOCK_EVENTS } = require('../events/appEvents');
+const { appEvents, PRICE_EVENTS } = require('../events/appEvents');
 const logger = require('../utils/logger');
 
 const exposePublicStockFields = (product) => product;
@@ -178,11 +178,15 @@ const update = async (productId, data, adminId, branchId, actorRole = 'admin') =
 
   const before = { name: product.name, category: product.category, isActive: product.isActive };
 
-  // Snapshot old prices before mutation (for PriceLog)
+  // Snapshot old prices + stock before mutation (for PriceLog, and to keep stock
+  // out of the plain document save below)
   const oldPriceMap = {};
+  const oldStockMap = {};
   for (const v of (product.varieties || [])) {
     for (const pkg of (v.packaging || [])) {
-      oldPriceMap[`${v.varietyName}::${pkg.size}`] = pkg.priceKES;
+      const key = `${v.varietyName}::${pkg.size}`;
+      oldPriceMap[key] = pkg.priceKES;
+      oldStockMap[key] = pkg.stock;
     }
   }
 
@@ -196,12 +200,35 @@ const update = async (productId, data, adminId, branchId, actorRole = 'admin') =
   const seasonTag = data.seasonTag || null;
   delete data.seasonTag; // not a Product field — only used to tag this update's PriceLog entries
   if (Array.isArray(data.imageURLs)) data.imageURLs = normalizeImageUrls(data.imageURLs);
+
+  // Stock for packaging that already existed must never move through this plain
+  // document save — it's a read-modify-write with no atomicity and no StockLog
+  // entry, so it can silently clobber a concurrent order's stock deduction/release.
+  // A form-submitted stock value can't be trusted to mean "the admin intends to
+  // change this" vs. "this is just whatever the form had loaded before a concurrent
+  // order moved the real number" — the two are indistinguishable from a snapshot
+  // diff alone. So this endpoint always keeps the DB's current stock for packaging
+  // that already existed, no matter what's submitted; deliberate stock corrections
+  // belong exclusively to the Stock page (delivery / manual adjustment), which
+  // captures a reason and reads the live value at the moment of the change. New
+  // packaging entries still take their initial stock from the payload — nothing
+  // to race with yet.
   if (Array.isArray(data.varieties)) {
-    data.varieties = data.varieties.map(variety => ({
-      ...variety,
-      imageURLs: normalizeImageUrls(variety.imageURLs),
-    }));
+    data.varieties = data.varieties.map(variety => {
+      const packaging = (variety.packaging || []).map(pkg => {
+        const key = `${variety.varietyName}::${pkg.size}`;
+        return Object.prototype.hasOwnProperty.call(oldStockMap, key)
+          ? { ...pkg, stock: oldStockMap[key] }
+          : pkg;
+      });
+      return {
+        ...variety,
+        imageURLs: normalizeImageUrls(variety.imageURLs),
+        packaging,
+      };
+    });
   }
+
   Object.assign(product, data);
   product.markModified('imageURLs');
   product.markModified('varieties');
@@ -237,17 +264,6 @@ const update = async (productId, data, adminId, branchId, actorRole = 'admin') =
           oldPrice,
           newPrice: pkg.priceKES,
           changedBy: adminId,
-        });
-      }
-
-      // Emit stock update when stock is explicitly set (for back-in-stock alerts)
-      if (oldPriceMap[key] !== undefined && pkg.stock > 0) {
-        appEvents.emit(STOCK_EVENTS.UPDATED, {
-          productId: product._id,
-          branchId,
-          varietyName: v.varietyName,
-          packaging: pkg.size,
-          newStock: pkg.stock,
         });
       }
     }
@@ -317,6 +333,11 @@ const deleteProduct = async (productId, adminId, branchId, actorRole = 'admin') 
   }
 
   await Product.findByIdAndDelete(productId);
+
+  const productImages = product.imageURLs || [];
+  const varietyImages = (product.varieties || []).flatMap(v => v.imageURLs || []);
+  const allImages = [...productImages, ...varietyImages];
+  if (allImages.length > 0) deleteImages(allImages).catch(() => {});
 
   await activityLogService.log({
     actorId: adminId,

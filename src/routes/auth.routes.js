@@ -38,7 +38,7 @@ router.post('/refresh', authLimiter, refreshValidator, validate, authController.
 router.post('/select-branch', authLimiter, authController.selectBranch);
 
 // POST /api/auth/switch-branch — superadmin switches branch context while already logged in
-router.post('/switch-branch', verifyToken, authController.switchBranch);
+router.post('/switch-branch', verifyToken, authLimiter, authController.switchBranch);
 
 // POST /api/auth/logout — send { refreshToken } in body to blacklist it
 router.post('/logout', optionalAuth, authController.logout);
