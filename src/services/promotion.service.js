@@ -45,7 +45,7 @@ const getById = async (id, branchId) => {
 // Whitelist client-settable fields — branchId/createdBy must never come from
 // the request body (mass-assignment guard)
 const pickPromotionFields = (data) => {
-  const allowed = ['title', 'description', 'imageUrl', 'type', 'linkedProductId', 'startDate', 'endDate', 'isActive', 'seasonTag', 'sortOrder'];
+  const allowed = ['title', 'description', 'imageUrl', 'mediaType', 'videoUrl', 'type', 'linkedProductId', 'startDate', 'endDate', 'isActive', 'seasonTag', 'sortOrder'];
   return Object.fromEntries(
     Object.entries(data || {}).filter(([key]) => allowed.includes(key))
   );

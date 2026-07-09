@@ -5,6 +5,10 @@ const promotionSchema = new mongoose.Schema({
   title:           { type: String, required: true, trim: true },
   description:     { type: String, default: null, trim: true },
   imageUrl:        { type: String, default: null },
+  // Only banner/seasonal types render media on the storefront (PromoBannerCarousel) —
+  // mediaType picks which of imageUrl/videoUrl is shown; the other is ignored.
+  mediaType:       { type: String, enum: ['image', 'video'], default: 'image' },
+  videoUrl:        { type: String, default: null },
   type:            { type: String, enum: ['banner', 'featured_product', 'seasonal', 'tip'], required: true },
   linkedProductId: { type: mongoose.Schema.Types.ObjectId, ref: 'Product', default: null },
   startDate:       { type: Date, default: null },

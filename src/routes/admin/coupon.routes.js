@@ -12,6 +12,7 @@ router.use(verifyToken, adminLimiter);
 router.get('/',     requireMinRole('supervisor'), couponController.getAll);
 router.get('/performance', requireMinRole('supervisor'), couponController.getPerformance);
 router.get('/:id',  requireMinRole('supervisor'), couponController.getById);
+router.get('/:id/redemptions', requireMinRole('supervisor'), couponController.getRedemptions);
 router.post('/',    requireMinRole('admin'),       createCouponValidator, validate, couponController.create);
 router.put('/:id',  requireMinRole('admin'),       updateCouponValidator, validate, couponController.update);
 router.delete('/:id', requireMinRole('admin'),     couponController.remove);

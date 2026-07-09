@@ -24,6 +24,13 @@ const getById = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+const getRedemptions = async (req, res, next) => {
+  try {
+    const result = await couponService.getRedemptions(req.params.id, req.branchId, req.query);
+    return success(res, result);
+  } catch (err) { next(err); }
+};
+
 const create = async (req, res, next) => {
   try {
     const coupon = await couponService.create(req.body, req.branchId, req.user.id);
@@ -82,4 +89,4 @@ const validatePublic = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-module.exports = { getAll, getPerformance, getById, create, update, remove, validatePublic };
+module.exports = { getAll, getPerformance, getById, getRedemptions, create, update, remove, validatePublic };

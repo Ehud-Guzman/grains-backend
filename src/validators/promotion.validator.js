@@ -12,6 +12,14 @@ const sharedFieldRules = [
     .optional({ nullable: true })
     .isURL({ protocols: ['https', 'http'] }).withMessage('Image URL must be a valid URL'),
 
+  body('mediaType')
+    .optional()
+    .isIn(['image', 'video']).withMessage('mediaType must be image or video'),
+
+  body('videoUrl')
+    .optional({ nullable: true })
+    .isURL({ protocols: ['https', 'http'] }).withMessage('Video URL must be a valid URL'),
+
   body('linkedProductId')
     .optional({ nullable: true })
     .isMongoId().withMessage('Invalid product ID'),

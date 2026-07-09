@@ -3,6 +3,8 @@ const Coupon = require('../models/Coupon');
 const Order = require('../models/Order');
 const { AppError } = require('../middleware/errorHandler.middleware');
 const { endOfDayEAT } = require('../utils/businessTime');
+const { paginate, buildPaginationMeta } = require('../utils/paginate');
+const { withGuestFallbackList } = require('../utils/orderGuestFallback');
 
 // ── VALIDATE & COMPUTE DISCOUNT ───────────────────────────────────────────────
 // Returns { coupon, discountAmount } or throws AppError.
@@ -53,12 +55,22 @@ const incrementUsage = async (code, branchId, session) => {
   const opts = session ? { session } : {};
   const upper = code.toUpperCase().trim();
 
-  const coupon = await Coupon.findOne({ code: upper, branchId }, 'usageLimit', opts).lean();
+  const coupon = await Coupon.findOne({ code: upper, branchId }, 'usageLimit isActive expiresAt', opts).lean();
   if (!coupon) throw new AppError('Coupon not found during increment', 404, 'COUPON_NOT_FOUND');
 
+  // Re-check activation/expiry, not just the usage limit — a coupon deactivated
+  // or expired in the window between validate() (checkout preview) and this call
+  // (order commit) must not be silently consumed anyway.
+  if (!coupon.isActive) {
+    throw new AppError('This coupon is no longer active.', 400, 'COUPON_INVALID');
+  }
+  if (coupon.expiresAt && new Date() > endOfDayEAT(new Date(coupon.expiresAt))) {
+    throw new AppError('This coupon has expired.', 400, 'COUPON_EXPIRED');
+  }
+
   const filter = coupon.usageLimit !== null
-    ? { code: upper, branchId, usedCount: { $lt: coupon.usageLimit } }
-    : { code: upper, branchId };
+    ? { code: upper, branchId, isActive: true, usedCount: { $lt: coupon.usageLimit } }
+    : { code: upper, branchId, isActive: true };
 
   const result = await Coupon.updateOne(filter, { $inc: { usedCount: 1 } }, opts);
 
@@ -171,4 +183,35 @@ const getPerformance = async (branchId) => {
   });
 };
 
-module.exports = { validate, incrementUsage, releaseUsage, getAll, getById, create, update, remove, getPerformance };
+// ── REDEMPTIONS (drill-down) ──────────────────────────────────────────────────
+// The "how much / when" behind getPerformance's aggregate numbers — every order
+// that carried this coupon's code, newest first. Includes every status (not just
+// REVENUE_STATUSES) so an admin can see pending/cancelled/rejected attempts too,
+// with the order's own status shown per row for context.
+const getRedemptions = async (couponId, branchId, query = {}) => {
+  const coupon = await Coupon.findOne({ _id: couponId, branchId }).select('code').lean();
+  if (!coupon) throw new AppError('Coupon not found', 404, 'COUPON_NOT_FOUND');
+
+  const { page, limit, skip } = paginate(query);
+  const filter = { branchId, couponCode: coupon.code };
+
+  const [total, orders] = await Promise.all([
+    Order.countDocuments(filter),
+    Order.find(filter)
+      .select('orderRef status paymentStatus subtotal couponDiscount total createdAt userId guestId guestName guestPhone')
+      .populate('userId', 'name phone')
+      .populate('guestId', 'name phone')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .lean(),
+  ]);
+
+  return {
+    code: coupon.code,
+    orders: withGuestFallbackList(orders),
+    pagination: buildPaginationMeta(page, limit, total),
+  };
+};
+
+module.exports = { validate, incrementUsage, releaseUsage, getAll, getById, create, update, remove, getPerformance, getRedemptions };
