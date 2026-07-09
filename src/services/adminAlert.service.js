@@ -122,6 +122,13 @@ const notifyNewOrder = async (order, branchId) => {
     await notificationService.sendEmail({ to: settings.shopEmail, subject, html }).catch(err =>
       logger.error('[adminAlert] new order email failed', { err: err.message }));
   }
+
+  if (settings.shopPhone) {
+    await notificationService.sendSMS(
+      settings.shopPhone,
+      `New order ${order.orderRef} — KES ${order.total?.toLocaleString()} (${order.deliveryMethod}, ${order.paymentMethod})`
+    ).catch(err => logger.error('[adminAlert] new order SMS failed', { err: err.message }));
+  }
 };
 
 // ── PUSH: LOW STOCK DIGEST (daily job, gated by notifyAdminLowStock) ─────────

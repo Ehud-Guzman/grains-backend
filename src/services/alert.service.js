@@ -46,6 +46,28 @@ const THROTTLE_MS = {
 // in the window (avoids noisy alerts on a single transient error)
 const SERVER_ERROR_THRESHOLD = 3;
 
+// throttleState entries are keyed per IP / per userId+route and never removed
+// on their own — left unchecked this grows forever over the life of a
+// long-running process, worst-case fastest under exactly the bot/attack traffic
+// that creates the most distinct keys. Retention is well beyond the largest
+// configured throttle window (15 min) so nothing is pruned mid-dedup-window.
+const THROTTLE_ENTRY_MAX_AGE_MS = 60 * 60 * 1000;
+const THROTTLE_PRUNE_INTERVAL_MS = 30 * 60 * 1000;
+
+const pruneThrottleState = () => {
+  const now = Date.now();
+  for (const [key, state] of throttleState) {
+    const lastActivity = state.lastSentAt || state.windowStart || 0;
+    if (now - lastActivity > THROTTLE_ENTRY_MAX_AGE_MS) {
+      throttleState.delete(key);
+    }
+  }
+};
+
+if (process.env.NODE_ENV !== 'test') {
+  setInterval(pruneThrottleState, THROTTLE_PRUNE_INTERVAL_MS).unref();
+}
+
 // ── ALERT CONFIG ──────────────────────────────────────────────────────────────
 const ALERT_CONFIG = {
   NOSQL_INJECTION: {
@@ -129,6 +151,17 @@ const shouldAlert = (type, key) => {
   return false;
 };
 
+// Several alert data fields carry attacker-controlled input verbatim (User-Agent,
+// request route, the NoSQL-injection attempted key) — these are exactly the
+// alerts triggered BY malicious traffic, so they must be escaped before landing
+// in an HTML email the admin opens.
+const escapeHtml = (str) => String(str)
+  .replace(/&/g, '&amp;')
+  .replace(/</g, '&lt;')
+  .replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;')
+  .replace(/'/g, '&#39;');
+
 // ── EMAIL BUILDER ─────────────────────────────────────────────────────────────
 const buildEmail = (type, data) => {
   const cfg   = ALERT_CONFIG[type];
@@ -138,8 +171,8 @@ const buildEmail = (type, data) => {
   const rows = Object.entries(data)
     .map(([k, v]) =>
       `<tr>
-         <td style="padding:5px 12px;font-weight:600;color:#555;white-space:nowrap;vertical-align:top">${k}</td>
-         <td style="padding:5px 12px;color:#222;word-break:break-all">${String(v)}</td>
+         <td style="padding:5px 12px;font-weight:600;color:#555;white-space:nowrap;vertical-align:top">${escapeHtml(k)}</td>
+         <td style="padding:5px 12px;color:#222;word-break:break-all">${escapeHtml(v)}</td>
        </tr>`
     )
     .join('');

@@ -49,27 +49,29 @@ const triggerBackInStock = async ({ productId, branchId, varietyName, packaging 
     const user = alert.userId;
     if (!user) continue;
 
-    try {
-      if (settings?.smsEnabled && user.phone) {
-        await notificationService.sendSMS(
-          user.phone,
-          `Hi ${user.name?.split(' ')[0] || 'there'}! "${alert.productName}" (${alert.varietyName} ${alert.packaging}) is back in stock. Order now at Vittorios Grains.`
-        );
-      }
-      if (settings?.emailEnabled && user.email) {
-        await notificationService.sendEmail({
-          to: user.email,
-          subject: `Back in stock: ${alert.productName}`,
-          text: `Good news! ${alert.productName} — ${alert.varietyName} ${alert.packaging} is back in stock. Visit our shop to order.`,
-          html: `<p>Good news! <strong>${alert.productName} — ${alert.varietyName} ${alert.packaging}</strong> is back in stock.</p><p>Visit our shop to place your order.</p>`,
-        });
-      }
+    // SMS and email are independent channels — a failure in one must not stop
+    // the other from being attempted, so each gets its own catch.
+    if (settings?.smsEnabled && user.phone) {
+      await notificationService.sendSMS(
+        user.phone,
+        `Hi ${user.name?.split(' ')[0] || 'there'}! "${alert.productName}" (${alert.varietyName} ${alert.packaging}) is back in stock. Order now at Vittorios Grains.`
+      ).catch(err => logger.error('[alert] back_in_stock SMS failed', { userId: user._id, err: err.message }));
+    }
+    if (settings?.emailEnabled && user.email) {
+      await notificationService.sendEmail({
+        to: user.email,
+        subject: `Back in stock: ${alert.productName}`,
+        text: `Good news! ${alert.productName} — ${alert.varietyName} ${alert.packaging} is back in stock. Visit our shop to order.`,
+        html: `<p>Good news! <strong>${alert.productName} — ${alert.varietyName} ${alert.packaging}</strong> is back in stock.</p><p>Visit our shop to place your order.</p>`,
+      }).catch(err => logger.error('[alert] back_in_stock email failed', { userId: user._id, err: err.message }));
+    }
 
+    try {
       alert.isActive = false;
       alert.lastTriggeredAt = new Date();
       await alert.save();
     } catch (err) {
-      logger.error('[alert] back_in_stock trigger failed', { userId: user._id, err: err.message });
+      logger.error('[alert] back_in_stock failed to mark alert consumed', { userId: user._id, err: err.message });
     }
   }
 };
@@ -99,26 +101,28 @@ const triggerPriceDrop = async ({ productId, branchId, varietyName, packaging, o
     const user = alert.userId;
     if (!user) continue;
 
-    try {
-      if (settings?.smsEnabled && user.phone) {
-        await notificationService.sendSMS(
-          user.phone,
-          `Price drop alert! "${alert.productName}" (${alert.varietyName} ${alert.packaging}) dropped ${dropPct}% to KES ${newPrice.toLocaleString()}. Order now at Vittorios Grains.`
-        );
-      }
-      if (settings?.emailEnabled && user.email) {
-        await notificationService.sendEmail({
-          to: user.email,
-          subject: `Price drop: ${alert.productName} is now KES ${newPrice.toLocaleString()}`,
-          text: `Price drop! ${alert.productName} — ${alert.varietyName} ${alert.packaging} dropped ${dropPct}% from KES ${oldPrice.toLocaleString()} to KES ${newPrice.toLocaleString()}.`,
-          html: `<p><strong>Price drop!</strong> ${alert.productName} — ${alert.varietyName} ${alert.packaging} dropped <strong>${dropPct}%</strong> from KES ${oldPrice.toLocaleString()} to <strong>KES ${newPrice.toLocaleString()}</strong>.</p>`,
-        });
-      }
+    // SMS and email are independent channels — a failure in one must not stop
+    // the other from being attempted, so each gets its own catch.
+    if (settings?.smsEnabled && user.phone) {
+      await notificationService.sendSMS(
+        user.phone,
+        `Price drop alert! "${alert.productName}" (${alert.varietyName} ${alert.packaging}) dropped ${dropPct}% to KES ${newPrice.toLocaleString()}. Order now at Vittorios Grains.`
+      ).catch(err => logger.error('[alert] price_drop SMS failed', { userId: user._id, err: err.message }));
+    }
+    if (settings?.emailEnabled && user.email) {
+      await notificationService.sendEmail({
+        to: user.email,
+        subject: `Price drop: ${alert.productName} is now KES ${newPrice.toLocaleString()}`,
+        text: `Price drop! ${alert.productName} — ${alert.varietyName} ${alert.packaging} dropped ${dropPct}% from KES ${oldPrice.toLocaleString()} to KES ${newPrice.toLocaleString()}.`,
+        html: `<p><strong>Price drop!</strong> ${alert.productName} — ${alert.varietyName} ${alert.packaging} dropped <strong>${dropPct}%</strong> from KES ${oldPrice.toLocaleString()} to <strong>KES ${newPrice.toLocaleString()}</strong>.</p>`,
+      }).catch(err => logger.error('[alert] price_drop email failed', { userId: user._id, err: err.message }));
+    }
 
+    try {
       alert.lastTriggeredAt = new Date();
       await alert.save();
     } catch (err) {
-      logger.error('[alert] price_drop trigger failed', { userId: user._id, err: err.message });
+      logger.error('[alert] price_drop failed to save lastTriggeredAt', { userId: user._id, err: err.message });
     }
   }
 };

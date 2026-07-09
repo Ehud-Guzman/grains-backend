@@ -178,7 +178,7 @@ const dispatchOrderPlaced = async (order, branchId) => {
     if (settings.smsEnabled && contact.phone) {
       await sendSMS(contact.phone,
         `Hi ${contact.name}, your order ${ref} (${total}) has been received! We will confirm it shortly. – ${shop}`
-      );
+      ).catch(err => logger.error('[notification] dispatchOrderPlaced SMS failed', { err: err.message }));
     }
 
     if (settings.emailEnabled && contact.email) {
@@ -192,7 +192,7 @@ const dispatchOrderPlaced = async (order, branchId) => {
           <p class="total-row">Total: ${total}</p>
           <p>We will notify you as soon as it is confirmed. Thank you for shopping with us!</p>
         `),
-      });
+      }).catch(err => logger.error('[notification] dispatchOrderPlaced email failed', { err: err.message }));
     }
   } catch (err) {
     logger.error('[notification] dispatchOrderPlaced failed', { err: err.message });
@@ -216,7 +216,7 @@ const dispatchOrderApproved = async (order, branchId) => {
     if (settings.smsEnabled && contact.phone) {
       await sendSMS(contact.phone,
         `Hi ${contact.name}, your order ${ref} (${total}) has been CONFIRMED! We are preparing it now. – ${shop}`
-      );
+      ).catch(err => logger.error('[notification] dispatchOrderApproved SMS failed', { err: err.message }));
     }
 
     if (settings.emailEnabled && contact.email) {
@@ -230,7 +230,7 @@ const dispatchOrderApproved = async (order, branchId) => {
           <p class="total-row">Total: ${total}</p>
           <p>We are now preparing your order and will notify you when it is on its way.</p>
         `),
-      });
+      }).catch(err => logger.error('[notification] dispatchOrderApproved email failed', { err: err.message }));
     }
   } catch (err) {
     logger.error('[notification] dispatchOrderApproved failed', { err: err.message });
@@ -255,7 +255,7 @@ const dispatchOrderRejected = async (order, branchId) => {
     if (settings.smsEnabled && contact.phone) {
       await sendSMS(contact.phone,
         `Hi ${contact.name}, your order ${ref} was not approved. Reason: ${reason}. Contact us on ${phone} for assistance. – ${shop}`
-      );
+      ).catch(err => logger.error('[notification] dispatchOrderRejected SMS failed', { err: err.message }));
     }
 
     if (settings.emailEnabled && contact.email) {
@@ -268,7 +268,7 @@ const dispatchOrderRejected = async (order, branchId) => {
           <p><strong>Reason:</strong> ${reason}</p>
           ${phone ? `<p>If you have questions, please contact us on <strong>${phone}</strong>.</p>` : ''}
         `),
-      });
+      }).catch(err => logger.error('[notification] dispatchOrderRejected email failed', { err: err.message }));
     }
   } catch (err) {
     logger.error('[notification] dispatchOrderRejected failed', { err: err.message });
@@ -291,7 +291,7 @@ const dispatchOrderDispatched = async (order, branchId) => {
     if (settings.smsEnabled && contact.phone) {
       await sendSMS(contact.phone,
         `Hi ${contact.name}, your order ${ref} is OUT FOR DELIVERY! Please be available to receive it. – ${shop}`
-      );
+      ).catch(err => logger.error('[notification] dispatchOrderDispatched SMS failed', { err: err.message }));
     }
 
     if (settings.emailEnabled && contact.email) {
@@ -303,7 +303,7 @@ const dispatchOrderDispatched = async (order, branchId) => {
           <p>Your order <span class="ref">${ref}</span> is now <span class="badge blue">Out for Delivery</span>!</p>
           <p>Please be available to receive your order. Thank you for choosing ${shop}!</p>
         `),
-      });
+      }).catch(err => logger.error('[notification] dispatchOrderDispatched email failed', { err: err.message }));
     }
   } catch (err) {
     logger.error('[notification] dispatchOrderDispatched failed', { err: err.message });
@@ -321,7 +321,7 @@ const dispatchPasswordResetOtp = async (user, otp) => {
     if (user.phone) {
       await sendSMS(user.phone,
         `Your ${shop} password reset code is ${otp}. It expires in 10 minutes. If you didn't request this, ignore this message.`
-      );
+      ).catch(err => logger.error('[notification] dispatchPasswordResetOtp SMS failed', { err: err.message }));
     }
 
     if (user.email) {
@@ -334,7 +334,7 @@ const dispatchPasswordResetOtp = async (user, otp) => {
           <p style="font-size:28px;font-weight:700;letter-spacing:4px;color:#1a5c38;margin:20px 0">${otp}</p>
           <p>If you didn't request this, you can safely ignore this email.</p>
         `),
-      });
+      }).catch(err => logger.error('[notification] dispatchPasswordResetOtp email failed', { err: err.message }));
     }
   } catch (err) {
     logger.error('[notification] dispatchPasswordResetOtp failed', { err: err.message });
