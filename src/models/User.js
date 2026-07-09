@@ -59,7 +59,14 @@ const userSchema = new mongoose.Schema({
   isAvailableForDelivery: { type: Boolean, default: true },
   addresses: [addressSchema],
   notes: { type: String, default: null }, // internal admin notes
+  smsOptOut: { type: Boolean, default: false }, // customer opt-out of broadcast.service.js marketing SMS (transactional/order SMS are unaffected)
   isLocked: { type: Boolean, default: false },
+  // Bumped whenever a role change must invalidate already-issued access tokens —
+  // isLocked alone stops a locked account immediately, but a role DOWNGRADE
+  // leaves the old (higher-privilege) role baked into any JWT issued before the
+  // change, which auth.middleware.js can't otherwise revoke (access tokens are
+  // stateless — only explicitly logged-out/refreshed tokens are in TokenBlacklist).
+  tokenValidAfter: { type: Date, default: null },
   failedLoginCount: { type: Number, default: 0 },
   lastLoginAt: { type: Date, default: null },
   passwordResetOtpHash: { type: String, default: null },

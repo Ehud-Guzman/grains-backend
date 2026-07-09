@@ -1,23 +1,8 @@
-const mongoose = require('mongoose');
 const settingsService = require('../../services/settings.service');
-const { getDefaultBranch } = require('../../services/defaultBranch.service');
+const { resolvePublicBranch } = require('../../services/defaultBranch.service');
 const { calculateDeliveryFee } = require('../../services/order.service');
 const { success } = require('../../utils/apiResponse');
 const { AppError } = require('../../middleware/errorHandler.middleware');
-const Branch = require('../../models/Branch');
-
-// Resolve the branch for public storefront requests: an explicitly requested
-// ?branchId (must be a valid, active branch) wins; otherwise the default
-// branch. An invalid/inactive branchId falls back to default rather than
-// erroring — the storefront must always render.
-const resolvePublicBranch = async (requestedBranchId) => {
-  if (requestedBranchId && mongoose.Types.ObjectId.isValid(requestedBranchId)) {
-    const branch = await Branch.findOne({ _id: requestedBranchId, isActive: true })
-      .select('name slug location isDefault').lean();
-    if (branch) return branch;
-  }
-  return getDefaultBranch();
-};
 
 // GET /api/settings?branchId=…  (public — requested branch or default)
 const getPublic = async (req, res, next) => {

@@ -5,6 +5,7 @@ const Order = require('../models/Order');
 const { AppError } = require('../middleware/errorHandler.middleware');
 const activityLogService = require('./activityLog.service');
 const { paginate, buildPaginationMeta } = require('../utils/paginate');
+const { escapeRegex } = require('../utils/escapeRegex');
 
 // ── GET ALL CUSTOMERS ─────────────────────────────────────────────────────────
 // SRS 5.5 - unified view of registered accounts + guest records.
@@ -17,7 +18,7 @@ const getAll = async (filters = {}, query = {}, branchId = null) => {
   const matchStage = { role: 'customer' };
 
   if (filters.search) {
-    const regex = { $regex: filters.search, $options: 'i' };
+    const regex = { $regex: escapeRegex(filters.search), $options: 'i' };
     matchStage.$or = [
       { name: regex },
       { phone: regex },
@@ -114,7 +115,7 @@ const getOrderStats = async (userId, branchId = null) => {
 // ── GET CUSTOMER PROFILE ──────────────────────────────────────────────────────
 // SRS 5.5 - full profile with order history + lifetime stats
 const getProfile = async (userId, branchId = null) => {
-  const user = await User.findById(userId)
+  const user = await User.findOne({ _id: userId, role: 'customer' })
     .select('-passwordHash -failedLoginCount')
     .lean();
 
@@ -138,7 +139,7 @@ const getProfile = async (userId, branchId = null) => {
 // ── ADD INTERNAL NOTE ─────────────────────────────────────────────────────────
 // SRS 5.5 - admin-only notes on customer profile, append-only
 const addNote = async (userId, note, adminId, adminRole) => {
-  const user = await User.findById(userId);
+  const user = await User.findOne({ _id: userId, role: 'customer' });
   if (!user) throw new AppError('Customer not found', 404, 'USER_NOT_FOUND');
 
   // Append to existing notes with timestamp and author

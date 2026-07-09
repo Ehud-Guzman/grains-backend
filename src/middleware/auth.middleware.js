@@ -10,10 +10,17 @@ const logger = require('../utils/logger');
 const checkRevocationAndAccount = async (token, decoded) => {
   const [revoked, user] = await Promise.all([
     TokenBlacklist.exists({ token }),
-    User.findById(decoded.id).select('isLocked').lean()
+    User.findById(decoded.id).select('isLocked tokenValidAfter').lean()
   ]);
   if (revoked) return 'TOKEN_REVOKED';
   if (!user || user.isLocked) return 'ACCOUNT_LOCKED';
+  // A role change (e.g. demotion) bumps tokenValidAfter — any token issued
+  // (decoded.iat, seconds) before that instant still carries the old role
+  // claim and must stop working immediately rather than riding out its
+  // natural expiry.
+  if (user.tokenValidAfter && decoded.iat * 1000 < new Date(user.tokenValidAfter).getTime()) {
+    return 'TOKEN_REVOKED';
+  }
   return null;
 };
 

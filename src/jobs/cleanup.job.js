@@ -1,12 +1,11 @@
 // ── CLEANUP JOB ───────────────────────────────────────────────────────────────
 // Runs daily. Handles two tasks:
 // 1. Deletes ActivityLog entries older than each branch's logRetentionDays setting.
-// 2. Deletes Guest documents with no active orders older than GUEST_RETENTION_DAYS.
+// 2. Deletes Guest documents that have never placed an order, older than GUEST_RETENTION_DAYS.
 
 const ActivityLog = require('../models/ActivityLog');
 const Settings    = require('../models/Settings');
 const Guest       = require('../models/Guest');
-const Order       = require('../models/Order');
 const logger      = require('../utils/logger');
 
 const MS_PER_DAY             = 24 * 60 * 60 * 1000;
@@ -15,8 +14,6 @@ const GUEST_RETENTION_DAYS   = 90;
 const RUN_INTERVAL_MS        = MS_PER_DAY;
 // Delay first run by 2 minutes so startup I/O settles before cleanup hits the DB
 const INITIAL_DELAY_MS       = 2 * 60 * 1000;
-
-const ACTIVE_ORDER_STATUSES = ['pending', 'approved', 'preparing', 'out_for_delivery'];
 
 // ── ACTIVITY LOG CLEANUP ──────────────────────────────────────────────────────
 const runActivityLogCleanup = async () => {
@@ -64,19 +61,18 @@ const runGuestCleanup = async () => {
   try {
     const cutoff = new Date(Date.now() - GUEST_RETENTION_DAYS * MS_PER_DAY);
 
-    const oldGuests = await Guest.find({ createdAt: { $lt: cutoff } }).select('_id').lean();
+    // "Orphaned" means never placed an order at all — a guest with any order
+    // history (even a long-completed one) is a financial/KRA-relevant record
+    // that Order.guestName/guestPhone snapshots depend on Guest still being
+    // populate()-able where possible, and Guest.orders is the audit trail of
+    // what this contact has bought. Previously this only checked for *active*
+    // (non-terminal) orders, so a guest whose only order had already completed
+    // was deleted — destroying the ability to look up their order history by
+    // phone even though the order itself remains in the system.
+    const oldGuests = await Guest.find({ createdAt: { $lt: cutoff } }).select('_id orders').lean();
     if (!oldGuests.length) return;
 
-    const guestIds = oldGuests.map(g => g._id);
-
-    // Retain guests that still have at least one active (non-terminal) order
-    const activeGuestIds = await Order.distinct('guestId', {
-      guestId: { $in: guestIds },
-      status: { $in: ACTIVE_ORDER_STATUSES }
-    });
-
-    const activeSet = new Set(activeGuestIds.map(id => id.toString()));
-    const toDelete = guestIds.filter(id => !activeSet.has(id.toString()));
+    const toDelete = oldGuests.filter(g => !g.orders || g.orders.length === 0).map(g => g._id);
 
     if (toDelete.length) {
       await Guest.deleteMany({ _id: { $in: toDelete } });

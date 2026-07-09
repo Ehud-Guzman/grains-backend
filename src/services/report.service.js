@@ -4,6 +4,7 @@ const Product = require('../models/Product');
 const StockLog = require('../models/StockLog');
 const User = require('../models/User');
 const { NAIROBI_TZ, startOfDayEAT, endOfDayEAT, startOfMonthEAT } = require('../utils/businessTime');
+const { withGuestFallbackList } = require('../utils/orderGuestFallback');
 
 // ── HELPERS ───────────────────────────────────────────────────────────────────
 // Day/month boundaries follow the Nairobi clock (see utils/businessTime.js) —
@@ -116,7 +117,7 @@ const getDashboardKPIs = async (branchId) => {
       .populate('guestId', 'name phone')
       .sort({ createdAt: -1 })
       .limit(10)
-      .select('orderRef status total paymentMethod createdAt userId guestId')
+      .select('orderRef status total paymentMethod createdAt userId guestId guestName guestPhone')
       .lean(),
 
     // Cash flow this month: paid vs unpaid across all active orders
@@ -141,7 +142,7 @@ const getDashboardKPIs = async (branchId) => {
     revenueToday: revenueToday[0]?.total || 0,
     revenueThisMonth: revenueThisMonth[0]?.total || 0,
     lowStockCount,
-    recentOrders,
+    recentOrders: withGuestFallbackList(recentOrders),
     cashFlow: {
       paidRevenue:    paidFlow.total,
       paidOrders:     paidFlow.count,

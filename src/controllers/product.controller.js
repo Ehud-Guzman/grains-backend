@@ -1,5 +1,5 @@
 const productService = require('../services/product.service');
-const { getDefaultBranchId } = require('../services/defaultBranch.service');
+const { resolvePublicBranch } = require('../services/defaultBranch.service');
 const priceLogService = require('../services/priceLog.service');
 const { success, paginated } = require('../utils/apiResponse');
 
@@ -7,12 +7,14 @@ const { success, paginated } = require('../utils/apiResponse');
 const getAll = async (req, res, next) => {
   try {
     const { page, limit, category, search, inStock, packagingSize, minPrice, maxPrice } = req.query;
-    // Public shop scoped to default branch (or branchId query param for multi-shop support)
-    const branchId = req.query.branchId || await getDefaultBranchId();
+    // Public shop scoped to default branch (or branchId query param for multi-shop
+    // support) — an invalid/inactive branchId falls back to default rather than
+    // erroring or leaking a deactivated branch's catalog.
+    const branch = await resolvePublicBranch(req.query.branchId);
     const result = await productService.getAll(
       { category, search, inStock, packagingSize, minPrice, maxPrice },
       { page, limit },
-      branchId
+      branch?._id
     );
     return paginated(res, result.products, result.pagination);
   } catch (err) { next(err); }
@@ -21,9 +23,9 @@ const getAll = async (req, res, next) => {
 // ── GET SINGLE PRODUCT (public) ───────────────────────────────────────────────
 const getById = async (req, res, next) => {
   try {
-    const branchId = req.query.branchId || req.branchId || await getDefaultBranchId();
+    const branch = req.branchId ? { _id: req.branchId } : await resolvePublicBranch(req.query.branchId);
     // req.user is only set when an auth middleware (verifyToken/requireMinRole) ran before this
-    const product = await productService.getById(req.params.id, branchId, false, !!req.user);
+    const product = await productService.getById(req.params.id, branch?._id, false, !!req.user);
     return success(res, product);
   } catch (err) { next(err); }
 };
@@ -31,8 +33,8 @@ const getById = async (req, res, next) => {
 // ── GET CATEGORIES (public) ───────────────────────────────────────────────────
 const getCategories = async (req, res, next) => {
   try {
-    const branchId = req.query.branchId || await getDefaultBranchId();
-    const categories = await productService.getCategories(branchId);
+    const branch = await resolvePublicBranch(req.query.branchId);
+    const categories = await productService.getCategories(branch?._id);
     return success(res, categories);
   } catch (err) { next(err); }
 };
@@ -41,8 +43,8 @@ const getCategories = async (req, res, next) => {
 const getSuggestions = async (req, res, next) => {
   try {
     const { q } = req.query;
-    const branchId = req.query.branchId || await getDefaultBranchId();
-    const suggestions = await productService.getSuggestions(q, branchId);
+    const branch = await resolvePublicBranch(req.query.branchId);
+    const suggestions = await productService.getSuggestions(q, branch?._id);
     return success(res, suggestions);
   } catch (err) { next(err); }
 };

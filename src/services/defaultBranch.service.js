@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const Branch = require('../models/Branch');
 
 const CACHE_TTL = 60 * 1000;
@@ -41,8 +42,22 @@ const invalidateDefaultBranchCache = () => {
   pendingBranchPromise = null;
 };
 
+// Resolve the branch for a public storefront request: an explicitly requested
+// ?branchId (must be a valid, active branch) wins; otherwise the default
+// branch. An invalid/inactive branchId silently falls back to default rather
+// than erroring — public storefront endpoints must always render.
+const resolvePublicBranch = async (requestedBranchId) => {
+  if (requestedBranchId && mongoose.Types.ObjectId.isValid(requestedBranchId)) {
+    const branch = await Branch.findOne({ _id: requestedBranchId, isActive: true })
+      .select('name slug location isDefault').lean();
+    if (branch) return branch;
+  }
+  return getDefaultBranch();
+};
+
 module.exports = {
   getDefaultBranch,
   getDefaultBranchId,
   invalidateDefaultBranchCache,
+  resolvePublicBranch,
 };

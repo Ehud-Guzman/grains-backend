@@ -6,8 +6,7 @@ const activityLogService = require('./activityLog.service');
 const { invalidateDefaultBranchCache, getDefaultBranch } = require('./defaultBranch.service');
 const settingsService = require('./settings.service');
 const haversine = require('../utils/haversine');
-
-const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const { escapeRegex } = require('../utils/escapeRegex');
 
 // ── GET ALL BRANCHES ──────────────────────────────────────────────────────────
 const getAll = async (includeInactive = false) => {

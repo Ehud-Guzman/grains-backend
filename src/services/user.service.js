@@ -4,6 +4,7 @@ const { AppError } = require('../middleware/errorHandler.middleware');
 const activityLogService = require('./activityLog.service');
 const { ROLES, LOG_ACTIONS, AUTH_LIMITS } = require('../utils/constants');
 const { paginate, buildPaginationMeta } = require('../utils/paginate');
+const { escapeRegex } = require('../utils/escapeRegex');
 
 const BCRYPT_WORK_FACTOR = AUTH_LIMITS.BCRYPT_WORK_FACTOR;
 
@@ -19,9 +20,12 @@ const getAllAdminUsers = async (filters = {}, query = {}) => {
     role: { $in: ADMIN_ROLES }
   };
 
-  if (filters.role) matchStage.role = filters.role;
+  // Constrain to the same admin-role set even when filtering by a specific role —
+  // an unconstrained assignment here would let ?role=customer list customer
+  // accounts through what's documented and routed as the staff-only endpoint.
+  if (filters.role && ADMIN_ROLES.includes(filters.role)) matchStage.role = filters.role;
   if (filters.search) {
-    const regex = { $regex: filters.search, $options: 'i' };
+    const regex = { $regex: escapeRegex(filters.search), $options: 'i' };
     matchStage.$or = [{ name: regex }, { phone: regex }, { email: regex }];
   }
 
@@ -100,6 +104,9 @@ const changeRole = async (userId, newRole, superAdminId) => {
 
   const previousRole = user.role;
   user.role = newRole;
+  // Invalidate any access token already issued under the old role — see
+  // auth.middleware.js's tokenValidAfter check.
+  user.tokenValidAfter = new Date();
   await user.save();
 
   await activityLogService.log({
@@ -217,6 +224,10 @@ const setPermissions = async (userId, { customPermissions, allowedBranchIds }, a
     user.allowedBranchIds = allowedBranchIds;
   }
 
+  // customPermissions/allowedBranchIds are embedded in the JWT at login just
+  // like role — a revocation must not leave the old grant usable until the
+  // token's natural 15-minute expiry (see auth.middleware.js's tokenValidAfter check).
+  user.tokenValidAfter = new Date();
   await user.save();
 
   await activityLogService.log({

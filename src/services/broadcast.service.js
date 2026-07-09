@@ -10,8 +10,11 @@ const MAX_MESSAGE_LENGTH = 459; // 3 SMS segments (153 chars/segment after conca
 // Registered customers only — guests have no durable identity to opt in/out of
 // a marketing list. Not branch-scoped: customer accounts are shared across
 // branches (branchId: null), matching how the admin Customers list already works.
+// smsOptOut excludes customers who opted out via their profile — this is a
+// marketing list, unlike the transactional order SMS in notification.service.js
+// which every customer needs regardless of this preference.
 const buildAudienceQuery = (audience) => {
-  const query = { role: 'customer', phone: { $ne: null } };
+  const query = { role: 'customer', phone: { $ne: null }, smsOptOut: { $ne: true } };
   if (audience === 'b2b') query.isB2B = true;
   return query;
 };

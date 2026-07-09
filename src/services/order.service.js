@@ -27,6 +27,8 @@ const {
 const { formatPhone } = require('../utils/mpesaHelpers');
 const { paginate, buildPaginationMeta } = require('../utils/paginate');
 const { validateReason } = require('../utils/validateReason');
+const { withGuestFallback, withGuestFallbackList } = require('../utils/orderGuestFallback');
+const { escapeRegex } = require('../utils/escapeRegex');
 const couponService = require('./coupon.service');
 const { startOfMonthEAT } = require('../utils/businessTime');
 
@@ -450,6 +452,8 @@ const createGuestOrder = async (orderData, branchId) => {
       orderRef,
       branchId,
       guestId: guest._id,
+      guestName: guest.name,
+      guestPhone: guest.phone,
       userId: null,
       orderItems: items,
       subtotal,
@@ -649,7 +653,7 @@ const getById = async (orderId, branchId) => {
     .lean();
 
   if (!order) throw new AppError('Order not found', 404, 'ORDER_NOT_FOUND');
-  return order;
+  return withGuestFallback(order);
 };
 
 // ── GET ALL ORDERS (ADMIN) ────────────────────────────────────────────────────
@@ -680,7 +684,7 @@ const getAll = async (filters = {}, query = {}, branchId) => {
   // Search by orderRef, customer name, or phone - SRS 5.9
   if (filters.search) {
     matchStage.$or = [
-      { orderRef: { $regex: filters.search, $options: 'i' } }
+      { orderRef: { $regex: escapeRegex(filters.search), $options: 'i' } }
     ];
   }
 
@@ -695,7 +699,7 @@ const getAll = async (filters = {}, query = {}, branchId) => {
       .lean()
   ]);
 
-  return { orders, pagination: buildPaginationMeta(page, limit, total) };
+  return { orders: withGuestFallbackList(orders), pagination: buildPaginationMeta(page, limit, total) };
 };
 
 // ── GET MY ORDERS (CUSTOMER) ──────────────────────────────────────────────────
@@ -711,7 +715,7 @@ const getMyOrders = async (userId, query = {}, branchId) => {
   // Search by order reference — lets a repeat customer jump straight to an
   // old order instead of paging through their full history.
   if (query.search) {
-    filter.orderRef = { $regex: query.search, $options: 'i' };
+    filter.orderRef = { $regex: escapeRegex(query.search), $options: 'i' };
   }
 
   const [total, orders] = await Promise.all([
@@ -1140,6 +1144,7 @@ const getPackingSlip = async (orderId, branchId) => {
     .lean();
 
   if (!order) throw new AppError('Order not found', 404, 'ORDER_NOT_FOUND');
+  withGuestFallback(order);
 
   const customer = order.userId || order.guestId;
 

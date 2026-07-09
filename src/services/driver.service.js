@@ -6,6 +6,8 @@ const activityLogService = require('./activityLog.service');
 const { ROLES, LOG_ACTIONS, ORDER_STATUSES, AUTH_LIMITS } = require('../utils/constants');
 const { paginate, buildPaginationMeta } = require('../utils/paginate');
 const { startOfDayEAT } = require('../utils/businessTime');
+const { withGuestFallbackList } = require('../utils/orderGuestFallback');
+const { escapeRegex } = require('../utils/escapeRegex');
 
 const BCRYPT_WORK_FACTOR = AUTH_LIMITS.BCRYPT_WORK_FACTOR;
 
@@ -16,7 +18,7 @@ const getAllDrivers = async (filters = {}, query = {}, branchId) => {
   const match = { role: ROLES.DRIVER, branchId };
 
   if (filters.search) {
-    const re = { $regex: filters.search, $options: 'i' };
+    const re = { $regex: escapeRegex(filters.search), $options: 'i' };
     match.$or = [{ name: re }, { phone: re }];
   }
   if (typeof filters.available !== 'undefined') {
@@ -108,7 +110,7 @@ const getDriverOrders = async (driverId, filters = {}, query = {}, branchId) => 
   const [total, orders] = await Promise.all([
     Order.countDocuments(match),
     Order.find(match)
-      .select('orderRef status deliveryMethod deliveryAddress total createdAt userId guestId deliveryFee')
+      .select('orderRef status deliveryMethod deliveryAddress total createdAt userId guestId guestName guestPhone deliveryFee')
       .populate('userId', 'name phone')
       .populate('guestId', 'name phone')
       .sort({ createdAt: -1 })
@@ -117,7 +119,7 @@ const getDriverOrders = async (driverId, filters = {}, query = {}, branchId) => 
       .lean()
   ]);
 
-  return { orders, pagination: buildPaginationMeta(page, limit, total) };
+  return { orders: withGuestFallbackList(orders), pagination: buildPaginationMeta(page, limit, total) };
 };
 
 // ── DRIVER STATS (for admin driver profile) ───────────────────────────────────
@@ -238,7 +240,7 @@ const getMyOrders = async (driverId, filters = {}, query = {}, branchId = null) 
   const [total, orders] = await Promise.all([
     Order.countDocuments(match),
     Order.find(match)
-      .select('orderRef status deliveryMethod deliveryAddress total deliveryFee createdAt orderItems userId guestId specialInstructions')
+      .select('orderRef status deliveryMethod deliveryAddress total deliveryFee createdAt orderItems userId guestId guestName guestPhone specialInstructions')
       .populate('userId', 'name phone')
       .populate('guestId', 'name phone')
       .sort({ createdAt: -1 })
@@ -247,7 +249,7 @@ const getMyOrders = async (driverId, filters = {}, query = {}, branchId = null) 
       .lean()
   ]);
 
-  return { orders, pagination: buildPaginationMeta(page, limit, total) };
+  return { orders: withGuestFallbackList(orders), pagination: buildPaginationMeta(page, limit, total) };
 };
 
 // ── DRIVER DASHBOARD STATS (own) ──────────────────────────────────────────────

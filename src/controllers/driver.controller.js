@@ -3,6 +3,7 @@ const orderService = require('../services/order.service');
 const { success, paginated } = require('../utils/apiResponse');
 const { AppError } = require('../middleware/errorHandler.middleware');
 const { ORDER_STATUSES } = require('../utils/constants');
+const { withGuestFallback } = require('../utils/orderGuestFallback');
 
 // GET /api/driver/me — profile + stats
 const getMe = async (req, res, next) => {
@@ -47,7 +48,7 @@ const getOrderDetail = async (req, res, next) => {
       .populate('guestId', 'name phone')
       .lean();
     if (!order) return next(new AppError('Order not found or not assigned to you', 404, 'ORDER_NOT_FOUND'));
-    return success(res, order);
+    return success(res, withGuestFallback(order));
   } catch (err) { next(err); }
 };
 

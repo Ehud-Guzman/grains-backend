@@ -9,6 +9,7 @@ const { deleteImages } = require('./upload.service');
 const priceLogService = require('./priceLog.service');
 const { appEvents, PRICE_EVENTS } = require('../events/appEvents');
 const logger = require('../utils/logger');
+const { escapeRegex } = require('../utils/escapeRegex');
 
 const exposePublicStockFields = (product) => product;
 
@@ -108,7 +109,7 @@ const getSuggestions = async (query, branchId) => {
   if (!query || query.trim().length < 2) return [];
   const filter = {
     isActive: true,
-    name: { $regex: query.trim(), $options: 'i' }
+    name: { $regex: escapeRegex(query.trim()), $options: 'i' }
   };
   if (branchId) filter.branchId = branchId;
   return Product.find(filter).select('name category').limit(8).lean();

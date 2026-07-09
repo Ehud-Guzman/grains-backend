@@ -29,6 +29,11 @@ const orderSchema = new mongoose.Schema({
   orderRef: { type: String, required: true, unique: true }, // ORD-2025-0001
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
   guestId: { type: mongoose.Schema.Types.ObjectId, ref: 'Guest', default: null },
+  // Snapshot of the guest's name/phone at order placement — Guest documents can be
+  // purged by cleanup.job.js's retention sweep, but the order itself (a financial/
+  // KRA-relevant record) must remain identifiable even after that happens.
+  guestName:  { type: String, default: null },
+  guestPhone: { type: String, default: null },
   orderItems: [orderItemSchema],
   subtotal: { type: Number, required: true },
   deliveryFee: { type: Number, default: 0 },
