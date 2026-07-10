@@ -8,6 +8,7 @@ const settingsService = require('./settings.service');
 const haversine = require('../utils/haversine');
 const { escapeRegex } = require('../utils/escapeRegex');
 const { LOG_ACTIONS } = require('../utils/constants');
+const { bumpTokenValidAfter } = require('../utils/tokenValidAfter');
 
 // ── GET ALL BRANCHES ──────────────────────────────────────────────────────────
 const getAll = async (includeInactive = false) => {
@@ -222,7 +223,7 @@ const assignUser = async (userId, branchId, adminId) => {
   // branch this user was just moved off of, silently breaking branch isolation
   // until they happen to log out. Forces their next refresh to fail and
   // re-login, which then correctly picks up the new assignment.
-  user.tokenValidAfter = new Date();
+  user.tokenValidAfter = bumpTokenValidAfter();
   await user.save();
 
   await activityLogService.log({

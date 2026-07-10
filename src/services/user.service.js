@@ -5,6 +5,7 @@ const activityLogService = require('./activityLog.service');
 const { ROLES, LOG_ACTIONS, AUTH_LIMITS } = require('../utils/constants');
 const { paginate, buildPaginationMeta } = require('../utils/paginate');
 const { escapeRegex } = require('../utils/escapeRegex');
+const { bumpTokenValidAfter } = require('../utils/tokenValidAfter');
 
 const BCRYPT_WORK_FACTOR = AUTH_LIMITS.BCRYPT_WORK_FACTOR;
 
@@ -106,7 +107,7 @@ const changeRole = async (userId, newRole, superAdminId) => {
   user.role = newRole;
   // Invalidate any access token already issued under the old role — see
   // auth.middleware.js's tokenValidAfter check.
-  user.tokenValidAfter = new Date();
+  user.tokenValidAfter = bumpTokenValidAfter();
   await user.save();
 
   await activityLogService.log({
@@ -227,7 +228,7 @@ const setPermissions = async (userId, { customPermissions, allowedBranchIds }, a
   // customPermissions/allowedBranchIds are embedded in the JWT at login just
   // like role — a revocation must not leave the old grant usable until the
   // token's natural 15-minute expiry (see auth.middleware.js's tokenValidAfter check).
-  user.tokenValidAfter = new Date();
+  user.tokenValidAfter = bumpTokenValidAfter();
   await user.save();
 
   await activityLogService.log({

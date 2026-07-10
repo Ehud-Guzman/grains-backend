@@ -9,6 +9,7 @@ const activityLogService = require('./activityLog.service');
 const alertService = require('./alert.service');
 const notificationService = require('./notification.service');
 const logger = require('../utils/logger');
+const { bumpTokenValidAfter } = require('../utils/tokenValidAfter');
 
 const MAX_FAILED_LOGINS = AUTH_LIMITS.MAX_FAILED_LOGINS;
 const BCRYPT_WORK_FACTOR = AUTH_LIMITS.BCRYPT_WORK_FACTOR;
@@ -521,7 +522,7 @@ const changePassword = async (userId, currentPassword, newPassword, ip = null, c
   // otherwise a stolen token survives the very password change meant to kill it.
   // The caller's own current session is reissued fresh tokens right after this
   // (see auth.controller.js#changePassword), so this doesn't log the user out.
-  const tokenValidAfter = new Date();
+  const tokenValidAfter = bumpTokenValidAfter();
   await User.findByIdAndUpdate(userId, { passwordHash, tokenValidAfter });
 
   await activityLogService.log({
@@ -630,7 +631,7 @@ const resetPassword = async (phone, otp, newPassword, ip = null) => {
     passwordResetOtpHash: null,
     passwordResetExpires: null,
     passwordResetAttempts: 0,
-    tokenValidAfter: new Date()
+    tokenValidAfter: bumpTokenValidAfter()
   });
 
   await activityLogService.log({
