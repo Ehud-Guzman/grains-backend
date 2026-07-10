@@ -294,21 +294,13 @@ const manualAdjustment = async (productId, varietyName, packagingSize, newQuanti
 
   if (newQuantity < 0) throw new AppError('Stock quantity cannot be negative', 400, 'INVALID_QUANTITY');
 
-  // Get current stock first
-  const current = await Product.findOne(
-    { _id: productId, branchId, 'varieties.varietyName': varietyName },
-    { 'varieties.$': 1 }
-  );
-
-  if (!current) throw new AppError('Product or variety not found', 404, 'PRODUCT_NOT_FOUND');
-
-  const packaging = current.varieties[0]?.packaging.find(p => p.size === packagingSize);
-  if (!packaging) throw new AppError('Packaging size not found', 404, 'PACKAGING_NOT_FOUND');
-
-  const currentStock = packaging.stock;
-  const quantityChange = newQuantity - currentStock;
-
-  const product = await Product.findOneAndUpdate(
+  // Single atomic write. `new: false` returns the document as it stood
+  // immediately BEFORE this update was applied, from the same operation — so the
+  // "before" stock used for the log/audit trail can never be stale, unlike a
+  // separate read-then-write where a concurrent adjustment landing in between
+  // would make quantityChange/before describe a state that was never actually
+  // current at write time.
+  const before = await Product.findOneAndUpdate(
     {
       _id: productId,
       branchId,
@@ -327,9 +319,26 @@ const manualAdjustment = async (productId, varietyName, packagingSize, newQuanti
         { 'v.varietyName': varietyName },
         { 'p.size': packagingSize }
       ],
-      new: true
+      new: false
     }
   );
+
+  if (!before) throw new AppError('Product, variety or packaging size not found', 404, 'PRODUCT_NOT_FOUND');
+
+  const beforeVariety = before.varieties.find(v => v.varietyName === varietyName);
+  const beforePackaging = beforeVariety?.packaging.find(p => p.size === packagingSize);
+  const currentStock = beforePackaging?.stock ?? 0;
+  const quantityChange = newQuantity - currentStock;
+
+  // Build the "after" shape locally instead of a second DB round-trip — we
+  // already know exactly what our own write changed (the single stock field
+  // above); every other caller of this module returns { product, balanceAfter }
+  // the same way after their own atomic write.
+  const product = before.toObject();
+  const afterPackaging = product.varieties
+    .find(v => v.varietyName === varietyName)?.packaging
+    .find(p => p.size === packagingSize);
+  if (afterPackaging) afterPackaging.stock = newQuantity;
 
   await writeStockLog({
     branchId,

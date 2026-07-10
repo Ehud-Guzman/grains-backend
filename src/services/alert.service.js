@@ -1,6 +1,7 @@
 const nodemailer = require('nodemailer');
 const AfricasTalking = require('africastalking');
 const logger = require('../utils/logger');
+const { escapeHtml } = require('../utils/escapeHtml');
 
 // ── PROVIDER SETUP ────────────────────────────────────────────────────────────
 // Standalone transporter — does NOT depend on settingsService so alerts work
@@ -40,6 +41,7 @@ const THROTTLE_MS = {
   SERVER_ERROR:        5 * 60 * 1000,   //  5 min global counter window
   BACKUP_RESTORED:     0,               // always send
   BACKUP_RESTORE_DATA_LOSS: 0,          // always send
+  MPESA_LATE_SUCCESS_UNRECONCILED: 0,   // always send — money received but unaccounted for
 };
 
 // SERVER_ERROR is counter-based: send the alert only after this many errors
@@ -110,6 +112,11 @@ const ALERT_CONFIG = {
     title: 'Backup Restore Lost Financial Records',
     sms: (d) => `[ALERT] Restore by ${d['Actor role']} dropped financial records: ${d['Financial records lost']}. Pre-restore backup: ${d['Pre-restore backup']}.`,
   },
+  MPESA_LATE_SUCCESS_UNRECONCILED: {
+    severity: 'high',
+    title: 'M-Pesa Payment Received After Order Already Marked Failed',
+    sms: (d) => `[ALERT] M-Pesa receipt ${d['M-Pesa receipt']} (KES ${d.Amount}) received for order ${d['Order ref']} after it was already marked failed. Needs manual reconciliation.`,
+  },
 };
 
 // ── SEVERITY BADGE COLOURS ────────────────────────────────────────────────────
@@ -154,13 +161,7 @@ const shouldAlert = (type, key) => {
 // Several alert data fields carry attacker-controlled input verbatim (User-Agent,
 // request route, the NoSQL-injection attempted key) — these are exactly the
 // alerts triggered BY malicious traffic, so they must be escaped before landing
-// in an HTML email the admin opens.
-const escapeHtml = (str) => String(str)
-  .replace(/&/g, '&amp;')
-  .replace(/</g, '&lt;')
-  .replace(/>/g, '&gt;')
-  .replace(/"/g, '&quot;')
-  .replace(/'/g, '&#39;');
+// in an HTML email the admin opens. (escapeHtml is shared with notification.service.js.)
 
 // ── EMAIL BUILDER ─────────────────────────────────────────────────────────────
 const buildEmail = (type, data) => {

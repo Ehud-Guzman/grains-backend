@@ -95,10 +95,18 @@ process.on('uncaughtException', (err) => {
 });
 
 // ── UNHANDLED PROMISE REJECTION HANDLER ───────────────────────────────────────
-// Async errors that were never caught with try/catch or .catch()
+// Async errors that were never caught with try/catch or .catch(). Unlike
+// uncaughtException (a synchronous throw that can leave shared state genuinely
+// corrupted, where exiting is the only safe option), a rejected promise nobody
+// awaited doesn't corrupt anything — it's a missed .catch() on one specific
+// operation. Every fire-and-forget call in this codebase (notifications,
+// activity logging, alerts, eTIMS) already has an explicit .catch(), so this
+// handler firing means one of those was missed — log it loudly for a fix, but
+// don't take the entire API down (and every in-flight customer request with
+// it) over one background operation. Render's restart isn't instant, so
+// process.exit(1) here traded a contained bug for a full outage.
 process.on('unhandledRejection', (reason, promise) => {
-  logger.error('[UNHANDLED REJECTION] Shutting down...', { promise, reason });
-  process.exit(1);
+  logger.error('[UNHANDLED REJECTION] Missing .catch() somewhere — fix the source, not this handler', { promise, reason });
 });
 
 // ── START SERVER ──────────────────────────────────────────────────────────────

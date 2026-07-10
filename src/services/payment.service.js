@@ -1,6 +1,5 @@
 // ── PAYMENT SERVICE ───────────────────────────────────────────────────────────
-// Handles M-Pesa STK Push initiation, callback processing,
-// manual confirmation, and timeout handling
+// Handles M-Pesa STK Push initiation, callback processing, and manual confirmation
 
 const axios = require('axios');
 const mongoose = require('mongoose');
@@ -10,6 +9,7 @@ const { AppError } = require('../middleware/errorHandler.middleware');
 const { PAYMENT_STATUSES, PAYMENT_METHODS, LOG_ACTIONS, ROLES, MPESA_RECEIPT_REGEX } = require('../utils/constants');
 const activityLogService = require('./activityLog.service');
 const etimsService       = require('./etims.service');
+const alertService       = require('./alert.service');
 const { getDarajaToken, getUrls } = require('../config/mpesa.config');
 const logger = require('../utils/logger');
 const {
@@ -205,7 +205,52 @@ const handleCallback = async (callbackData) => {
     return { success: false, message: 'Payment record not found' };
   }
 
-  // IDEMPOTENCY — if already in a terminal state (paid or failed), do nothing
+  // IDEMPOTENCY — if already in a terminal state (paid or failed), do nothing —
+  // EXCEPT a success arriving for a payment already marked FAILED. That combination
+  // means the money actually landed after this record was given up on (most often
+  // the 90s stale-retry path in initiateStkPush already failed it and let the
+  // customer start a fresh STK push). The original callback's receipt/amount must
+  // not just vanish into an "already processed" no-op — capture it and alert loudly
+  // so someone reconciles it, without touching this record's own status (a second
+  // payment attempt may already be PAID for the same order).
+  if (payment.status === PAYMENT_STATUSES.FAILED && ResultCode === 0) {
+    const metadata = parseCallbackMetadata(CallbackMetadata?.Item || []);
+    const mpesaTransactionId = metadata.MpesaReceiptNumber;
+    const paidAmount = metadata.Amount;
+
+    // Idempotent against duplicate deliveries of this same late callback.
+    if (!payment.lateSuccessMeta) {
+      await Payment.findByIdAndUpdate(payment._id, {
+        lateSuccessMeta: { mpesaTransactionId, paidAmount, receivedAt: new Date() }
+      });
+
+      const staleOrder = await Order.findById(payment.orderId).select('branchId orderRef');
+      logger.error('[M-PESA] Success callback for a payment already marked FAILED — money received but not reconciled', {
+        CheckoutRequestID, paymentId: payment._id, orderId: payment.orderId, mpesaTransactionId, paidAmount
+      });
+      await activityLogService.log({
+        actorId:    payment.orderId,
+        actorRole:  'customer',
+        action:     LOG_ACTIONS.PAYMENT_LATE_SUCCESS,
+        branchId:   staleOrder?.branchId || null,
+        targetId:   payment._id,
+        targetType: 'Payment',
+        detail:     { orderRef: staleOrder?.orderRef, mpesaTransactionId, paidAmount }
+      }).catch(err => logger.error('[M-PESA] Activity log failed on late success', { err: err.message }));
+      await alertService.sendAlert(
+        'MPESA_LATE_SUCCESS_UNRECONCILED',
+        {
+          'Order ref':    staleOrder?.orderRef || 'unknown',
+          'M-Pesa receipt': mpesaTransactionId || 'unknown',
+          'Amount':       paidAmount,
+          'Payment ID':   String(payment._id),
+        },
+        String(payment._id)
+      ).catch(() => {});
+    }
+    return { success: false, status: 'late_success_unreconciled', mpesaTransactionId };
+  }
+
   if (payment.status === PAYMENT_STATUSES.PAID || payment.status === PAYMENT_STATUSES.FAILED) {
     logger.info('[M-PESA] Duplicate callback ignored — already in terminal state', { CheckoutRequestID, status: payment.status });
     return { success: true, message: 'Already processed' };
@@ -313,14 +358,15 @@ const handleCallback = async (callbackData) => {
       return { success: true, message: 'Already processed' };
     }
 
-    await Order.findByIdAndUpdate(payment.orderId, {
+    const paidOrder = await Order.findByIdAndUpdate(payment.orderId, {
       paymentStatus: PAYMENT_STATUSES.PAID
-    });
+    }).select('branchId');
 
     await activityLogService.log({
       actorId:    payment.orderId,
       actorRole:  'customer',
       action:     LOG_ACTIONS.PAYMENT_CONFIRMED,
+      branchId:   paidOrder?.branchId || null,
       targetId:   payment._id,
       targetType: 'Payment',
       detail:     { mpesaTransactionId, amount: paidAmount }
@@ -536,6 +582,7 @@ const manualConfirmPayment = async (orderId, adminId, transactionRef, actorRole 
     actorId:    adminId,
     actorRole,
     action:     LOG_ACTIONS.PAYMENT_MANUALLY_CONFIRMED,
+    branchId:   claimedOrder.branchId || null,
     targetId:   payment._id,
     targetType: 'Payment',
     detail:     { orderId, transactionRef: ref || 'cash' }
@@ -548,27 +595,9 @@ const manualConfirmPayment = async (orderId, adminId, transactionRef, actorRole 
   return payment;
 };
 
-// ── HANDLE TIMEOUT ────────────────────────────────────────────────────────────
-// Called after 120s if no callback received
-const handleTimeout = async (orderId) => {
-  const order = await Order.findById(orderId);
-  if (!order || order.paymentStatus !== PAYMENT_STATUSES.PENDING) return;
-
-  const payment = order.paymentId
-    ? await Payment.findById(order.paymentId)
-    : null;
-
-  if (payment && payment.status === PAYMENT_STATUSES.PENDING) {
-    await Payment.findByIdAndUpdate(payment._id, { status: PAYMENT_STATUSES.FAILED });
-    await Order.findByIdAndUpdate(orderId, { paymentStatus: PAYMENT_STATUSES.FAILED });
-    logger.info('[M-PESA] Payment timed out', { orderRef: order.orderRef, orderId });
-  }
-};
-
 module.exports = {
   initiateStkPush,
   handleCallback,
   checkPaymentStatus,
-  manualConfirmPayment,
-  handleTimeout
+  manualConfirmPayment
 };

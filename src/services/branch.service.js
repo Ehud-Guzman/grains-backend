@@ -7,6 +7,7 @@ const { invalidateDefaultBranchCache, getDefaultBranch } = require('./defaultBra
 const settingsService = require('./settings.service');
 const haversine = require('../utils/haversine');
 const { escapeRegex } = require('../utils/escapeRegex');
+const { LOG_ACTIONS } = require('../utils/constants');
 
 // ── GET ALL BRANCHES ──────────────────────────────────────────────────────────
 const getAll = async (includeInactive = false) => {
@@ -111,7 +112,7 @@ const create = async (data, adminId) => {
   await activityLogService.log({
     actorId: adminId,
     actorRole: 'superadmin',
-    action: 'BRANCH_CREATED',
+    action: LOG_ACTIONS.BRANCH_CREATED,
     targetId: branch._id,
     targetType: 'Branch',
     detail: { name: branch.name, slug: branch.slug }
@@ -164,7 +165,7 @@ const update = async (branchId, data, adminId) => {
   await activityLogService.log({
     actorId: adminId,
     actorRole: 'superadmin',
-    action: 'BRANCH_UPDATED',
+    action: LOG_ACTIONS.BRANCH_UPDATED,
     targetId: branch._id,
     targetType: 'Branch',
     detail: { name: branch.name, updatedFields: Object.keys(data) }
@@ -186,7 +187,7 @@ const deactivate = async (branchId, adminId) => {
   await activityLogService.log({
     actorId: adminId,
     actorRole: 'superadmin',
-    action: 'BRANCH_DEACTIVATED',
+    action: LOG_ACTIONS.BRANCH_DEACTIVATED,
     targetId: branch._id,
     targetType: 'Branch',
     detail: { name: branch.name }
@@ -216,12 +217,18 @@ const assignUser = async (userId, branchId, adminId) => {
   if (user.role === 'superadmin') throw new AppError('Superadmin cannot be assigned to a branch', 400, 'INVALID_OPERATION');
 
   user.branchId = branchId;
+  // Any already-issued token still embeds the OLD branchId — without bumping
+  // this, refreshToken() would keep reissuing access tokens scoped to the
+  // branch this user was just moved off of, silently breaking branch isolation
+  // until they happen to log out. Forces their next refresh to fail and
+  // re-login, which then correctly picks up the new assignment.
+  user.tokenValidAfter = new Date();
   await user.save();
 
   await activityLogService.log({
     actorId: adminId,
     actorRole: 'superadmin',
-    action: 'USER_BRANCH_ASSIGNED',
+    action: LOG_ACTIONS.USER_BRANCH_ASSIGNED,
     targetId: userId,
     targetType: 'User',
     detail: { userName: user.name, branchName: branch.name }

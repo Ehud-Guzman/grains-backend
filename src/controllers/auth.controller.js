@@ -126,8 +126,13 @@ const changePassword = async (req, res, next) => {
     if (!currentPassword || !newPassword) {
       return error(res, 'Current and new password are required', 'MISSING_FIELDS');
     }
-    await authService.changePassword(req.user.id, currentPassword, newPassword, req.ip);
-    return success(res, null, 'Password changed successfully');
+    const result = await authService.changePassword(req.user.id, currentPassword, newPassword, req.ip, req.branchId);
+    // Password change invalidates every token issued before it (see
+    // auth.service.js) — including the one on this very request. Reissue a
+    // fresh pair immediately so the caller's own session isn't logged out by
+    // the change they just made.
+    setRefreshCookie(res, result.refreshToken);
+    return success(res, { accessToken: result.accessToken }, 'Password changed successfully');
   } catch (err) {
     next(err);
   }

@@ -68,8 +68,23 @@ const parseCallbackMetadata = (items = []) => {
   return result;
 };
 
+// Guest.phone is stored in whatever format the checkout form submitted
+// (07..., +254..., or the canonical 254... used since this helper started
+// being applied at write time). Given any input phone, return every stored
+// form it could match so a lookup works regardless of when the Guest doc
+// was created — without needing a one-off DB migration.
+const phoneVariants = (phone) => {
+  const canonical = formatPhone(phone); // 2547XXXXXXXX
+  return [...new Set([
+    canonical,
+    `+${canonical}`,
+    `0${canonical.slice(3)}`,
+  ])];
+};
+
 module.exports = {
   formatPhone,
+  phoneVariants,
   generateTimestamp,
   generatePassword,
   validateSafaricomIP,

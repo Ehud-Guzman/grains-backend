@@ -353,6 +353,15 @@ const refreshToken = async (token, ip = null) => {
     throw new AppError('User not found or account locked', 401, 'UNAUTHORIZED');
   }
 
+  // A role change or branch reassignment bumps tokenValidAfter (see
+  // auth.middleware.js#checkRevocationAndAccount for the same check on access
+  // tokens) — without this, refresh would keep handing out fresh access tokens
+  // that carry the stale role/branchId forever, since it otherwise never
+  // re-validates anything beyond "is this refresh token itself still valid".
+  if (user.tokenValidAfter && decoded.iat * 1000 < new Date(user.tokenValidAfter).getTime()) {
+    throw new AppError('Token has been invalidated. Please log in again.', 401, 'TOKEN_REVOKED');
+  }
+
   // 4. Token rotation — blacklist the used token so it can't be reused
   const expiresAt = new Date(decoded.exp * 1000);
   try {
@@ -492,7 +501,10 @@ const validatePasswordStrength = (password) => {
 };
 
 // ── CHANGE PASSWORD ───────────────────────────────────────────────────────────
-const changePassword = async (userId, currentPassword, newPassword, ip = null) => {
+// currentBranchId is the caller's own session branchId (req.branchId from their
+// JWT) — reused so the reissued token keeps the same branch context rather than
+// silently dropping an admin back to "no branch selected".
+const changePassword = async (userId, currentPassword, newPassword, ip = null, currentBranchId = null) => {
   const user = await User.findById(userId);
   if (!user) throw new AppError('User not found', 404, 'USER_NOT_FOUND');
 
@@ -505,19 +517,26 @@ const changePassword = async (userId, currentPassword, newPassword, ip = null) =
     throw new AppError('New password must be different from current password', 400, 'SAME_PASSWORD');
 
   const passwordHash = await bcrypt.hash(newPassword, BCRYPT_WORK_FACTOR);
-  await User.findByIdAndUpdate(userId, { passwordHash });
+  // Any access/refresh token issued before this instant must stop working —
+  // otherwise a stolen token survives the very password change meant to kill it.
+  // The caller's own current session is reissued fresh tokens right after this
+  // (see auth.controller.js#changePassword), so this doesn't log the user out.
+  const tokenValidAfter = new Date();
+  await User.findByIdAndUpdate(userId, { passwordHash, tokenValidAfter });
 
   await activityLogService.log({
     actorId: userId,
     actorRole: user.role,
-    action: 'PASSWORD_CHANGED',
+    action: LOG_ACTIONS.PASSWORD_CHANGED,
     targetId: userId,
     targetType: 'User',
     ip,
     detail: {}
   });
 
-  return { success: true };
+  user.passwordHash = passwordHash;
+  const { accessToken, refreshToken } = generateTokens(user, currentBranchId);
+  return { success: true, accessToken, refreshToken };
 };
 
 // ── FORGOT PASSWORD ───────────────────────────────────────────────────────────
@@ -600,13 +619,18 @@ const resetPassword = async (phone, otp, newPassword, ip = null) => {
   validatePasswordStrength(newPassword);
 
   const passwordHash = await bcrypt.hash(newPassword, BCRYPT_WORK_FACTOR);
+  // Kill any tokens issued before this reset — a password reset is often a
+  // direct response to a compromised account, so a stolen token must not
+  // survive it. Unlike changePassword, this flow is unauthenticated (OTP-based)
+  // so there's no caller session to reissue; the user simply logs in fresh.
   await User.findByIdAndUpdate(user._id, {
     passwordHash,
     isLocked: false,
     failedLoginCount: 0,
     passwordResetOtpHash: null,
     passwordResetExpires: null,
-    passwordResetAttempts: 0
+    passwordResetAttempts: 0,
+    tokenValidAfter: new Date()
   });
 
   await activityLogService.log({
@@ -653,7 +677,7 @@ const updateProfile = async (userId, { name, email, addresses, kraPin, smsOptOut
   await activityLogService.log({
     actorId: userId,
     actorRole: user.role,
-    action: 'PROFILE_UPDATED',
+    action: LOG_ACTIONS.PROFILE_UPDATED,
     targetId: userId,
     targetType: 'User',
     ip,

@@ -4,6 +4,7 @@ const settingsService = require('./settings.service');
 const User = require('../models/User');
 const Guest = require('../models/Guest');
 const logger = require('../utils/logger');
+const { escapeHtml } = require('../utils/escapeHtml');
 
 // ── INITIALISE PROVIDERS ──────────────────────────────────────────────────────
 
@@ -106,8 +107,14 @@ const getOrderContact = async (order) => {
   }
   if (order.guestId) {
     const guest = await Guest.findById(order.guestId, 'name phone').lean();
-    if (!guest) return null;
-    return { name: guest.name, phone: guest.phone, email: null };
+    if (guest) return { name: guest.name, phone: guest.phone, email: null };
+    // Guest doc missing (e.g. purged by cleanup.job.js's retention sweep) —
+    // fall back to the name/phone snapshotted on the order itself at creation
+    // rather than silently dropping the notification.
+    if (order.guestName && order.guestPhone) {
+      return { name: order.guestName, phone: order.guestPhone, email: null };
+    }
+    return null;
   }
   return null;
 };
@@ -146,7 +153,7 @@ const itemsTable = (orderItems = []) => {
   if (!orderItems.length) return '';
   const rows = orderItems.map(i =>
     `<tr>
-      <td>${i.productName} &mdash; ${i.variety} (${i.packaging})</td>
+      <td>${escapeHtml(i.productName)} &mdash; ${escapeHtml(i.variety)} (${escapeHtml(i.packaging)})</td>
       <td style="text-align:center">${i.quantity}</td>
       <td style="text-align:right">KES ${(i.unitPrice * i.quantity).toLocaleString()}</td>
     </tr>`
@@ -186,7 +193,7 @@ const dispatchOrderPlaced = async (order, branchId) => {
         to: contact.email,
         subject: `Order Received – ${ref}`,
         html: emailShell(shop, loc, `
-          <p>Hi <strong>${contact.name}</strong>,</p>
+          <p>Hi <strong>${escapeHtml(contact.name)}</strong>,</p>
           <p>We have received your order <span class="ref">${ref}</span> and it is pending confirmation.</p>
           ${itemsTable(order.orderItems)}
           <p class="total-row">Total: ${total}</p>
@@ -224,7 +231,7 @@ const dispatchOrderApproved = async (order, branchId) => {
         to: contact.email,
         subject: `Order Confirmed – ${ref}`,
         html: emailShell(shop, loc, `
-          <p>Hi <strong>${contact.name}</strong>,</p>
+          <p>Hi <strong>${escapeHtml(contact.name)}</strong>,</p>
           <p>Your order <span class="ref">${ref}</span> has been <span class="badge green">Confirmed</span>.</p>
           ${itemsTable(order.orderItems)}
           <p class="total-row">Total: ${total}</p>
@@ -263,9 +270,9 @@ const dispatchOrderRejected = async (order, branchId) => {
         to: contact.email,
         subject: `Order Update – ${ref}`,
         html: emailShell(shop, loc, `
-          <p>Hi <strong>${contact.name}</strong>,</p>
+          <p>Hi <strong>${escapeHtml(contact.name)}</strong>,</p>
           <p>We regret to inform you that your order <span class="ref">${ref}</span> has been <span class="badge red">Declined</span>.</p>
-          <p><strong>Reason:</strong> ${reason}</p>
+          <p><strong>Reason:</strong> ${escapeHtml(reason)}</p>
           ${phone ? `<p>If you have questions, please contact us on <strong>${phone}</strong>.</p>` : ''}
         `),
       }).catch(err => logger.error('[notification] dispatchOrderRejected email failed', { err: err.message }));
@@ -299,7 +306,7 @@ const dispatchOrderDispatched = async (order, branchId) => {
         to: contact.email,
         subject: `Your Order is On Its Way – ${ref}`,
         html: emailShell(shop, loc, `
-          <p>Hi <strong>${contact.name}</strong>,</p>
+          <p>Hi <strong>${escapeHtml(contact.name)}</strong>,</p>
           <p>Your order <span class="ref">${ref}</span> is now <span class="badge blue">Out for Delivery</span>!</p>
           <p>Please be available to receive your order. Thank you for choosing ${shop}!</p>
         `),
@@ -329,7 +336,7 @@ const dispatchPasswordResetOtp = async (user, otp) => {
         to: user.email,
         subject: `Password Reset Code – ${shop}`,
         html: emailShell(shop, 'Kenya', `
-          <p>Hi <strong>${user.name}</strong>,</p>
+          <p>Hi <strong>${escapeHtml(user.name)}</strong>,</p>
           <p>Use the code below to reset your password. It expires in 10 minutes.</p>
           <p style="font-size:28px;font-weight:700;letter-spacing:4px;color:#1a5c38;margin:20px 0">${otp}</p>
           <p>If you didn't request this, you can safely ignore this email.</p>

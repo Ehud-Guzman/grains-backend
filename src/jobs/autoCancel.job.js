@@ -1,10 +1,8 @@
 // ── AUTO-CANCEL JOB ───────────────────────────────────────────────────────────
 // Runs every 5 minutes. Cancels pending orders that have been waiting longer
-// than the branch's autoCancelHours setting.
-//
-// The same logic also runs opportunistically during order API calls, but that
-// only fires when someone is actively using the system. This job ensures orders
-// are also cancelled overnight or during quiet periods with no traffic.
+// than the branch's autoCancelHours setting. This is the only place
+// autoCancelExpiredPendingOrders runs — order API calls no longer trigger it
+// opportunistically (that per-request path was removed; see order.service.js).
 
 const Branch = require('../models/Branch');
 const { autoCancelExpiredPendingOrders } = require('../services/order.service');

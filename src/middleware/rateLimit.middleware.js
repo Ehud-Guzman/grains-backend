@@ -97,6 +97,24 @@ const stkLimiter = rateLimit({
   }
 });
 
+// Guest order placement — tighter than publicLimiter. Every guest order reserves
+// real stock immediately (see order.service.js#reserveOrderStock), so an
+// unauthenticated bot varying items/phone across requests can lock up inventory
+// for autoCancelHours; the exact-duplicate guard alone only blocks resubmissions
+// of the identical cart.
+const guestOrderLimiter = rateLimit({
+  windowMs: RATE_LIMITS.WINDOW_MS,
+  max: RATE_LIMITS.GUEST_ORDER_MAX,
+  keyGenerator: keyByBranchAndIp,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    error: 'RATE_LIMIT_EXCEEDED',
+    message: 'Too many orders placed, please try again in a minute'
+  }
+});
+
 // Guest order tracking (phone + order ref lookup) — unauthenticated and a prime
 // enumeration target (sequential, guessable order refs), so it gets its own
 // tighter cap keyed by IP alone rather than the shared, branch-keyed publicLimiter.
@@ -113,4 +131,4 @@ const trackLimiter = rateLimit({
   }
 });
 
-module.exports = { publicLimiter, authLimiter, adminLimiter, callbackLimiter, stkLimiter, trackLimiter };
+module.exports = { publicLimiter, authLimiter, adminLimiter, callbackLimiter, stkLimiter, trackLimiter, guestOrderLimiter };

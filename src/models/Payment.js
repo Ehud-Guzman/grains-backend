@@ -14,7 +14,15 @@ const paymentSchema = new mongoose.Schema({
   safaricomTimestamp: { type: Date, default: null },
   refundedAt: { type: Date, default: null },
   refundReason: { type: String, default: null },
-  confirmedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null }
+  confirmedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  // Set when a success callback arrives for a payment already marked FAILED
+  // (e.g. Safaricom's callback for the original STK push landing after the
+  // 90s stale-retry window in initiateStkPush already failed it and let the
+  // customer retry). The money was received but this record's own status/amount
+  // fields are deliberately left untouched — a second payment attempt may
+  // already be in flight — so this is purely a reconciliation trail for an
+  // admin, not a live payment state.
+  lateSuccessMeta: { type: mongoose.Schema.Types.Mixed, default: null }
 }, {
   timestamps: true
 });

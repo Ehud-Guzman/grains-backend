@@ -24,7 +24,7 @@ const {
   PAYMENT_METHODS,
   ROLES
 } = require('../utils/constants');
-const { formatPhone } = require('../utils/mpesaHelpers');
+const { formatPhone, phoneVariants } = require('../utils/mpesaHelpers');
 const { paginate, buildPaginationMeta } = require('../utils/paginate');
 const { validateReason } = require('../utils/validateReason');
 const { withGuestFallback, withGuestFallbackList } = require('../utils/orderGuestFallback');
@@ -428,7 +428,12 @@ const createGuestOrder = async (orderData, branchId) => {
   const preferredDriverId = await resolvePreferredDriver(orderData.preferredDriverId, branchId);
   const total = round2(Math.max(0, subtotal + deliveryFee + vatAmount - couponDiscount));
 
-  const existingGuest = await Guest.findOne({ phone: orderData.phone }).select('_id').lean();
+  // Match against every historically-possible stored format (07.../+254.../254...)
+  // so a repeat guest is recognised regardless of which format their earlier
+  // order was placed under — see phoneVariants for why this can't just be a
+  // straight equality check.
+  const phoneMatch = { phone: { $in: phoneVariants(orderData.phone) } };
+  const existingGuest = await Guest.findOne(phoneMatch).select('_id').lean();
   await assertNoDuplicateOrder({
     branchId, guestId: existingGuest?._id || null, total, itemCount: items.length
   });
@@ -437,11 +442,13 @@ const createGuestOrder = async (orderData, branchId) => {
   session.startTransaction();
 
   try {
-    let guest = await Guest.findOne({ phone: orderData.phone }, null, { session });
+    let guest = await Guest.findOne(phoneMatch, null, { session });
     if (!guest) {
+      // New guests are stored in the canonical 2547XXXXXXXX form so future
+      // lookups (tracking, dedup) never need the variant fallback for them.
       [guest] = await Guest.create([{
         name: orderData.name,
-        phone: orderData.phone,
+        phone: formatPhone(orderData.phone),
         location: orderData.deliveryAddress || ''
       }], { session });
     }
@@ -681,10 +688,20 @@ const getAll = async (filters = {}, query = {}, branchId) => {
     if (filters.to) matchStage.createdAt.$lte = new Date(filters.to);
   }
 
-  // Search by orderRef, customer name, or phone - SRS 5.9
+  // Search by orderRef, guest name/phone (snapshotted on the order itself), or
+  // a registered customer's name/phone - SRS 5.9. User lives in a different
+  // collection so it can't be regex-matched inside the Order query directly —
+  // resolve matching user IDs first. (Orders placed before the guestName/
+  // guestPhone snapshot existed won't match on those two fields.)
   if (filters.search) {
+    const searchRe = { $regex: escapeRegex(filters.search), $options: 'i' };
+    const matchingUsers = await User.find({ $or: [{ name: searchRe }, { phone: searchRe }] })
+      .select('_id').lean();
     matchStage.$or = [
-      { orderRef: { $regex: escapeRegex(filters.search), $options: 'i' } }
+      { orderRef: searchRe },
+      { guestName: searchRe },
+      { guestPhone: searchRe },
+      ...(matchingUsers.length ? [{ userId: { $in: matchingUsers.map(u => u._id) } }] : [])
     ];
   }
 
@@ -752,13 +769,20 @@ const getMyOrderById = async (userId, orderId) => {
 
 // ── TRACK BY REF (GUEST) ──────────────────────────────────────────────────────
 // SRS 5.5 - public order tracking by phone + ref
+// Field list mirrors CUSTOMER_ORDER_FIELDS — this is an unauthenticated lookup
+// (phone + ref only), so GPS coordinates, buyerKraPin, and statusHistory actor
+// IDs must never be exposed here even though they're safe on the authed routes.
+const TRACK_ORDER_FIELDS = 'orderRef orderItems subtotal deliveryFee vatEnabled vatRate vatAmount total deliveryMethod paymentMethod paymentStatus status rejectionReason createdAt statusHistory.status statusHistory.changedAt statusHistory.note';
+
 const trackByRef = async (phone, orderRef) => {
   // Auto-cancel is handled by autoCancel.job.js — no per-request call needed
 
-  const guest = await Guest.findOne({ phone: formatPhone(phone) });
+  // Match every historically-possible stored format — see phoneVariants.
+  const guest = await Guest.findOne({ phone: { $in: phoneVariants(phone) } });
   if (!guest) throw new AppError('Order not found', 404, 'NOT_FOUND');
 
   const order = await Order.findOne({ orderRef, guestId: guest._id })
+    .select(TRACK_ORDER_FIELDS)
     .lean();
 
   if (!order) throw new AppError('Order not found', 404, 'ORDER_NOT_FOUND');
