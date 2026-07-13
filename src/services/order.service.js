@@ -433,26 +433,33 @@ const createGuestOrder = async (orderData, branchId) => {
   // order was placed under — see phoneVariants for why this can't just be a
   // straight equality check.
   const phoneMatch = { phone: { $in: phoneVariants(orderData.phone) } };
-  const existingGuest = await Guest.findOne(phoneMatch).select('_id').lean();
+  // Atomic upsert (outside the transaction, before the duplicate-order check) —
+  // the first of two concurrent requests for a brand-new phone number wins the
+  // Guest row and the second observes it as already existing. Without this, a
+  // plain findOne pre-check lets two concurrent first-time submissions both see
+  // "no guest yet" and both bypass assertNoDuplicateOrder below (which early-
+  // returns when guestId is null), creating two orders + a race on Guest
+  // creation. New guests are stored in the canonical 2547XXXXXXXX form so
+  // future lookups (tracking, dedup) never need the variant fallback for them.
+  const guest = await Guest.findOneAndUpdate(
+    phoneMatch,
+    {
+      $setOnInsert: {
+        name: orderData.name,
+        phone: formatPhone(orderData.phone),
+        location: orderData.deliveryAddress || ''
+      }
+    },
+    { upsert: true, new: true }
+  );
   await assertNoDuplicateOrder({
-    branchId, guestId: existingGuest?._id || null, total, itemCount: items.length
+    branchId, guestId: guest._id, total, itemCount: items.length
   });
 
   const session = await mongoose.startSession();
   session.startTransaction();
 
   try {
-    let guest = await Guest.findOne(phoneMatch, null, { session });
-    if (!guest) {
-      // New guests are stored in the canonical 2547XXXXXXXX form so future
-      // lookups (tracking, dedup) never need the variant fallback for them.
-      [guest] = await Guest.create([{
-        name: orderData.name,
-        phone: formatPhone(orderData.phone),
-        location: orderData.deliveryAddress || ''
-      }], { session });
-    }
-
     const orderRef = await generateOrderRef(branchId, session);
 
     let [order] = await Order.create([{

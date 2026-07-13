@@ -2,7 +2,7 @@ const ActivityLog = require('../models/ActivityLog');
 const logger = require('../utils/logger');
 
 // Write an audit log entry - called at end of every mutating operation
-const log = async ({ actorId, actorRole, action, branchId = null, targetId = null, targetType = null, detail = {}, ip = null }) => {
+const log = async ({ actorId, actorRole, action, branchId = null, targetId = null, targetType = null, detail = {}, ip = null, userAgent = null }) => {
   try {
     await ActivityLog.create({
       actorId,
@@ -13,6 +13,7 @@ const log = async ({ actorId, actorRole, action, branchId = null, targetId = nul
       targetType,
       detail,
       ip,
+      userAgent,
       timestamp: new Date()
     });
 

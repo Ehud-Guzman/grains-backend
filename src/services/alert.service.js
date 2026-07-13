@@ -37,6 +37,7 @@ const THROTTLE_MS = {
   AUTH_RATE_LIMIT:     5 * 60 * 1000,   //  5 min per IP
   BRUTE_FORCE_LOGIN:   5 * 60 * 1000,   //  5 min per IP/account
   ACCOUNT_LOCKED:      0,               // always send
+  NEW_DEVICE_ADMIN_LOGIN: 5 * 60 * 1000, //  5 min per account
   ROLE_VIOLATION:     15 * 60 * 1000,   // 15 min per userId+route
   SERVER_ERROR:        5 * 60 * 1000,   //  5 min global counter window
   BACKUP_RESTORED:     0,               // always send
@@ -91,6 +92,11 @@ const ALERT_CONFIG = {
     severity: 'medium',
     title: 'Account Automatically Locked',
     sms: (d) => `[ALERT] Account ${d.Phone} (${d.Role}) locked after too many failed logins.`,
+  },
+  NEW_DEVICE_ADMIN_LOGIN: {
+    severity: 'medium',
+    title: 'Admin Login From New Device/Location',
+    sms: (d) => `[ALERT] ${d.Phone} (${d.Role}) logged in from a new IP: ${d['New IP']}.`,
   },
   ROLE_VIOLATION: {
     severity: 'medium',

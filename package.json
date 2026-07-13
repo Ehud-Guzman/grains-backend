@@ -11,7 +11,8 @@
     "dev": "nodemon server.js",
     "prod": "pm2 start ecosystem.config.js",
     "sync:indexes": "node scripts/sync-indexes.js",
-    "test": "node --test"
+    "test": "node --test",
+    "audit": "npm audit --audit-level=high"
   },
   "dependencies": {
     "@sentry/node": "^7.81.1",

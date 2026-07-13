@@ -9,6 +9,7 @@ const couponService = require('../src/services/coupon.service');
 const Order = require('../src/models/Order');
 const Product = require('../src/models/Product');
 const Coupon = require('../src/models/Coupon');
+const Guest = require('../src/models/Guest');
 
 before(async () => { await testDb.connect(); });
 after(async () => { await testDb.disconnect(); });
@@ -215,5 +216,48 @@ describe('order.service — admin cancel via updateStatus releases stock at any 
 
     const refreshedProduct = await Product.findById(product._id).lean();
     assert.equal(refreshedProduct.varieties[0].packaging[0].stock, 20, 'stock should be restored on admin cancel too');
+  });
+});
+
+describe('order.service — brand-new-guest duplicate-order race', () => {
+  let branch, product;
+
+  beforeEach(async () => {
+    await testDb.clearDatabase();
+    branch = await createBranch();
+    await createSettings(branch._id);
+    const admin = await createUser(branch._id, { role: 'admin' });
+    product = await createProduct(branch._id, admin._id, { packaging: { stock: 100 } });
+  });
+
+  test('two concurrent first-time checkouts for the same new phone number only create one order and one guest', async () => {
+    const phone = '0798765432'; // never seen before — exercises the previously-unguarded race
+    const place = () => orderService.createGuestOrder({
+      name: 'Jane', phone,
+      orderItems: [cartItemFor(product, { quantity: 2 })],
+      deliveryMethod: 'pickup',
+      paymentMethod: 'pickup',
+    }, branch._id);
+
+    const results = await Promise.allSettled([place(), place()]);
+    const fulfilled = results.filter(r => r.status === 'fulfilled');
+    const rejected = results.filter(r => r.status === 'rejected');
+
+    // The losing request can fail via either guard — this test's own
+    // application-level duplicate check (assertNoDuplicateOrder, once both
+    // requests resolve to the same upserted Guest row) OR a lower-level
+    // MongoDB transaction write-conflict on the shared per-branch OrderCounter
+    // document (generateOrderRef's transactional $inc) if both requests reach
+    // their transactions before either's Guest upsert is visible to the other.
+    // Either is an acceptable way to close the race — what actually matters is
+    // the invariant below: never more than one order or one guest.
+    assert.equal(fulfilled.length, 1, 'exactly one of the two concurrent first-time checkouts should succeed');
+    assert.equal(rejected.length, 1);
+
+    const orders = await Order.find({ branchId: branch._id }).lean();
+    assert.equal(orders.length, 1, 'only one order should have been created');
+
+    const guests = await Guest.find({ phone: { $regex: /798765432$/ } }).lean();
+    assert.equal(guests.length, 1, 'only one guest row should have been created for the new phone number');
   });
 });

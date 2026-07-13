@@ -10,6 +10,7 @@ const activityLogSchema = new mongoose.Schema({
   branchId: { type: mongoose.Schema.Types.ObjectId, ref: 'Branch', default: null }, // null = global/system action
   detail: { type: mongoose.Schema.Types.Mixed, default: {} }, // before/after values
   ip: { type: String, default: null },
+  userAgent: { type: String, default: null },
   timestamp: { type: Date, default: Date.now }
 }, {
   versionKey: false // immutable — no version tracking needed

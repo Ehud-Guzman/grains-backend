@@ -72,6 +72,13 @@ const userSchema = new mongoose.Schema({
   passwordResetOtpHash: { type: String, default: null },
   passwordResetExpires: { type: Date, default: null },
   passwordResetAttempts: { type: Number, default: 0 },
+  // Admin/superadmin login 2FA (see auth.service.js TWO_FACTOR_ROLES)
+  twoFactorOtpHash: { type: String, default: null },
+  twoFactorExpires: { type: Date, default: null },
+  twoFactorAttempts: { type: Number, default: 0 },
+  // Used to detect new-device/location admin logins (alert.service.js NEW_DEVICE_ADMIN_LOGIN)
+  lastLoginIp: { type: String, default: null },
+  lastLoginUserAgent: { type: String, default: null },
   branchId: { type: mongoose.Schema.Types.ObjectId, ref: 'Branch', default: null }, // null = superadmin (no branch)
   // Extra capabilities granted by superadmin (additive — never restricts role permissions)
   customPermissions: {

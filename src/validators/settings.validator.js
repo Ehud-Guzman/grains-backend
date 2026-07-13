@@ -64,6 +64,7 @@ const updateSettingsValidator = [
   // Notifications
   body('notifyAdminNewOrder').optional().isBoolean().withMessage('notifyAdminNewOrder must be a boolean'),
   body('notifyAdminLowStock').optional().isBoolean().withMessage('notifyAdminLowStock must be a boolean'),
+  body('notifyAdminDailySalesReport').optional().isBoolean().withMessage('notifyAdminDailySalesReport must be a boolean'),
   body('notifyCustomerOnApproval').optional().isBoolean().withMessage('notifyCustomerOnApproval must be a boolean'),
   body('notifyCustomerOnRejection').optional().isBoolean().withMessage('notifyCustomerOnRejection must be a boolean'),
   body('notifyCustomerOnDelivery').optional().isBoolean().withMessage('notifyCustomerOnDelivery must be a boolean'),

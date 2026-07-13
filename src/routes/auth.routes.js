@@ -34,6 +34,9 @@ router.post('/login', authLimiter, loginValidator, validate, authController.logi
 // POST /api/auth/refresh
 router.post('/refresh', authLimiter, refreshValidator, validate, authController.refresh);
 
+// POST /api/auth/verify-2fa — admin/superadmin OTP step (exchange twoFactorToken + otp for the branch-selection challenge)
+router.post('/verify-2fa', authLimiter, authController.verifyTwoFactor);
+
 // POST /api/auth/select-branch — step 2 of admin login (exchange preAuthToken + branchId for full tokens)
 router.post('/select-branch', authLimiter, authController.selectBranch);
 

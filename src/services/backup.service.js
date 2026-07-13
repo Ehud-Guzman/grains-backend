@@ -144,6 +144,68 @@ const safeIsoStamp = (date = new Date()) =>
 const calculateChecksum = (buffer) =>
   crypto.createHash('sha256').update(buffer).digest('hex');
 
+// ── AT-REST ENCRYPTION (AES-256-GCM) ──────────────────────────────────────────
+// Backups contain plaintext-within-gzip password hashes, payment records, etc.
+// Encrypted with a key from BACKUP_ENCRYPTION_KEY (32-byte hex, same storage
+// pattern as JWT_ACCESS_SECRET). Degrades to unencrypted storage (with a
+// one-time warning) if the key isn't configured, rather than breaking backup
+// creation — matches how SMS/email providers degrade when unconfigured.
+const ENCRYPTION_ALGO = 'aes-256-gcm';
+const GCM_IV_BYTES = 12;
+
+let warnedNoEncryptionKey = false;
+const getEncryptionKey = () => {
+  const hex = process.env.BACKUP_ENCRYPTION_KEY;
+  if (!hex) {
+    if (!warnedNoEncryptionKey) {
+      logger.warn('[backup] BACKUP_ENCRYPTION_KEY not set — backups will be stored unencrypted.');
+      warnedNoEncryptionKey = true;
+    }
+    return null;
+  }
+  const key = Buffer.from(hex, 'hex');
+  if (key.length !== 32) {
+    logger.error('[backup] BACKUP_ENCRYPTION_KEY must be a 32-byte (64 hex char) key — ignoring; backups will be stored unencrypted.');
+    return null;
+  }
+  return key;
+};
+
+// Returns the buffer to write to disk, plus the manifest fields needed to
+// decrypt it later. encrypted:false when no key is configured.
+const encryptBuffer = (buffer) => {
+  const key = getEncryptionKey();
+  if (!key) return { buffer, encrypted: false };
+
+  const iv = crypto.randomBytes(GCM_IV_BYTES);
+  const cipher = crypto.createCipheriv(ENCRYPTION_ALGO, key, iv);
+  const encrypted = Buffer.concat([cipher.update(buffer), cipher.final()]);
+  const authTag = cipher.getAuthTag();
+  return { buffer: encrypted, encrypted: true, iv: iv.toString('hex'), authTag: authTag.toString('hex') };
+};
+
+// Pre-existing (pre-encryption) backups have no `encrypted` field on their
+// manifest entry — return the buffer as-is for those, no migration needed.
+const decryptBuffer = (buffer, entry) => {
+  if (!entry.encrypted) return buffer;
+
+  const key = getEncryptionKey();
+  if (!key) {
+    throw new AppError(
+      'This backup is encrypted but BACKUP_ENCRYPTION_KEY is not configured on this server',
+      500, 'BACKUP_DECRYPT_KEY_MISSING'
+    );
+  }
+
+  try {
+    const decipher = crypto.createDecipheriv(ENCRYPTION_ALGO, key, Buffer.from(entry.iv, 'hex'));
+    decipher.setAuthTag(Buffer.from(entry.authTag, 'hex'));
+    return Buffer.concat([decipher.update(buffer), decipher.final()]);
+  } catch {
+    throw new AppError('Backup file could not be decrypted', 500, 'BACKUP_DECRYPT_FAILED');
+  }
+};
+
 const readManifest = async () => {
   await ensureBackupDir();
   try {
@@ -215,15 +277,16 @@ const createBackup = async ({ actorId, actorRole }) => {
   const snapshot = await buildSnapshot();
   const jsonBuffer = Buffer.from(EJSON.stringify(snapshot, null, 2), 'utf8');
   const gzBuffer = await gzip(jsonBuffer, { level: zlib.constants.Z_BEST_COMPRESSION });
+  const { buffer: storedBuffer, encrypted, iv, authTag } = encryptBuffer(gzBuffer);
   const stamp = safeIsoStamp(new Date());
   const backupId = `backup_${stamp}_${crypto.randomBytes(4).toString('hex')}`;
   const storageName = `${backupId}.json.gz`;
   const absolutePath = path.join(BACKUP_DIR, storageName);
 
   await ensureBackupDir();
-  await fs.writeFile(absolutePath, gzBuffer);
+  await fs.writeFile(absolutePath, storedBuffer);
 
-  const checksum = calculateChecksum(gzBuffer);
+  const checksum = calculateChecksum(storedBuffer);
   const manifest = await readManifest();
   const entry = {
     id: backupId,
@@ -232,10 +295,12 @@ const createBackup = async ({ actorId, actorRole }) => {
     createdAt: new Date().toISOString(),
     createdBy: actorId,
     actorRole,
-    sizeBytes: gzBuffer.length,
+    sizeBytes: storedBuffer.length,
     checksum,
     version: snapshot.meta.version,
     counts: snapshot.meta.counts,
+    encrypted,
+    ...(encrypted && { iv, authTag }),
   };
 
   manifest.unshift(entry);
@@ -267,7 +332,8 @@ const listBackups = async () => {
 
 const getBackupDownload = async (backupId) => {
   const { entry, absolutePath } = await getBackupById(backupId);
-  const buffer = await fs.readFile(absolutePath);
+  const raw = await fs.readFile(absolutePath);
+  const buffer = decryptBuffer(raw, entry);
   return { entry, buffer };
 };
 

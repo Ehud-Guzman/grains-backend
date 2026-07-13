@@ -5,6 +5,7 @@ const Branch = require('../models/Branch');
 const settingsService = require('./settings.service');
 const stockService = require('./stock.service');
 const notificationService = require('./notification.service');
+const reportService = require('./report.service');
 const logger = require('../utils/logger');
 const { startOfDayEAT } = require('../utils/businessTime');
 
@@ -160,4 +161,46 @@ const sendLowStockDigests = async () => {
   }
 };
 
-module.exports = { getDashboardAlerts, notifyNewOrder, sendLowStockDigests };
+// ── PUSH: DAILY SALES REPORT (daily job, gated by notifyAdminDailySalesReport) ──
+// Reports on the prior full EAT day — the job's own initial delay/interval is
+// boot-relative (see jobs/dailySalesReport.job.js), so "today" would be a
+// partial day depending on when the server last restarted; "yesterday" is
+// always a complete, stable window regardless of when this actually runs.
+const sendDailySalesReportEmail = async () => {
+  const branches = await Branch.find({ isActive: true }).select('_id').lean();
+  const yesterday = new Date(Date.now() - MS_PER_DAY);
+
+  for (const branch of branches) {
+    try {
+      const settings = await settingsService.getSettings(branch._id);
+      if (!settings.notifyAdminDailySalesReport || !settings.shopEmail) continue;
+
+      const [sales, bestSellers] = await Promise.all([
+        reportService.getSalesReport('custom', yesterday, yesterday, branch._id),
+        reportService.getBestSellers('custom', yesterday, yesterday, 10, branch._id),
+      ]);
+
+      const { totalRevenue, totalOrders, avgOrderValue, totalItems } = sales.summary;
+      const productRows = bestSellers.products.map(p =>
+        `<tr><td style="padding:4px 8px">${p.productName} — ${p.variety} (${p.packaging})</td>
+         <td style="padding:4px 8px">${p.unitsSold} sold</td>
+         <td style="padding:4px 8px">KES ${p.revenue?.toLocaleString()}</td></tr>`
+      ).join('');
+
+      await notificationService.sendEmail({
+        to: settings.shopEmail,
+        subject: `Daily sales report — KES ${totalRevenue.toLocaleString()} (${totalOrders} order${totalOrders === 1 ? '' : 's'})`,
+        html: `<p>Sales summary for ${yesterday.toDateString()}:</p>
+          <p>Revenue: <strong>KES ${totalRevenue.toLocaleString()}</strong><br/>
+          Orders: <strong>${totalOrders}</strong><br/>
+          Avg order value: <strong>KES ${avgOrderValue.toLocaleString()}</strong><br/>
+          Items sold: <strong>${totalItems}</strong></p>
+          ${productRows ? `<p>Best sellers:</p><table>${productRows}</table>` : ''}`,
+      });
+    } catch (err) {
+      logger.error('[adminAlert] daily sales report failed', { branchId: branch._id, err: err.message });
+    }
+  }
+};
+
+module.exports = { getDashboardAlerts, notifyNewOrder, sendLowStockDigests, sendDailySalesReportEmail };

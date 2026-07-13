@@ -82,6 +82,7 @@ const settingsSchema = new mongoose.Schema({
   // ── NOTIFICATION SETTINGS ─────────────────────────────────────────────────
   notifyAdminNewOrder:      { type: Boolean, default: true },
   notifyAdminLowStock:      { type: Boolean, default: true },
+  notifyAdminDailySalesReport: { type: Boolean, default: false },
   notifyCustomerOnApproval: { type: Boolean, default: true },
   notifyCustomerOnRejection:{ type: Boolean, default: true },
   notifyCustomerOnDelivery: { type: Boolean, default: true },

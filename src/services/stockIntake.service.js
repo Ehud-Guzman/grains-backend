@@ -7,6 +7,28 @@ const { paginate, buildPaginationMeta } = require('../utils/paginate');
 const generateIntakeRef = require('../utils/generateIntakeRef');
 const logger = require('../utils/logger');
 
+// ── RECONCILIATION (expected raw intake vs. actually packed stock) ────────────
+// Read-time computation, not stored — no migration concern. Only meaningful
+// when every raw item shares the same unit (e.g. all "bags"); mixed units
+// (some "bags", some "kg") can't be summed into one comparable total, so
+// unitsConsistent flags that case for the UI rather than producing a
+// misleading percentage.
+const HIGH_VARIANCE_THRESHOLD_PCT = 15;
+const round2 = (n) => Math.round(n * 100) / 100;
+
+const withReconciliation = (intake) => {
+  const rawTotal = intake.items.reduce((sum, i) => sum + i.quantity, 0);
+  const packedTotal = intake.linkedDeliveries.reduce((sum, d) => sum + d.quantity, 0);
+  const unitsConsistent = intake.items.every(i => i.unit === intake.items[0]?.unit);
+  const variancePct = rawTotal > 0 ? round2(((rawTotal - packedTotal) / rawTotal) * 100) : null;
+  const highVariance = variancePct !== null && Math.abs(variancePct) > HIGH_VARIANCE_THRESHOLD_PCT;
+
+  return {
+    ...intake,
+    reconciliation: { rawTotal, packedTotal, variancePct, unitsConsistent, highVariance },
+  };
+};
+
 // ── CREATE ────────────────────────────────────────────────────────────────────
 const create = async (data, userId, branchId) => {
   const { supplier, vehicleRef, arrivedAt, notes, items } = data;
@@ -85,7 +107,7 @@ const list = async (filters = {}, query = {}, branchId) => {
       .lean(),
   ]);
 
-  return { records, pagination: buildPaginationMeta(page, limit, total) };
+  return { records: records.map(withReconciliation), pagination: buildPaginationMeta(page, limit, total) };
 };
 
 // ── GET ONE ──────────────────────────────────────────────────────────────────
@@ -100,7 +122,7 @@ const getOne = async (id, branchId) => {
 
   if (!intake) throw new AppError('Intake record not found', 404, 'INTAKE_NOT_FOUND');
 
-  return intake;
+  return withReconciliation(intake);
 };
 
 // ── MARK PROCESSED ───────────────────────────────────────────────────────────

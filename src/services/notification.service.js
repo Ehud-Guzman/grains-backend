@@ -348,12 +348,42 @@ const dispatchPasswordResetOtp = async (user, otp) => {
   }
 };
 
+// 6. Admin/superadmin login 2FA OTP — security-critical, always goes out on
+// every channel the user has, same rationale as dispatchPasswordResetOtp.
+const dispatchTwoFactorOtp = async (user, otp) => {
+  try {
+    const shop = 'Vittorios Grains & Cereals';
+
+    if (user.phone) {
+      await sendSMS(user.phone,
+        `Your ${shop} admin login verification code is ${otp}. It expires in 10 minutes. If you didn't request this, secure your account immediately.`
+      ).catch(err => logger.error('[notification] dispatchTwoFactorOtp SMS failed', { err: err.message }));
+    }
+
+    if (user.email) {
+      await sendEmail({
+        to: user.email,
+        subject: `Admin Login Verification Code – ${shop}`,
+        html: emailShell(shop, 'Kenya', `
+          <p>Hi <strong>${escapeHtml(user.name)}</strong>,</p>
+          <p>Use the code below to complete your admin login. It expires in 10 minutes.</p>
+          <p style="font-size:28px;font-weight:700;letter-spacing:4px;color:#1a5c38;margin:20px 0">${otp}</p>
+          <p>If you didn't request this, secure your account immediately.</p>
+        `),
+      }).catch(err => logger.error('[notification] dispatchTwoFactorOtp email failed', { err: err.message }));
+    }
+  } catch (err) {
+    logger.error('[notification] dispatchTwoFactorOtp failed', { err: err.message });
+  }
+};
+
 module.exports = {
   dispatchOrderPlaced,
   dispatchOrderApproved,
   dispatchOrderRejected,
   dispatchOrderDispatched,
   dispatchPasswordResetOtp,
+  dispatchTwoFactorOtp,
   sendEmail,
   sendSMS,
   sendBulkSMS,

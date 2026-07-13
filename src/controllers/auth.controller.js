@@ -45,7 +45,8 @@ const login = async (req, res, next) => {
   try {
     const { phone, password } = req.body;
     const ip = req.ip;
-    const result = await authService.login({ phone, password }, ip);
+    const userAgent = req.headers['user-agent'] || 'unknown';
+    const result = await authService.login({ phone, password }, ip, userAgent);
 
     // Only set the cookie when full tokens are issued (customers/drivers, or
     // first-time superadmin). Admins requiring branch selection get a preAuthToken
@@ -57,6 +58,31 @@ const login = async (req, res, next) => {
     }
 
     return success(res, result, 'Login successful');
+  } catch (err) {
+    next(err);
+  }
+};
+
+const verifyTwoFactor = async (req, res, next) => {
+  try {
+    const { twoFactorToken, otp } = req.body;
+    if (!twoFactorToken || !otp) {
+      return error(res, 'twoFactorToken and otp are required', 'MISSING_FIELDS');
+    }
+    const ip = req.ip;
+    const result = await authService.verifyTwoFactor(twoFactorToken, otp, ip);
+
+    // Same shape as login()'s result — only set the cookie when full tokens
+    // are issued directly (first-time-superadmin shortcut); otherwise this
+    // returns requiresBranchSelection+preAuthToken and the cookie is set once
+    // /select-branch completes.
+    if (!result.requiresBranchSelection && result.refreshToken) {
+      setRefreshCookie(res, result.refreshToken);
+      const { refreshToken: _rt, ...data } = result;
+      return success(res, data, 'Verification successful');
+    }
+
+    return success(res, result, 'Verification successful');
   } catch (err) {
     next(err);
   }
@@ -91,8 +117,25 @@ const switchBranch = async (req, res, next) => {
   }
 };
 
+// A malicious page can trigger a cross-site POST to this endpoint and the
+// browser will still attach the refreshToken cookie (SameSite=None in prod,
+// since frontend/backend are on different origins) — CORS blocks the attacker
+// page from reading the JSON response, but not the request from firing, so an
+// attacker can still force token rotation. Reject only on an explicit
+// Origin/Referer mismatch; allow through when neither header is present
+// (non-browser clients, e.g. Postman/curl in dev, can't be checked this way,
+// and that's not the threat this closes — browsers don't let JS spoof Origin).
+const isAllowedOrigin = (req) => {
+  const origin = req.headers.origin || req.headers.referer;
+  if (!origin) return true;
+  return origin.startsWith(process.env.FRONTEND_URL);
+};
+
 const refresh = async (req, res, next) => {
   try {
+    if (!isAllowedOrigin(req)) {
+      return error(res, 'Request origin not allowed', 'CSRF_ORIGIN_MISMATCH', 403);
+    }
     const refreshToken = extractRefreshToken(req);
     if (!refreshToken) {
       return error(res, 'Refresh token required', 'MISSING_TOKEN');
@@ -235,6 +278,7 @@ const uploadAvatar = async (req, res, next) => {
 module.exports = {
   register,
   login,
+  verifyTwoFactor,
   selectBranch,
   switchBranch,
   refresh,

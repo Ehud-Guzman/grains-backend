@@ -49,6 +49,10 @@ const generatePreAuthToken = (userId) => {
 };
 
 const ADMIN_ROLES = [ROLES.STAFF, ROLES.SUPERVISOR, ROLES.ADMIN, ROLES.SUPERADMIN];
+// Subset of ADMIN_ROLES that must pass an OTP challenge before branch selection —
+// mandatory, no opt-out. Staff/supervisor are excluded to keep day-to-day login
+// friction down; admin/superadmin hold the highest-privilege accounts.
+const TWO_FACTOR_ROLES = [ROLES.ADMIN, ROLES.SUPERADMIN];
 
 // Blacklist a token until its natural expiry. Never throws — an expired/invalid
 // token needs no blacklisting, and a duplicate key means it's already revoked.
@@ -126,7 +130,7 @@ const register = async ({ name, phone, email, password, ip = null }) => {
 // ── LOGIN ─────────────────────────────────────────────────────────────────────
 // Customers get tokens immediately.
 // Staff/Admin/Superadmin get a preAuthToken + branch list for step-2 branch selection.
-const login = async ({ phone, password }, ip) => {
+const login = async ({ phone, password }, ip, userAgent = 'unknown') => {
   const user = await User.findOne({ phone });
 
   if (!user) {
@@ -157,10 +161,30 @@ const login = async ({ phone, password }, ip) => {
     throw new AppError('Invalid phone number or password', 401, 'INVALID_CREDENTIALS');
   }
 
+  // New-device/location alert for admin roles — fired on IP/user-agent change
+  // from the last recorded login, skipped on a user's very first login (nothing
+  // to compare against yet). Fire-and-forget: never blocks the login response.
+  if (ADMIN_ROLES.includes(user.role) && user.lastLoginAt &&
+      (user.lastLoginIp !== ip || user.lastLoginUserAgent !== userAgent)) {
+    alertService.sendAlert(
+      'NEW_DEVICE_ADMIN_LOGIN',
+      {
+        Phone: user.phone,
+        Role: user.role,
+        'New IP': ip || 'unknown',
+        'Previous IP': user.lastLoginIp || 'none',
+        'User agent': userAgent,
+      },
+      String(user._id)
+    ).catch(err => logger.error('[auth] Alert send failed', { err: err.message }));
+  }
+
   // Reset failed login count on success
   await User.findByIdAndUpdate(user._id, {
     failedLoginCount: 0,
-    lastLoginAt: new Date()
+    lastLoginAt: new Date(),
+    lastLoginIp: ip || null,
+    lastLoginUserAgent: userAgent
   });
 
   // ── CUSTOMER / DRIVER: immediate tokens, no branch selection needed ─────────
@@ -184,7 +208,41 @@ const login = async ({ phone, password }, ip) => {
     };
   }
 
+  // ── ADMIN / SUPERADMIN: 2FA required before branch selection ─────────────
+  if (TWO_FACTOR_ROLES.includes(user.role)) {
+    const otp = String(Math.floor(100000 + Math.random() * 900000));
+    const twoFactorOtpHash = await bcrypt.hash(otp, BCRYPT_WORK_FACTOR);
+
+    await User.findByIdAndUpdate(user._id, {
+      twoFactorOtpHash,
+      twoFactorExpires: new Date(Date.now() + OTP_EXPIRY_MINUTES * 60 * 1000),
+      twoFactorAttempts: 0
+    });
+
+    notificationService.dispatchTwoFactorOtp(user, otp)
+      .catch(err => logger.error('[auth] Failed to dispatch 2FA OTP', { err: err.message }));
+
+    const twoFactorToken = jwt.sign(
+      { userId: user._id, step: '2fa' },
+      process.env.JWT_ACCESS_SECRET,
+      { expiresIn: AUTH_LIMITS.PRE_AUTH_TOKEN_EXPIRY }
+    );
+
+    await activityLogService.log({
+      actorId: user._id, actorRole: user.role, action: LOG_ACTIONS.ADMIN_LOGIN_2FA_REQUESTED, ip
+    }).catch(err => logger.error('[auth] Activity log write failed', { err: err.message }));
+
+    return { requiresTwoFactor: true, twoFactorToken };
+  }
+
   // ── ADMIN / STAFF / SUPERVISOR: must select a branch ─────────────────────
+  return issueBranchSelectionChallenge(user, ip);
+};
+
+// ── ISSUE BRANCH-SELECTION CHALLENGE ──────────────────────────────────────────
+// Shared by the direct post-password login path (staff/supervisor, who skip
+// 2FA) and the post-verifyTwoFactor path (admin/superadmin).
+const issueBranchSelectionChallenge = async (user, ip) => {
   let branches;
   if (user.role === ROLES.SUPERADMIN) {
     // Superadmin sees all active branches
@@ -234,6 +292,78 @@ const login = async ({ phone, password }, ip) => {
     branches,
     user: { id: user._id, name: user.name, phone: user.phone, email: user.email, role: user.role, avatarURL: user.avatarURL || null }
   };
+};
+
+// ── VERIFY TWO-FACTOR OTP (post-login step for admin/superadmin) ─────────────
+const verifyTwoFactor = async (twoFactorToken, otp, ip = null) => {
+  let decoded;
+  try {
+    decoded = jwt.verify(twoFactorToken, process.env.JWT_ACCESS_SECRET);
+  } catch {
+    throw new AppError('Session expired. Please log in again.', 401, 'INVALID_2FA_TOKEN');
+  }
+
+  if (decoded.step !== '2fa') {
+    throw new AppError('Invalid token for two-factor verification', 401, 'INVALID_2FA_TOKEN');
+  }
+
+  // Unlike selectBranch's preAuthToken (single-shot by design — a branch pick
+  // either matches or doesn't), the token here must survive a wrong-OTP guess
+  // so the user can retry, mirroring resetPassword's multi-attempt allowance
+  // (twoFactorAttempts / OTP_MAX_ATTEMPTS below). Only reject if it was
+  // already consumed by a *successful* verification (blacklisted further down).
+  const alreadyUsed = await TokenBlacklist.findOne({ token: twoFactorToken });
+  if (alreadyUsed) {
+    throw new AppError('Session already used. Please log in again.', 401, 'INVALID_2FA_TOKEN');
+  }
+
+  const user = await User.findById(decoded.userId);
+  if (!user || user.isLocked) {
+    throw new AppError('User not found or account locked', 401, 'UNAUTHORIZED');
+  }
+
+  if (!user.twoFactorOtpHash || !user.twoFactorExpires) {
+    throw new AppError(GENERIC_RESET_ERROR, 400, 'INVALID_2FA_CODE');
+  }
+
+  if (user.twoFactorExpires < new Date()) {
+    await User.findByIdAndUpdate(user._id, {
+      twoFactorOtpHash: null, twoFactorExpires: null, twoFactorAttempts: 0
+    });
+    throw new AppError(GENERIC_RESET_ERROR, 400, 'INVALID_2FA_CODE');
+  }
+
+  if (user.twoFactorAttempts >= OTP_MAX_ATTEMPTS) {
+    await User.findByIdAndUpdate(user._id, {
+      twoFactorOtpHash: null, twoFactorExpires: null, twoFactorAttempts: 0
+    });
+    throw new AppError(GENERIC_RESET_ERROR, 400, 'INVALID_2FA_CODE');
+  }
+
+  const isMatch = await bcrypt.compare(otp, user.twoFactorOtpHash);
+  if (!isMatch) {
+    await User.findByIdAndUpdate(user._id, { $inc: { twoFactorAttempts: 1 } });
+    throw new AppError(GENERIC_RESET_ERROR, 400, 'INVALID_2FA_CODE');
+  }
+
+  // Success — blacklist the token now so it can't be replayed for a second
+  // verification, then clear the OTP state.
+  try {
+    const expiresAt = new Date(decoded.exp * 1000);
+    await TokenBlacklist.create({ token: twoFactorToken, userId: decoded.userId, expiresAt });
+  } catch (err) {
+    if (err.code !== 11000) throw err; // duplicate key = already blacklisted, harmless
+  }
+
+  await User.findByIdAndUpdate(user._id, {
+    twoFactorOtpHash: null, twoFactorExpires: null, twoFactorAttempts: 0
+  });
+
+  await activityLogService.log({
+    actorId: user._id, actorRole: user.role, action: LOG_ACTIONS.ADMIN_LOGIN_2FA_VERIFIED, ip
+  }).catch(err => logger.error('[auth] Activity log write failed', { err: err.message }));
+
+  return issueBranchSelectionChallenge(user, ip);
 };
 
 // ── SELECT BRANCH (step 2 for admin login) ────────────────────────────────────
@@ -745,6 +875,7 @@ const updateOnboarding = async (userId, payload = {}) => {
 module.exports = {
   register,
   login,
+  verifyTwoFactor,
   selectBranch,
   switchBranch,
   refreshToken,
