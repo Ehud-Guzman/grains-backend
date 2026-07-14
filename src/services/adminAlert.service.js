@@ -6,6 +6,7 @@ const settingsService = require('./settings.service');
 const stockService = require('./stock.service');
 const notificationService = require('./notification.service');
 const reportService = require('./report.service');
+const { escapeHtml } = require('../utils/escapeHtml');
 const logger = require('../utils/logger');
 const { startOfDayEAT } = require('../utils/businessTime');
 
@@ -182,7 +183,7 @@ const sendDailySalesReportEmail = async () => {
 
       const { totalRevenue, totalOrders, avgOrderValue, totalItems } = sales.summary;
       const productRows = bestSellers.products.map(p =>
-        `<tr><td style="padding:4px 8px">${p.productName} — ${p.variety} (${p.packaging})</td>
+        `<tr><td style="padding:4px 8px">${escapeHtml(p.productName)} — ${escapeHtml(p.variety)} (${escapeHtml(p.packaging)})</td>
          <td style="padding:4px 8px">${p.unitsSold} sold</td>
          <td style="padding:4px 8px">KES ${p.revenue?.toLocaleString()}</td></tr>`
       ).join('');

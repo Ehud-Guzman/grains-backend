@@ -433,25 +433,30 @@ const createGuestOrder = async (orderData, branchId) => {
   // order was placed under — see phoneVariants for why this can't just be a
   // straight equality check.
   const phoneMatch = { phone: { $in: phoneVariants(orderData.phone) } };
-  // Atomic upsert (outside the transaction, before the duplicate-order check) —
-  // the first of two concurrent requests for a brand-new phone number wins the
-  // Guest row and the second observes it as already existing. Without this, a
-  // plain findOne pre-check lets two concurrent first-time submissions both see
-  // "no guest yet" and both bypass assertNoDuplicateOrder below (which early-
-  // returns when guestId is null), creating two orders + a race on Guest
-  // creation. New guests are stored in the canonical 2547XXXXXXXX form so
-  // future lookups (tracking, dedup) never need the variant fallback for them.
-  const guest = await Guest.findOneAndUpdate(
-    phoneMatch,
-    {
-      $setOnInsert: {
+  // Race-safe guest lookup (outside the transaction, before the duplicate-order
+  // check): a plain findOne-or-create isn't atomic on its own — two concurrent
+  // first-time submissions can both see "no guest yet" and both bypass
+  // assertNoDuplicateOrder below (which early-returns when guestId is null),
+  // creating two orders. The actual atomicity comes from Guest.phone's unique
+  // index (Guest.js) — only one concurrent create() can win; the loser catches
+  // the E11000 and re-reads what the winner inserted. (A bare upsert here is
+  // NOT sufficient: per MongoDB's own docs, upsert:true only avoids duplicate
+  // inserts under concurrency when the matched field is uniquely indexed.)
+  // New guests are stored in the canonical 2547XXXXXXXX form so future lookups
+  // (tracking, dedup) never need the variant fallback for them.
+  let guest = await Guest.findOne(phoneMatch);
+  if (!guest) {
+    try {
+      guest = await Guest.create({
         name: orderData.name,
         phone: formatPhone(orderData.phone),
         location: orderData.deliveryAddress || ''
-      }
-    },
-    { upsert: true, new: true }
-  );
+      });
+    } catch (err) {
+      if (err.code !== 11000) throw err;
+      guest = await Guest.findOne(phoneMatch);
+    }
+  }
   await assertNoDuplicateOrder({
     branchId, guestId: guest._id, total, itemCount: items.length
   });

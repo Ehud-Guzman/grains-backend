@@ -210,17 +210,29 @@ const login = async ({ phone, password }, ip, userAgent = 'unknown') => {
 
   // ── ADMIN / SUPERADMIN: 2FA required before branch selection ─────────────
   if (TWO_FACTOR_ROLES.includes(user.role)) {
-    const otp = String(Math.floor(100000 + Math.random() * 900000));
-    const twoFactorOtpHash = await bcrypt.hash(otp, BCRYPT_WORK_FACTOR);
+    // Per-account resend cooldown — without this, every successful password
+    // check (up to authLimiter's 10/min) regenerates and re-sends a fresh OTP,
+    // the same SMS/email-bombing gap forgotPassword's cooldown already closes
+    // below. Derived the same way: issuedAt = expiry - TTL. A fresh
+    // twoFactorToken is still issued every time so the client can keep
+    // retrying with the still-valid OTP even after its previous token expired
+    // (twoFactorToken: 5m, OTP: 10m).
+    const withinCooldown = user.twoFactorExpires &&
+      (Date.now() - (user.twoFactorExpires.getTime() - OTP_EXPIRY_MINUTES * 60 * 1000)) < OTP_RESEND_COOLDOWN_MS;
 
-    await User.findByIdAndUpdate(user._id, {
-      twoFactorOtpHash,
-      twoFactorExpires: new Date(Date.now() + OTP_EXPIRY_MINUTES * 60 * 1000),
-      twoFactorAttempts: 0
-    });
+    if (!withinCooldown) {
+      const otp = String(Math.floor(100000 + Math.random() * 900000));
+      const twoFactorOtpHash = await bcrypt.hash(otp, BCRYPT_WORK_FACTOR);
 
-    notificationService.dispatchTwoFactorOtp(user, otp)
-      .catch(err => logger.error('[auth] Failed to dispatch 2FA OTP', { err: err.message }));
+      await User.findByIdAndUpdate(user._id, {
+        twoFactorOtpHash,
+        twoFactorExpires: new Date(Date.now() + OTP_EXPIRY_MINUTES * 60 * 1000),
+        twoFactorAttempts: 0
+      });
+
+      notificationService.dispatchTwoFactorOtp(user, otp)
+        .catch(err => logger.error('[auth] Failed to dispatch 2FA OTP', { err: err.message }));
+    }
 
     const twoFactorToken = jwt.sign(
       { userId: user._id, step: '2fa' },

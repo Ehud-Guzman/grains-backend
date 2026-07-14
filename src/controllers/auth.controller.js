@@ -128,7 +128,15 @@ const switchBranch = async (req, res, next) => {
 const isAllowedOrigin = (req) => {
   const origin = req.headers.origin || req.headers.referer;
   if (!origin) return true;
-  return origin.startsWith(process.env.FRONTEND_URL);
+  // Compare parsed origins, not raw strings — a substring/prefix check here
+  // (e.g. origin.startsWith(FRONTEND_URL)) would let a lookalike domain like
+  // "<FRONTEND_URL>.evil.com" pass, since that string also starts with the
+  // real frontend URL.
+  try {
+    return new URL(origin).origin === new URL(process.env.FRONTEND_URL).origin;
+  } catch {
+    return false;
+  }
 };
 
 const refresh = async (req, res, next) => {
