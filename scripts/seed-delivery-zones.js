@@ -48,7 +48,7 @@ const PRESETS = {
 
   nakuru: {
     label: 'Nakuru',
-    maxDeliveryKm: 40,
+    maxDeliveryKm: 55, // straight-line km — makes the outlier band live and covers Naivasha (~43 km)
     deliveryFee: 300,
     zones: [
       { name: 'Nakuru CBD',                minKm: 0,  maxKm: 3,    fee: 150  },
@@ -61,14 +61,14 @@ const PRESETS = {
 
   nairobi: {
     label: 'Nairobi',
-    maxDeliveryKm: 35,
+    maxDeliveryKm: 50, // straight-line km — covers the whole metro incl. Thika, Kitengela, Limuru
     deliveryFee: 400,
     zones: [
       { name: 'Nairobi CBD & Westlands',   minKm: 0,  maxKm: 5,    fee: 200  },
       { name: 'Ngong Rd, Thika Rd, Mombasa Rd', minKm: 5, maxKm: 15, fee: 350 },
       { name: 'Rongai, Kikuyu & Suburbs',  minKm: 15, maxKm: 25,   fee: 550  },
       { name: 'Kiambu, Ruiru & Far Zones', minKm: 25, maxKm: 35,   fee: 800  },
-      { name: 'Nairobi Metro Outliers',    minKm: 35, maxKm: 9999, fee: 1000 },
+      { name: 'Thika, Kitengela & Metro Edge', minKm: 35, maxKm: 9999, fee: 1000 },
     ]
   },
 
