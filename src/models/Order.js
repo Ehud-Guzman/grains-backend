@@ -63,6 +63,9 @@ const orderSchema = new mongoose.Schema({
   stockConsumedAt: { type: Date, default: null },
   statusHistory: [statusHistorySchema],
   specialInstructions: { type: String, default: null },
+  // Customer's requested delivery/pickup date from checkout — a planning hint
+  // for logistics, not a hard commitment; admin sees it on the order detail.
+  preferredDeliveryDate: { type: Date, default: null },
   couponCode:     { type: String, default: null },
   couponDiscount: { type: Number, default: 0 },
   buyerKraPin: { type: String, default: null },

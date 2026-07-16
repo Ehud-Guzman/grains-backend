@@ -184,7 +184,7 @@ const assertShopCanAcceptOrders = (settings) => {
   }
 };
 
-const assertOrderMatchesSettings = ({ settings, deliveryMethod, paymentMethod, subtotal, isGuestOrder }) => {
+const assertOrderMatchesSettings = ({ settings, deliveryMethod, paymentMethod, subtotal, totalQuantity, isGuestOrder }) => {
   if (isGuestOrder && !settings.allowGuestOrders) {
     throw new AppError('Guest checkout is currently disabled. Please sign in to continue.', 403, 'GUEST_ORDERS_DISABLED');
   }
@@ -194,6 +194,14 @@ const assertOrderMatchesSettings = ({ settings, deliveryMethod, paymentMethod, s
       `Minimum order value is KES ${settings.minimumOrderValue.toLocaleString()}.`,
       400,
       'MINIMUM_ORDER_NOT_MET'
+    );
+  }
+
+  if (settings.minimumOrderQuantity > 0 && totalQuantity < settings.minimumOrderQuantity) {
+    throw new AppError(
+      `This branch takes bulk orders only — minimum ${settings.minimumOrderQuantity} bags per order.`,
+      400,
+      'MINIMUM_ORDER_QTY_NOT_MET'
     );
   }
 
@@ -394,6 +402,7 @@ const createGuestOrder = async (orderData, branchId) => {
     deliveryMethod: orderData.deliveryMethod,
     paymentMethod: orderData.paymentMethod,
     subtotal,
+    totalQuantity: items.reduce((sum, i) => sum + i.quantity, 0),
     isGuestOrder: true
   });
 
@@ -490,6 +499,7 @@ const createGuestOrder = async (orderData, branchId) => {
       status: ORDER_STATUSES.PENDING,
       stockReservationStatus: STOCK_RESERVATION_STATUSES.NONE,
       specialInstructions: orderData.specialInstructions || null,
+      preferredDeliveryDate: orderData.preferredDeliveryDate ? new Date(orderData.preferredDeliveryDate) : null,
       buyerKraPin: orderData.buyerKraPin?.trim() || null,
       preferredDriverId,
       deliveryCoordinates: orderData.deliveryCoordinates?.lat
@@ -552,6 +562,7 @@ const createCustomerOrder = async (orderData, userId, branchId) => {
     deliveryMethod: orderData.deliveryMethod,
     paymentMethod: orderData.paymentMethod,
     subtotal,
+    totalQuantity: items.reduce((sum, i) => sum + i.quantity, 0),
     isGuestOrder: false
   });
   const { fee: deliveryFee, distanceKm, zoneName, deliveryAvailable } = calculateDeliveryFee(
@@ -613,6 +624,7 @@ const createCustomerOrder = async (orderData, userId, branchId) => {
       status: ORDER_STATUSES.PENDING,
       stockReservationStatus: STOCK_RESERVATION_STATUSES.NONE,
       specialInstructions: orderData.specialInstructions || null,
+      preferredDeliveryDate: orderData.preferredDeliveryDate ? new Date(orderData.preferredDeliveryDate) : null,
       buyerKraPin: orderData.buyerKraPin?.trim() || null,
       preferredDriverId,
       deliveryCoordinates: orderData.deliveryCoordinates?.lat

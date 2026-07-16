@@ -47,6 +47,7 @@ const getPublicSettings = async (branchId) => {
     shopWhatsapp: s.shopWhatsapp,
     deliveryFee:  s.deliveryFee,
     minimumOrderValue: s.minimumOrderValue,
+    minimumOrderQuantity: s.minimumOrderQuantity || 0,
     allowGuestOrders:  s.allowGuestOrders,
     allowCashOnDelivery: s.allowCashOnDelivery,
     allowPayOnPickup:  s.allowPayOnPickup,

@@ -20,6 +20,7 @@ const settingsSchema = new mongoose.Schema({
   // ── ORDER SETTINGS ────────────────────────────────────────────────────────
   deliveryFee:          { type: Number, default: 0 },
   minimumOrderValue:    { type: Number, default: 0 },
+  minimumOrderQuantity: { type: Number, default: 0 }, // total bags across the cart; 0 = no minimum
   autoCancelHours:      { type: Number, default: 0 },
   allowGuestOrders:     { type: Boolean, default: true },
   allowCashOnDelivery:  { type: Boolean, default: true },
@@ -88,6 +89,9 @@ const settingsSchema = new mongoose.Schema({
   notifyCustomerOnDelivery: { type: Boolean, default: true },
   smsEnabled:               { type: Boolean, default: false },
   emailEnabled:             { type: Boolean, default: false },
+  // Instant alert for unusually large orders — fires even when the routine
+  // new-order alert is switched off; 0 = disabled
+  largeOrderThresholdKES:   { type: Number, default: 0 },
 
   // ── LOYALTY PROGRAMME ─────────────────────────────────────────────────────
   loyaltyEnabled:          { type: Boolean, default: true  },

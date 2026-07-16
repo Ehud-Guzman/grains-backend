@@ -261,3 +261,61 @@ describe('order.service — brand-new-guest duplicate-order race', () => {
     assert.equal(guests.length, 1, 'only one guest row should have been created for the new phone number');
   });
 });
+
+describe('order.service — bulk-order minimum quantity and preferred delivery date', () => {
+  let branch, product;
+
+  beforeEach(async () => {
+    await testDb.clearDatabase();
+    branch = await createBranch();
+    await createSettings(branch._id, { minimumOrderQuantity: 10 });
+    const admin = await createUser(branch._id, { role: 'admin' });
+    product = await createProduct(branch._id, admin._id, { packaging: { stock: 100 } });
+  });
+
+  test('rejects an order below the branch minimum bag quantity', async () => {
+    await assert.rejects(
+      orderService.createGuestOrder({
+        name: 'Jane', phone: '0712345678',
+        orderItems: [cartItemFor(product, { quantity: 9 })],
+        deliveryMethod: 'pickup',
+        paymentMethod: 'pickup',
+      }, branch._id),
+      (err) => err.errorCode === 'MINIMUM_ORDER_QTY_NOT_MET'
+    );
+  });
+
+  test('accepts an order meeting the minimum and stores the preferred delivery date', async () => {
+    const requested = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000);
+    const order = await orderService.createGuestOrder({
+      name: 'Jane', phone: '0712345678',
+      orderItems: [cartItemFor(product, { quantity: 10 })],
+      deliveryMethod: 'pickup',
+      paymentMethod: 'pickup',
+      preferredDeliveryDate: requested.toISOString(),
+    }, branch._id);
+
+    assert.equal(order.status, 'pending');
+    assert.ok(order.preferredDeliveryDate, 'preferred delivery date should be stored on the order');
+    assert.equal(
+      new Date(order.preferredDeliveryDate).toISOString(),
+      requested.toISOString()
+    );
+  });
+
+  test('quantity minimum is off by default (0) — small orders still pass elsewhere', async () => {
+    const otherBranch = await createBranch({ name: 'Retail Branch', isDefault: false });
+    await createSettings(otherBranch._id);
+    const admin = await createUser(otherBranch._id, { role: 'admin' });
+    const retailProduct = await createProduct(otherBranch._id, admin._id);
+
+    const order = await orderService.createGuestOrder({
+      name: 'Jane', phone: '0712345678',
+      orderItems: [cartItemFor(retailProduct, { quantity: 1 })],
+      deliveryMethod: 'pickup',
+      paymentMethod: 'pickup',
+    }, otherBranch._id);
+
+    assert.equal(order.status, 'pending');
+  });
+});

@@ -108,16 +108,30 @@ const getDashboardAlerts = async (branchId) => {
 };
 
 // ── PUSH: NEW ORDER (fires on ORDER_EVENTS.PLACED, gated by notifyAdminNewOrder) ──
+// A large order (total >= largeOrderThresholdKES, 0 = disabled) upgrades the
+// alert and fires even when the routine new-order alert is switched off — a
+// 40-bag wholesale order must not sit unnoticed in the pending queue.
 const notifyNewOrder = async (order, branchId) => {
   const settings = await settingsService.getSettings(branchId);
-  if (!settings.notifyAdminNewOrder) return;
+  const threshold = Number(settings.largeOrderThresholdKES) || 0;
+  const isLarge = threshold > 0 && order.total >= threshold;
+  if (!settings.notifyAdminNewOrder && !isLarge) return;
   if (!settings.shopEmail && !settings.shopPhone) return;
 
-  const subject = `New order ${order.orderRef} — KES ${order.total?.toLocaleString()}`;
-  const html = `<p>New order placed.</p>
+  const totalBags = (order.orderItems || []).reduce((sum, i) => sum + (i.quantity || 0), 0);
+  const preferredDate = order.preferredDeliveryDate
+    ? new Date(order.preferredDeliveryDate).toLocaleDateString('en-KE', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' })
+    : null;
+
+  const subject = isLarge
+    ? `⚠️ LARGE ORDER ${order.orderRef} — KES ${order.total?.toLocaleString()} (${totalBags} bags)`
+    : `New order ${order.orderRef} — KES ${order.total?.toLocaleString()}`;
+  const html = `<p>${isLarge ? `<strong>Large order</strong> placed (threshold KES ${threshold.toLocaleString()}) — review promptly.` : 'New order placed.'}</p>
     <p><strong>Reference:</strong> ${order.orderRef}<br/>
     <strong>Total:</strong> KES ${order.total?.toLocaleString()}<br/>
+    <strong>Items:</strong> ${totalBags} bag${totalBags === 1 ? '' : 's'}<br/>
     <strong>Delivery:</strong> ${order.deliveryMethod}<br/>
+    ${preferredDate ? `<strong>Requested date:</strong> ${preferredDate}<br/>` : ''}
     <strong>Payment:</strong> ${order.paymentMethod}</p>`;
 
   if (settings.shopEmail) {
@@ -128,7 +142,7 @@ const notifyNewOrder = async (order, branchId) => {
   if (settings.shopPhone) {
     await notificationService.sendSMS(
       settings.shopPhone,
-      `New order ${order.orderRef} — KES ${order.total?.toLocaleString()} (${order.deliveryMethod}, ${order.paymentMethod})`
+      `${isLarge ? 'LARGE ORDER' : 'New order'} ${order.orderRef} — KES ${order.total?.toLocaleString()}, ${totalBags} bags (${order.deliveryMethod}, ${order.paymentMethod})${preferredDate ? ` for ${preferredDate}` : ''}`
     ).catch(err => logger.error('[adminAlert] new order SMS failed', { err: err.message }));
   }
 };

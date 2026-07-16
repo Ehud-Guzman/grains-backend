@@ -21,6 +21,7 @@ const updateSettingsValidator = [
   // Order settings
   body('deliveryFee').optional().isFloat({ min: 0 }).withMessage('Delivery fee must be 0 or greater'),
   body('minimumOrderValue').optional().isFloat({ min: 0 }).withMessage('Minimum order value must be 0 or greater'),
+  body('minimumOrderQuantity').optional().isInt({ min: 0 }).withMessage('Minimum order quantity must be 0 or greater'),
   body('autoCancelHours').optional().isInt({ min: 0 }).withMessage('Auto-cancel hours must be 0 or greater'),
   body('allowGuestOrders').optional().isBoolean().withMessage('allowGuestOrders must be a boolean'),
   body('allowCashOnDelivery').optional().isBoolean().withMessage('allowCashOnDelivery must be a boolean'),
@@ -71,6 +72,7 @@ const updateSettingsValidator = [
   body('smsEnabled').optional().isBoolean().withMessage('smsEnabled must be a boolean'),
   body('emailEnabled').optional().isBoolean().withMessage('emailEnabled must be a boolean'),
   body('priceAlertThresholdPct').optional().isFloat({ min: 0, max: 100 }).withMessage('Price alert threshold must be 0–100'),
+  body('largeOrderThresholdKES').optional().isFloat({ min: 0 }).withMessage('Large order threshold must be 0 or greater'),
 
   // Loyalty
   body('loyaltyEnabled').optional().isBoolean().withMessage('loyaltyEnabled must be a boolean'),

@@ -1,5 +1,22 @@
 const { body, check } = require('express-validator');
 const { PAYMENT_METHODS } = require('../utils/constants');
+const { startOfDayEAT } = require('../utils/businessTime');
+
+// Customer's requested delivery/pickup date — a logistics planning hint.
+// Must be a real date, not in the past (Nairobi clock), and within 60 days
+// so a typo'd year doesn't land a phantom order in the 2030 delivery plan.
+const MAX_PREFERRED_DATE_DAYS = 60;
+const preferredDeliveryDateValidator =
+  body('preferredDeliveryDate')
+    .optional({ nullable: true, checkFalsy: true })
+    .custom((val) => {
+      const date = new Date(val);
+      if (isNaN(date.getTime())) throw new Error('Invalid preferred delivery date');
+      if (date < startOfDayEAT()) throw new Error('Preferred delivery date cannot be in the past');
+      if (date > new Date(Date.now() + MAX_PREFERRED_DATE_DAYS * 24 * 60 * 60 * 1000))
+        throw new Error(`Preferred delivery date cannot be more than ${MAX_PREFERRED_DATE_DAYS} days ahead`);
+      return true;
+    });
 
 const deliveryCoordinatesValidator =
   check('deliveryCoordinates')
@@ -65,6 +82,7 @@ const guestOrderValidator = [
   body('paymentMethod')
     .isIn(Object.values(PAYMENT_METHODS)).withMessage('Invalid payment method'),
 
+  preferredDeliveryDateValidator,
   deliveryCoordinatesValidator,
   ...orderItemsValidator
 ];
@@ -87,6 +105,7 @@ const customerOrderValidator = [
   body('paymentMethod')
     .isIn(Object.values(PAYMENT_METHODS)).withMessage('Invalid payment method'),
 
+  preferredDeliveryDateValidator,
   deliveryCoordinatesValidator,
   ...orderItemsValidator
 ];
