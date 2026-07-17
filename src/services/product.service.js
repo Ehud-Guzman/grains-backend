@@ -4,6 +4,7 @@ const { AppError } = require('../middleware/errorHandler.middleware');
 const activityLogService = require('./activityLog.service');
 const { LOG_ACTIONS } = require('../utils/constants');
 const { paginate, buildPaginationMeta } = require('../utils/paginate');
+const settingsService = require('./settings.service');
 const { normalizeImageUrls } = require('../utils/imageUrl');
 const { deleteImages } = require('./upload.service');
 const priceLogService = require('./priceLog.service');
@@ -11,7 +12,21 @@ const { appEvents, PRICE_EVENTS } = require('../events/appEvents');
 const logger = require('../utils/logger');
 const { escapeRegex } = require('../utils/escapeRegex');
 
-const exposePublicStockFields = (product) => product;
+// Strip business-sensitive fields from products served to the public storefront.
+// costPriceKES is the shop's purchase cost / margin data — it must never leave
+// the admin API (getById on the admin router passes includeStock=true and skips
+// this). stock / lowStockThreshold / pricingTiers stay: the storefront's stock
+// badges, cart clamping, and volume-pricing display depend on them.
+const exposePublicStockFields = (product) => {
+  if (!product) return product;
+  delete product.createdBy;
+  for (const variety of product.varieties || []) {
+    for (const pkg of variety.packaging || []) {
+      delete pkg.costPriceKES;
+    }
+  }
+  return product;
+};
 
 // ── CACHE ─────────────────────────────────────────────────────────────────────
 // Per-branch cache: branchId => { data, time }
@@ -32,6 +47,17 @@ const getAll = async (filters = {}, query = {}, branchId) => {
   const matchStage = { isActive: true };
 
   if (branchId) matchStage.branchId = branchId;
+
+  // Per-branch "hide out-of-stock products" toggle — hides products whose every
+  // packaging is at zero from catalog *browsing* only. Direct product links
+  // (getById) still resolve, so back-in-stock alert subscriptions and cart
+  // refreshes keep working; the cart already drops zero-stock items itself.
+  if (branchId) {
+    const settings = await settingsService.getSettings(branchId);
+    if (settings.autoHideOutOfStock) {
+      matchStage['varieties.packaging.stock'] = { $gt: 0 };
+    }
+  }
 
   if (filters.category) {
     matchStage.category = Array.isArray(filters.category)
@@ -141,8 +167,26 @@ const getAllAdmin = async (filters = {}, query = {}, branchId) => {
   };
 };
 
+// Enforce the per-branch product cap (Settings.maxProductsPerBranch, 0 = unlimited)
+// on every path that creates a product document: create, duplicate, and Excel import.
+const assertProductCapNotReached = async (branchId) => {
+  if (!branchId) return; // no branch context — nothing to scope the cap to
+  const settings = await settingsService.getSettings(branchId);
+  const max = Number(settings.maxProductsPerBranch) || 0;
+  if (max <= 0) return;
+  const count = await Product.countDocuments({ branchId });
+  if (count >= max) {
+    throw new AppError(
+      `This branch has reached its product limit (${max}). Remove or archive a product first, or ask a superadmin to raise the limit.`,
+      409,
+      'PRODUCT_LIMIT_REACHED'
+    );
+  }
+};
+
 // ── ADMIN: CREATE PRODUCT ─────────────────────────────────────────────────────
 const create = async (data, adminId, branchId, actorRole = 'admin') => {
+  await assertProductCapNotReached(branchId);
   const product = await Product.create({
     ...data,
     imageURLs: normalizeImageUrls(data.imageURLs),
@@ -362,10 +406,22 @@ const duplicate = async (productId, adminId, branchId, actorRole = 'admin') => {
   const original = await Product.findOne(query).lean();
   if (!original) throw new AppError('Product not found', 404, 'PRODUCT_NOT_FOUND');
 
+  await assertProductCapNotReached(branchId);
+
   const { _id, createdAt, updatedAt, __v, ...productData } = original;
+
+  // The copy must start at zero stock — copying the original's quantities
+  // fabricates inventory that no delivery ever brought in (no StockLog entry),
+  // which shows up as phantom rows on the Stock page and inflates valuation
+  // once activated. Real stock enters via the Stock page's delivery flow.
+  const zeroStockVarieties = (productData.varieties || []).map(v => ({
+    ...v,
+    packaging: (v.packaging || []).map(p => ({ ...p, stock: 0 })),
+  }));
 
   const copy = await Product.create({
     ...productData,
+    varieties: zeroStockVarieties,
     name: `${original.name} (Copy)`,
     isActive: false,
     createdBy: adminId,
@@ -412,5 +468,6 @@ module.exports = {
   deleteProduct,
   duplicate,
   addImages,
-  invalidateCache
+  invalidateCache,
+  assertProductCapNotReached
 };

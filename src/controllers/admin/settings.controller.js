@@ -1,5 +1,8 @@
 const settingsService = require('../../services/settings.service');
-const { resolvePublicBranch } = require('../../services/defaultBranch.service');
+// getDefaultBranch was referenced by getReceiptConfig without being imported —
+// every branch-less caller (customers have branchId: null) crashed with a
+// ReferenceError instead of getting the default branch's receipt config.
+const { resolvePublicBranch, getDefaultBranch } = require('../../services/defaultBranch.service');
 const { calculateDeliveryFee } = require('../../services/order.service');
 const { success } = require('../../utils/apiResponse');
 const { AppError } = require('../../middleware/errorHandler.middleware');

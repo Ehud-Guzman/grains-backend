@@ -6,13 +6,14 @@ const { requireBusinessRole } = require('../../middleware/role.middleware');
 const { validate } = require('../../middleware/validate.middleware');
 const { body, param } = require('express-validator');
 const { adminLimiter } = require('../../middleware/rateLimit.middleware');
+const { checkPlatformLock } = require('../../middleware/platformLock.middleware');
 
 const driverIdParamValidator = [
   param('id').isMongoId().withMessage('Invalid driver ID')
 ];
 
 // All routes: authenticated + at least supervisor
-router.use(verifyToken, adminLimiter);
+router.use(verifyToken, adminLimiter, checkPlatformLock);
 
 // ── READ (supervisor+) ────────────────────────────────────────────────────────
 router.get('/', requireBusinessRole('supervisor'), driverController.getAll);

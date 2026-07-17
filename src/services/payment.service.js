@@ -427,14 +427,21 @@ const ADMIN_ROLES = [ROLES.STAFF, ROLES.SUPERVISOR, ROLES.ADMIN, ROLES.SUPERADMI
 
 const checkPaymentStatus = async (orderId, requestingUser, guestPhone = null) => {
   const order = await Order.findById(orderId)
-    .select('paymentStatus paymentId orderRef total userId guestId')
+    .select('paymentStatus paymentId orderRef total userId guestId branchId')
     .populate('guestId', 'phone');
   if (!order) throw new AppError('Order not found', 404, 'ORDER_NOT_FOUND');
 
   // Ownership check — only the order owner or admin-tier roles may poll payment status.
   // Return 404 (not 403) to avoid leaking whether the order ID exists at all.
   if (requestingUser) {
-    if (!ADMIN_ROLES.includes(requestingUser.role)) {
+    if (ADMIN_ROLES.includes(requestingUser.role)) {
+      // Branch isolation, same as every other admin surface: a branch-scoped
+      // staff token only sees its own branch's orders. Superadmin tokens carry
+      // branchId null and keep the global view.
+      if (requestingUser.branchId && order.branchId?.toString() !== requestingUser.branchId.toString()) {
+        throw new AppError('Order not found', 404, 'ORDER_NOT_FOUND');
+      }
+    } else {
       if (!order.userId || order.userId.toString() !== requestingUser.id.toString()) {
         throw new AppError('Order not found', 404, 'ORDER_NOT_FOUND');
       }

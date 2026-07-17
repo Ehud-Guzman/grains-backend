@@ -6,6 +6,7 @@ const { LOG_ACTIONS } = require('../utils/constants');
 const { paginate, buildPaginationMeta } = require('../utils/paginate');
 const generateIntakeRef = require('../utils/generateIntakeRef');
 const logger = require('../utils/logger');
+const { escapeRegex } = require('../utils/escapeRegex');
 
 // ── RECONCILIATION (expected raw intake vs. actually packed stock) ────────────
 // Read-time computation, not stored — no migration concern. Only meaningful
@@ -82,7 +83,9 @@ const list = async (filters = {}, query = {}, branchId) => {
   }
 
   if (filters.search) {
-    const re = new RegExp(filters.search.trim(), 'i');
+    // escapeRegex, same as every other search in the codebase — raw user input
+    // in a RegExp is a ReDoS/regex-injection vector.
+    const re = new RegExp(escapeRegex(filters.search.trim()), 'i');
     match.$or = [
       { intakeRef:  re },
       { supplier:   re },

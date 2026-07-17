@@ -106,8 +106,8 @@ const getOrderContact = async (order) => {
     return { name: user.name, phone: user.phone, email: user.email || null };
   }
   if (order.guestId) {
-    const guest = await Guest.findById(order.guestId, 'name phone').lean();
-    if (guest) return { name: guest.name, phone: guest.phone, email: null };
+    const guest = await Guest.findById(order.guestId, 'name phone email').lean();
+    if (guest) return { name: guest.name, phone: guest.phone, email: guest.email || null };
     // Guest doc missing (e.g. purged by cleanup.job.js's retention sweep) —
     // fall back to the name/phone snapshotted on the order itself at creation
     // rather than silently dropping the notification.

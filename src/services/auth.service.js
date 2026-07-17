@@ -87,6 +87,23 @@ const normalizeOnboarding = (onboarding = {}) => ({
 
 // ── REGISTER ──────────────────────────────────────────────────────────────────
 const register = async ({ name, phone, email, password, marketingConsent = false, ip = null }) => {
+  // Customer accounts are global (branchId: null), so the registration gate
+  // lives on the DEFAULT branch's settings — the closest thing the system has
+  // to storefront-wide configuration. Fails open if no branch exists yet.
+  const { getDefaultBranchId } = require('./defaultBranch.service');
+  const defaultBranchId = await getDefaultBranchId();
+  if (defaultBranchId) {
+    const settingsService = require('./settings.service');
+    const settings = await settingsService.getSettings(defaultBranchId);
+    if (settings.blockNewRegistrations) {
+      throw new AppError(
+        'New account registrations are temporarily closed. Please try again later or contact us.',
+        403,
+        'REGISTRATIONS_CLOSED'
+      );
+    }
+  }
+
   const existing = await User.findOne({ phone });
   if (existing) {
     throw new AppError('An account with this phone number already exists', 409, 'PHONE_TAKEN');
@@ -906,5 +923,6 @@ module.exports = {
   getProfile,
   updateProfile,
   getOnboarding,
-  updateOnboarding
+  updateOnboarding,
+  validatePasswordStrength
 };

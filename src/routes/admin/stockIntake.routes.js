@@ -5,9 +5,10 @@ const { verifyToken } = require('../../middleware/auth.middleware');
 const { requireMinRole, requireBusinessRole } = require('../../middleware/role.middleware');
 const { validate } = require('../../middleware/validate.middleware');
 const { adminLimiter } = require('../../middleware/rateLimit.middleware');
+const { checkPlatformLock } = require('../../middleware/platformLock.middleware');
 const { createIntakeValidator, processIntakeValidator } = require('../../validators/stockIntake.validator');
 
-router.use(verifyToken, adminLimiter);
+router.use(verifyToken, adminLimiter, checkPlatformLock);
 
 // GET /api/admin/stock-intake
 // List all intake records — supervisor+ can read; superadmin can observe

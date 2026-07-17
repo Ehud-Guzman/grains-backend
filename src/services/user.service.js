@@ -12,6 +12,18 @@ const BCRYPT_WORK_FACTOR = AUTH_LIMITS.BCRYPT_WORK_FACTOR;
 // Roles that can be assigned to admin accounts
 const ADMIN_ROLES = [ROLES.STAFF, ROLES.SUPERVISOR, ROLES.ADMIN, ROLES.SUPERADMIN];
 
+// Pick the audit action that matches the target's role — logging a staff lock
+// as CUSTOMER_ACCOUNT_LOCKED buries privileged-account events in the audit trail.
+const lockActionForRole = (role) =>
+  ADMIN_ROLES.includes(role) ? LOG_ACTIONS.ADMIN_ACCOUNT_LOCKED
+    : role === ROLES.DRIVER ? LOG_ACTIONS.DRIVER_ACCOUNT_LOCKED
+      : LOG_ACTIONS.CUSTOMER_ACCOUNT_LOCKED;
+
+const unlockActionForRole = (role) =>
+  ADMIN_ROLES.includes(role) ? LOG_ACTIONS.ADMIN_ACCOUNT_UNLOCKED
+    : role === ROLES.DRIVER ? LOG_ACTIONS.DRIVER_ACCOUNT_UNLOCKED
+      : LOG_ACTIONS.CUSTOMER_ACCOUNT_UNLOCKED;
+
 // ── GET ALL ADMIN/STAFF ACCOUNTS ──────────────────────────────────────────────
 // Super-admin only - SRS 5.6
 const getAllAdminUsers = async (filters = {}, query = {}) => {
@@ -49,6 +61,22 @@ const getAllAdminUsers = async (filters = {}, query = {}) => {
 const createAdminUser = async ({ name, phone, email, password, role }, superAdminId) => {
   if (!ADMIN_ROLES.includes(role)) {
     throw new AppError(`Invalid role. Must be one of: ${ADMIN_ROLES.join(', ')}`, 400, 'INVALID_ROLE');
+  }
+
+  // Admin accounts are global, so this gate — like blockNewRegistrations for
+  // customers — reads the DEFAULT branch's settings as the system-wide switch.
+  const { getDefaultBranchId } = require('./defaultBranch.service');
+  const defaultBranchId = await getDefaultBranchId();
+  if (defaultBranchId) {
+    const settingsService = require('./settings.service');
+    const settings = await settingsService.getSettings(defaultBranchId);
+    if (settings.allowNewAdminAccounts === false) {
+      throw new AppError(
+        'Creation of new staff/admin accounts is currently disabled in Settings.',
+        403,
+        'ADMIN_CREATION_DISABLED'
+      );
+    }
   }
 
   const existing = await User.findOne({ phone });
@@ -155,7 +183,7 @@ const lockAdminAccount = async (userId, superAdminId) => {
   await activityLogService.log({
     actorId: superAdminId,
     actorRole: ROLES.SUPERADMIN,
-    action: LOG_ACTIONS.CUSTOMER_ACCOUNT_LOCKED,
+    action: lockActionForRole(user.role),
     targetId: userId,
     targetType: 'User',
     detail: {
@@ -182,7 +210,7 @@ const unlockAdminAccount = async (userId, adminId, actorRole = ROLES.SUPERADMIN)
   await activityLogService.log({
     actorId: adminId,
     actorRole,
-    action: LOG_ACTIONS.CUSTOMER_ACCOUNT_UNLOCKED,
+    action: unlockActionForRole(user.role),
     targetId: userId,
     targetType: 'User',
     detail: { name: user.name, role: user.role }
@@ -194,15 +222,20 @@ const unlockAdminAccount = async (userId, adminId, actorRole = ROLES.SUPERADMIN)
 // ── RESET PASSWORD ────────────────────────────────────────────────────────────
 // Super-admin resets a staff member's password
 const resetPassword = async (userId, newPassword, superAdminId) => {
-  if (!newPassword || newPassword.length < 8) {
-    throw new AppError('Password must be at least 8 characters', 400, 'INVALID_PASSWORD');
-  }
+  // Same strength policy as registration/self-service change — an admin-set
+  // password must not be allowed to be weaker than one a user sets themselves.
+  const { validatePasswordStrength } = require('./auth.service');
+  if (!newPassword) throw new AppError('Password is required', 400, 'INVALID_PASSWORD');
+  validatePasswordStrength(newPassword);
 
   const passwordHash = await bcrypt.hash(newPassword, BCRYPT_WORK_FACTOR);
 
+  // A forced reset is most often a response to a compromised or offboarded
+  // account — every token issued before this instant must die with the old
+  // password (mirrors changePassword/resetPassword in auth.service.js).
   const user = await User.findByIdAndUpdate(
     userId,
-    { passwordHash, failedLoginCount: 0, isLocked: false },
+    { passwordHash, failedLoginCount: 0, isLocked: false, tokenValidAfter: bumpTokenValidAfter() },
     { new: true }
   );
 

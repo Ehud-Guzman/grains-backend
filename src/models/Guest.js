@@ -3,6 +3,9 @@ const mongoose = require('mongoose');
 const guestSchema = new mongoose.Schema({
   name: { type: String, required: true, trim: true },
   phone: { type: String, required: true, trim: true },
+  // Optional — checkout collects it for order-status emails; without it guests
+  // are SMS-only (and effectively unreachable while SMS is on sandbox).
+  email: { type: String, trim: true, lowercase: true, default: null },
   location: { type: String, trim: true },
   orders: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Order' }]
 }, {

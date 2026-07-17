@@ -9,7 +9,7 @@ const { formatPhone } = require('../utils/mpesaHelpers');
 // POST /api/payments/mpesa/initiate — guest or authenticated customer
 const initiate = async (req, res, next) => {
   try {
-    const { orderId, phone } = req.body;
+    const { orderId, phone, contactPhone } = req.body;
     if (!orderId || !phone) {
       return error(res, 'orderId and phone are required', 'MISSING_FIELDS');
     }
@@ -24,10 +24,21 @@ const initiate = async (req, res, next) => {
         return error(res, 'Order not found', 'NOT_FOUND', 404);
       }
     } else {
-      // Guest — provided phone must match the guest's registered phone
+      // Guest — ownership is proven by knowing the CONTACT phone the order was
+      // placed under. The STK target (`phone`) may legitimately be a different
+      // number (paying from a spouse's or business line), so it must not be the
+      // thing we verify — previously it was, and any guest paying with a
+      // different M-Pesa number was dead-ended with a 404. `contactPhone` falls
+      // back to `phone` for older clients that only send one number.
       if (!order.guestId) return error(res, 'Order not found', 'NOT_FOUND', 404);
       const guest = await Guest.findById(order.guestId).select('phone').lean();
-      if (!guest || formatPhone(guest.phone) !== formatPhone(phone)) {
+      let ownershipPhone;
+      try {
+        ownershipPhone = formatPhone(contactPhone || phone);
+      } catch {
+        return error(res, 'Order not found', 'NOT_FOUND', 404);
+      }
+      if (!guest || formatPhone(guest.phone) !== ownershipPhone) {
         return error(res, 'Order not found', 'NOT_FOUND', 404);
       }
     }

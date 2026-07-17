@@ -217,6 +217,26 @@ const assignUser = async (userId, branchId, adminId) => {
   if (!branch) throw new AppError('Branch not found', 404, 'BRANCH_NOT_FOUND');
   if (user.role === 'superadmin') throw new AppError('Superadmin cannot be assigned to a branch', 400, 'INVALID_OPERATION');
 
+  // Per-branch staff cap (Settings.maxStaffPerBranch, 0 = unlimited) — counts
+  // staff-tier accounts already homed on the target branch. Skipped when the
+  // user is only being re-confirmed onto the branch they already belong to.
+  const STAFF_ROLES = ['staff', 'supervisor', 'admin'];
+  const alreadyOnBranch = user.branchId && user.branchId.toString() === branchId.toString();
+  if (STAFF_ROLES.includes(user.role) && !alreadyOnBranch) {
+    const settings = await settingsService.getSettings(branchId);
+    const max = Number(settings.maxStaffPerBranch) || 0;
+    if (max > 0) {
+      const staffCount = await User.countDocuments({ branchId, role: { $in: STAFF_ROLES } });
+      if (staffCount >= max) {
+        throw new AppError(
+          `This branch has reached its staff limit (${max}). Raise the limit in Settings or unassign someone first.`,
+          409,
+          'STAFF_LIMIT_REACHED'
+        );
+      }
+    }
+  }
+
   user.branchId = branchId;
   // Any already-issued token still embeds the OLD branchId — without bumping
   // this, refreshToken() would keep reissuing access tokens scoped to the

@@ -28,8 +28,10 @@ const settingsSchema = new mongoose.Schema({
   allowMpesa:           { type: Boolean, default: true },
 
   // ── ORDER WORKFLOW ────────────────────────────────────────────────────────
-  requireOrderApproval:     { type: Boolean, default: false }, // manual approval before confirmed
-  enableOrderHours:         { type: Boolean, default: false }, // restrict when orders can be placed
+  // (requireOrderApproval was removed 2026-07-17 — every order already requires
+  // manual approval by design; the toggle implied an auto-approve mode that
+  // never existed.)
+  enableOrderHours:         { type: Boolean, default: false }, // restrict when orders can be placed (enforced in order.service.js#assertShopCanAcceptOrders, EAT clock)
   orderAcceptanceStart:     { type: String,  default: '07:00' }, // HH:MM
   orderAcceptanceEnd:       { type: String,  default: '20:00' }, // HH:MM
 
@@ -61,13 +63,14 @@ const settingsSchema = new mongoose.Schema({
   },
 
   // ── CATALOG SETTINGS ──────────────────────────────────────────────────────
-  autoHideOutOfStock:  { type: Boolean, default: false },
-  allowProductReviews: { type: Boolean, default: false },
+  // (allowProductReviews was removed 2026-07-17 — no reviews system exists;
+  // re-add together with the feature.)
+  autoHideOutOfStock:  { type: Boolean, default: false }, // enforced in product.service.js#getAll (catalog browsing only)
 
   // ── CUSTOMER ACCOUNT SETTINGS ─────────────────────────────────────────────
-  blockNewRegistrations:    { type: Boolean, default: false },
-  requirePhoneVerification: { type: Boolean, default: false },
-  requireEmailVerification: { type: Boolean, default: false },
+  // (requirePhone/EmailVerification were removed 2026-07-17 — no verification
+  // flow exists; re-add together with the feature.)
+  blockNewRegistrations:    { type: Boolean, default: false }, // enforced in auth.service.js#register (reads the DEFAULT branch's settings)
 
   // ── TAX & COMPLIANCE ──────────────────────────────────────────────────────
   kraPin:     { type: String, default: '', trim: true },  // KRA PIN — printed on every receipt

@@ -6,12 +6,13 @@ const { requireRole, requireMinRole, requireBusinessRole } = require('../../midd
 const { validate } = require('../../middleware/validate.middleware');
 const { body, param } = require('express-validator');
 const { adminLimiter } = require('../../middleware/rateLimit.middleware');
+const { checkPlatformLock } = require('../../middleware/platformLock.middleware');
 
 const customerIdParamValidator = [
   param('id').isMongoId().withMessage('Invalid customer ID')
 ];
 
-router.use(verifyToken, adminLimiter);
+router.use(verifyToken, adminLimiter, checkPlatformLock);
 
 // ── READ (superadmin CAN view — oversight) ────────────────────────────────────
 

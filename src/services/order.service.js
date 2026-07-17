@@ -195,6 +195,15 @@ const markOrderReservationConsumed = (order) => {
   order.stockConsumedAt = new Date();
 };
 
+// Current wall-clock time in Nairobi as a zero-padded "HH:MM" string —
+// lexicographic comparison against the stored orderAcceptanceStart/End
+// (same format) is then a correct time comparison.
+const currentTimeEAT = () => {
+  const shifted = new Date(Date.now() + 3 * 60 * 60 * 1000);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${pad(shifted.getUTCHours())}:${pad(shifted.getUTCMinutes())}`;
+};
+
 const assertShopCanAcceptOrders = (settings) => {
   if (settings.maintenanceMode) {
     throw new AppError(
@@ -202,6 +211,38 @@ const assertShopCanAcceptOrders = (settings) => {
       503,
       'MAINTENANCE_MODE'
     );
+  }
+
+  // Platform lock is the superadmin "stop everything" switch — no new orders
+  // while it's on (admin-side writes are blocked by platformLock.middleware.js).
+  if (settings.platformLocked) {
+    throw new AppError(
+      'Ordering is temporarily paused. Please check back soon.',
+      503,
+      'PLATFORM_LOCKED'
+    );
+  }
+
+  // Order acceptance hours (Nairobi clock). Window is inclusive on both ends;
+  // start > end means an overnight window (e.g. 20:00–06:00). start === end is
+  // treated as "no restriction" rather than a one-minute window — a misclick
+  // must not silently close the shop 24/7.
+  if (settings.enableOrderHours && settings.orderAcceptanceStart && settings.orderAcceptanceEnd) {
+    const start = settings.orderAcceptanceStart;
+    const end = settings.orderAcceptanceEnd;
+    if (start !== end) {
+      const now = currentTimeEAT();
+      const withinWindow = start < end
+        ? (now >= start && now <= end)
+        : (now >= start || now <= end); // overnight window
+      if (!withinWindow) {
+        throw new AppError(
+          `We accept orders between ${start} and ${end}. Please come back then — your cart will be waiting.`,
+          400,
+          'OUTSIDE_ORDER_HOURS'
+        );
+      }
+    }
   }
 };
 
@@ -481,11 +522,20 @@ const createGuestOrder = async (orderData, branchId) => {
       guest = await Guest.create({
         name: orderData.name,
         phone: formatPhone(orderData.phone),
+        email: orderData.email?.trim().toLowerCase() || null,
         location: orderData.deliveryAddress || ''
       });
     } catch (err) {
       if (err.code !== 11000) throw err;
       guest = await Guest.findOne(phoneMatch);
+    }
+  } else if (orderData.email?.trim()) {
+    // Repeat guest supplying an email (new or updated) — keep the record
+    // current so order-status emails reach where they asked, this order included.
+    const email = orderData.email.trim().toLowerCase();
+    if (guest.email !== email) {
+      guest.email = email;
+      await guest.save();
     }
   }
   await assertNoDuplicateOrder({
@@ -1272,7 +1322,12 @@ const assignDriver = async (orderId, driverId, adminId, branchId, actorRole = 'a
   const session = await mongoose.startSession();
   session.startTransaction();
 
+  // Declared out here (not inside the try) because it's read after the
+  // try/catch/finally — a const inside the try block is invisible at the
+  // emit site below and threw a ReferenceError AFTER the transaction had
+  // already committed, failing every assignment response.
   let order, driver;
+  let dispatchedNow = false;
   try {
     order = await Order.findOne({ _id: orderId, branchId }).session(session);
     if (!order) throw new AppError('Order not found', 404, 'ORDER_NOT_FOUND');
@@ -1298,7 +1353,7 @@ const assignDriver = async (orderId, driverId, adminId, branchId, actorRole = 'a
     order.driverId = driverId;
 
     // Auto-advance: preparing → out_for_delivery when driver is first assigned
-    const dispatchedNow = order.status === ORDER_STATUSES.PREPARING;
+    dispatchedNow = order.status === ORDER_STATUSES.PREPARING;
     if (order.status === ORDER_STATUSES.PREPARING) {
       validateTransition(order.status, ORDER_STATUSES.OUT_FOR_DELIVERY);
       order.status = ORDER_STATUSES.OUT_FOR_DELIVERY;
@@ -1352,8 +1407,13 @@ const getMyStats = async (userId) => {
 
   const COUNTED_STATUSES = ['pending', 'approved', 'preparing', 'out_for_delivery', 'completed'];
 
+  // Aggregation pipelines are NOT cast by Mongoose — userId arrives as the JWT's
+  // string id, and matching a string against the ObjectId-typed field silently
+  // returns nothing (every customer's dashboard stats read as zero).
+  const userObjectId = new mongoose.Types.ObjectId(String(userId));
+
   const [result] = await Order.aggregate([
-    { $match: { userId, status: { $in: COUNTED_STATUSES } } },
+    { $match: { userId: userObjectId, status: { $in: COUNTED_STATUSES } } },
     { $facet: {
       thisMonth: [
         { $match: { createdAt: { $gte: thisMonthStart } } },

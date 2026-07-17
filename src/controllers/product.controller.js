@@ -24,8 +24,13 @@ const getAll = async (req, res, next) => {
 const getById = async (req, res, next) => {
   try {
     const branch = req.branchId ? { _id: req.branchId } : await resolvePublicBranch(req.query.branchId);
-    // req.user is only set when an auth middleware (verifyToken/requireMinRole) ran before this
-    const product = await productService.getById(req.params.id, branch?._id, false, !!req.user);
+    // req.user is only set when this runs behind the admin router's verifyToken
+    // (the public route mounts no auth middleware at all) — so it doubles as the
+    // "admin view" switch: admins see inactive products (the edit page must load
+    // drafts/deactivated items) and unstripped fields (costPriceKES); the public
+    // storefront gets active products with sensitive fields removed.
+    const isAdminView = !!req.user;
+    const product = await productService.getById(req.params.id, branch?._id, isAdminView, isAdminView);
     return success(res, product);
   } catch (err) { next(err); }
 };

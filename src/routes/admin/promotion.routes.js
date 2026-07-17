@@ -6,12 +6,13 @@ const promoController = require('../../controllers/admin/promotion.controller');
 const { verifyToken } = require('../../middleware/auth.middleware');
 const { requireMinRole, requireBusinessRole } = require('../../middleware/role.middleware');
 const { adminLimiter } = require('../../middleware/rateLimit.middleware');
+const { checkPlatformLock } = require('../../middleware/platformLock.middleware');
 const { validate } = require('../../middleware/validate.middleware');
 const { createPromotionValidator, updatePromotionValidator } = require('../../validators/promotion.validator');
 const { isValidImageBuffer } = require('../../utils/validateImageBuffer');
 const { isValidVideoBuffer } = require('../../utils/validateVideoBuffer');
 
-router.use(verifyToken, adminLimiter);
+router.use(verifyToken, adminLimiter, checkPlatformLock);
 
 // In-memory multer (no disk write — stream straight to Cloudinary)
 const upload = multer({

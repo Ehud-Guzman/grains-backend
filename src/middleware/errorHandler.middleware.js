@@ -10,12 +10,35 @@ const errorHandler = (err, req, res, next) => {
   // Always log full stack server-side — never exposed to client
   logger.error(err.message, { requestId, branchId, userId, err });
 
+  // Expected client-side failures (bad input, auth misses, app-level 4xx) are
+  // not bugs — only genuine server faults go to Sentry, mirroring the
+  // frontend's 5xx-only capture policy.
+  const isClientError =
+    err.name === 'CastError' ||
+    err.name === 'ValidationError' ||
+    err.name === 'JsonWebTokenError' ||
+    err.name === 'TokenExpiredError' ||
+    err.code === 11000 ||
+    (err.statusCode && err.statusCode < 500);
+
   // Also send to Sentry in production
-  if (process.env.NODE_ENV === 'production' && process.env.SENTRY_DSN) {
+  if (process.env.NODE_ENV === 'production' && process.env.SENTRY_DSN && !isClientError) {
     Sentry.withScope(scope => {
       scope.setTag('requestId', requestId);
       scope.setTag('branchId', branchId);
       Sentry.captureException(err);
+    });
+  }
+
+  // Mongoose cast error (malformed ObjectId in a URL param or query) — this is
+  // bad client input, not a server fault. Without this mapping every probe like
+  // GET /api/products/foo returned a 500, polluting Sentry and firing the
+  // SERVER_ERROR admin alert.
+  if (err.name === 'CastError') {
+    return res.status(400).json({
+      success: false,
+      error: 'INVALID_ID',
+      message: 'Invalid identifier format'
     });
   }
 

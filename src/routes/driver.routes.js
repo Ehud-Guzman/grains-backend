@@ -4,6 +4,7 @@ const driverController = require('../controllers/driver.controller');
 const { verifyToken } = require('../middleware/auth.middleware');
 const { requireRole } = require('../middleware/role.middleware');
 const { adminLimiter } = require('../middleware/rateLimit.middleware');
+const { checkPlatformLock } = require('../middleware/platformLock.middleware');
 const multer = require('multer');
 const { UPLOAD_LIMITS } = require('../utils/constants');
 
@@ -20,7 +21,7 @@ const proofUpload = multer({
 });
 
 // All routes: must be authenticated as a driver
-router.use(verifyToken, requireRole('driver'), adminLimiter);
+router.use(verifyToken, requireRole('driver'), adminLimiter, checkPlatformLock);
 
 // GET  /api/driver/me
 router.get('/me', driverController.getMe);

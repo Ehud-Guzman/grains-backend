@@ -4,7 +4,7 @@ const Branch = require('../models/Branch');
 const activityLogService = require('./activityLog.service');
 const { LOG_ACTIONS } = require('../utils/constants');
 const { AppError } = require('../middleware/errorHandler.middleware');
-const { invalidateCache } = require('./product.service');
+const { invalidateCache, assertProductCapNotReached } = require('./product.service');
 const { normalizeImageUrls } = require('../utils/imageUrl');
 const priceLogService = require('./priceLog.service');
 const { appEvents, PRICE_EVENTS } = require('../events/appEvents');
@@ -547,6 +547,10 @@ const importProducts = async (fileBuffer, adminId, options = {}) => {
             });
           }
         } else {
+          // Same per-branch cap as the single-product create path — checked
+          // before counting the row as created, so a row over the limit becomes
+          // an error row (via the surrounding catch) instead of double-counting.
+          if (!dryRun) await assertProductCapNotReached(branch._id);
           results.created++;
           if (!dryRun) {
             const newProduct = await Product.create({ ...payload, createdBy: adminId });

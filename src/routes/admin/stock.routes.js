@@ -5,9 +5,10 @@ const { verifyToken } = require('../../middleware/auth.middleware');
 const { requireMinRole, requireBusinessRole } = require('../../middleware/role.middleware');
 const { validate } = require('../../middleware/validate.middleware');
 const { adminLimiter } = require('../../middleware/rateLimit.middleware');
+const { checkPlatformLock } = require('../../middleware/platformLock.middleware');
 const { deliveryValidator, adjustmentValidator, batchUpdateValidator } = require('../../validators/stock.validator');
 
-router.use(verifyToken, adminLimiter);
+router.use(verifyToken, adminLimiter, checkPlatformLock);
 
 // ── READ (superadmin CAN view — oversight) ────────────────────────────────────
 

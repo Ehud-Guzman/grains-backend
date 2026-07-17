@@ -22,7 +22,13 @@ router.post(
     body('phone')
       .trim()
       .notEmpty().withMessage('Phone number is required')
-      .matches(/^(\+254|0)[17]\d{8}$/).withMessage('Enter a valid Kenyan phone number')
+      .matches(/^(\+254|0)[17]\d{8}$/).withMessage('Enter a valid Kenyan phone number'),
+    // Guest ownership proof when the STK target differs from the order's
+    // contact number — see payment.controller.js#initiate
+    body('contactPhone')
+      .optional({ nullable: true, checkFalsy: true })
+      .trim()
+      .matches(/^(\+254|0)[17]\d{8}$/).withMessage('Enter a valid Kenyan contact phone number')
   ],
   validate,
   paymentController.initiate

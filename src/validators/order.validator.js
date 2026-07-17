@@ -65,6 +65,12 @@ const guestOrderValidator = [
     .notEmpty().withMessage('Phone number is required')
     .matches(/^(\+254|0)[17]\d{8}$/).withMessage('Enter a valid Kenyan phone number'),
 
+  // Optional — stored on the Guest record so order-status emails work for guests
+  body('email')
+    .optional({ nullable: true, checkFalsy: true })
+    .trim()
+    .isEmail().withMessage('Enter a valid email address'),
+
   body('deliveryMethod')
     .isIn(['pickup', 'delivery']).withMessage('Delivery method must be pickup or delivery'),
 
@@ -121,12 +127,23 @@ const updateStatusValidator = [
   body('status')
     .trim()
     .notEmpty().withMessage('Status is required')
-    .isIn(['preparing', 'out_for_delivery', 'completed']).withMessage('Invalid status'),
+    // 'cancelled' is a legal admin transition from any non-terminal stage —
+    // order.service.js#updateStatus handles the stock release, coupon release,
+    // and refund flagging; ORDER_STATUS_TRANSITIONS still rejects invalid moves.
+    .isIn(['preparing', 'out_for_delivery', 'completed', 'cancelled']).withMessage('Invalid status'),
 
   body('note')
     .optional()
     .trim()
-    .isLength({ max: 500 }).withMessage('Note cannot exceed 500 characters')
+    .isLength({ max: 500 }).withMessage('Note cannot exceed 500 characters'),
+
+  // A cancellation with no stated reason is an audit-trail hole — the customer
+  // notification, refund queue, and activity log all lean on the note.
+  body('note')
+    .if(body('status').equals('cancelled'))
+    .trim()
+    .notEmpty().withMessage('A reason is required when cancelling an order')
+    .isLength({ min: 3, max: 500 }).withMessage('Reason must be between 3 and 500 characters')
 ];
 
 const bulkActionValidator = [

@@ -8,6 +8,7 @@ const { paginate, buildPaginationMeta } = require('../utils/paginate');
 const { startOfDayEAT } = require('../utils/businessTime');
 const { withGuestFallbackList } = require('../utils/orderGuestFallback');
 const { escapeRegex } = require('../utils/escapeRegex');
+const { bumpTokenValidAfter } = require('../utils/tokenValidAfter');
 
 const BCRYPT_WORK_FACTOR = AUTH_LIMITS.BCRYPT_WORK_FACTOR;
 
@@ -189,14 +190,17 @@ const unlockDriver = async (driverId, adminId, branchId, actorRole = ROLES.ADMIN
 
 // ── RESET PASSWORD ────────────────────────────────────────────────────────────
 const resetDriverPassword = async (driverId, newPassword, adminId, branchId, actorRole = ROLES.ADMIN) => {
-  if (!newPassword || newPassword.length < 8) {
-    throw new AppError('Password must be at least 8 characters', 400, 'INVALID_PASSWORD');
-  }
+  // Same strength policy as registration/self-service change.
+  const { validatePasswordStrength } = require('./auth.service');
+  if (!newPassword) throw new AppError('Password is required', 400, 'INVALID_PASSWORD');
+  validatePasswordStrength(newPassword);
 
   const passwordHash = await bcrypt.hash(newPassword, BCRYPT_WORK_FACTOR);
+  // Kill any session issued under the old password — a forced reset usually
+  // means a lost phone or offboarding (see auth.middleware tokenValidAfter check).
   const driver = await User.findOneAndUpdate(
     { _id: driverId, role: ROLES.DRIVER, branchId },
-    { passwordHash, failedLoginCount: 0, isLocked: false },
+    { passwordHash, failedLoginCount: 0, isLocked: false, tokenValidAfter: bumpTokenValidAfter() },
     { new: true }
   );
   if (!driver) throw new AppError('Driver not found', 404, 'DRIVER_NOT_FOUND');

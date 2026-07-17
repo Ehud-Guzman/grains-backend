@@ -5,6 +5,7 @@ const { verifyToken } = require('../../middleware/auth.middleware');
 const { requireMinRole, requireBusinessRole } = require('../../middleware/role.middleware');
 const { validate } = require('../../middleware/validate.middleware');
 const { adminLimiter } = require('../../middleware/rateLimit.middleware');
+const { checkPlatformLock } = require('../../middleware/platformLock.middleware');
 const {
   rejectOrderValidator,
   updateStatusValidator,
@@ -17,7 +18,7 @@ const { success }           = require('../../utils/apiResponse');
 const { AppError }          = require('../../middleware/errorHandler.middleware');
 
 // All admin order routes require auth + staff minimum
-router.use(verifyToken, adminLimiter);
+router.use(verifyToken, adminLimiter, checkPlatformLock);
 
 // ── STAFF+ (read-only — superadmin CAN view) ──────────────────────────────────
 

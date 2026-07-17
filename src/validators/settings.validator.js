@@ -28,8 +28,7 @@ const updateSettingsValidator = [
   body('allowPayOnPickup').optional().isBoolean().withMessage('allowPayOnPickup must be a boolean'),
   body('allowMpesa').optional().isBoolean().withMessage('allowMpesa must be a boolean'),
 
-  // Order workflow
-  body('requireOrderApproval').optional().isBoolean().withMessage('requireOrderApproval must be a boolean'),
+  // Order workflow (requireOrderApproval removed 2026-07-17 — dead toggle, see Settings.js)
   body('enableOrderHours').optional().isBoolean().withMessage('enableOrderHours must be a boolean'),
   body('orderAcceptanceStart')
     .optional()
@@ -44,14 +43,11 @@ const updateSettingsValidator = [
   body('deliveryZones.*.name').optional().trim().notEmpty().withMessage('Zone name is required'),
   body('deliveryZones.*.fee').optional().isFloat({ min: 0 }).withMessage('Zone fee must be 0 or greater'),
 
-  // Catalog
+  // Catalog (allowProductReviews removed 2026-07-17 — dead toggle, see Settings.js)
   body('autoHideOutOfStock').optional().isBoolean().withMessage('autoHideOutOfStock must be a boolean'),
-  body('allowProductReviews').optional().isBoolean().withMessage('allowProductReviews must be a boolean'),
 
-  // Customer accounts
+  // Customer accounts (requirePhone/EmailVerification removed 2026-07-17 — dead toggles, see Settings.js)
   body('blockNewRegistrations').optional().isBoolean().withMessage('blockNewRegistrations must be a boolean'),
-  body('requirePhoneVerification').optional().isBoolean().withMessage('requirePhoneVerification must be a boolean'),
-  body('requireEmailVerification').optional().isBoolean().withMessage('requireEmailVerification must be a boolean'),
 
   // Tax & compliance
   body('kraPin').optional().trim().isLength({ max: 20 }).withMessage('KRA PIN cannot exceed 20 characters'),

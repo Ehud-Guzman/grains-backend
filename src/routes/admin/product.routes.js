@@ -7,6 +7,7 @@ const { requireMinRole, requireBusinessRole } = require('../../middleware/role.m
 const { validate } = require('../../middleware/validate.middleware');
 const { createProductValidator, updateProductValidator } = require('../../validators/product.validator');
 const { adminLimiter } = require('../../middleware/rateLimit.middleware');
+const { checkPlatformLock } = require('../../middleware/platformLock.middleware');
 const multer = require('multer');
 const cloudinary = require('cloudinary').v2;
 const { isValidImageBuffer } = require('../../utils/validateImageBuffer');
@@ -41,7 +42,7 @@ const uploadImages = multer({
   }
 });
 
-router.use(verifyToken, adminLimiter);
+router.use(verifyToken, adminLimiter, checkPlatformLock);
 
 // ── STATIC ROUTES (must be defined before /:id to avoid conflicts) ────────────
 
