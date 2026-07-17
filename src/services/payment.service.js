@@ -335,6 +335,10 @@ const handleCallback = async (callbackData) => {
         logger.info('[M-PESA] Duplicate callback ignored (order-terminal path)', { CheckoutRequestID });
         return { success: true, message: 'Already processed' };
       }
+      // Surface the refund-owed state on the order too — otherwise the admin
+      // list shows the cancelled order's old paymentStatus with no hint that
+      // money arrived and must be returned.
+      await Order.findByIdAndUpdate(payment.orderId, { paymentStatus: PAYMENT_STATUSES.REFUNDED });
       logger.warn('[M-PESA] Payment received for terminal order — marking refunded', {
         orderId: payment.orderId,
         orderStatus: relatedOrder.status,

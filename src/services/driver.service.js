@@ -144,14 +144,29 @@ const lockDriver = async (driverId, adminId, branchId, actorRole = ROLES.ADMIN) 
   driver.isLocked = true;
   await driver.save();
 
+  // A locked driver can't log in to complete their assigned deliveries — those
+  // orders strand until reassigned. Locking still proceeds (it's often urgent:
+  // lost phone, dismissal), but return the affected orders so the admin UI can
+  // tell the admin to reassign them.
+  const activeDeliveries = await Order.find({
+    driverId,
+    status: ORDER_STATUSES.OUT_FOR_DELIVERY
+  }).select('orderRef').lean();
+
   await activityLogService.log({
     actorId: adminId, actorRole,
     action: LOG_ACTIONS.DRIVER_ACCOUNT_LOCKED,
     branchId, targetId: driverId, targetType: 'User',
-    detail: { name: driver.name }
+    detail: {
+      name: driver.name,
+      ...(activeDeliveries.length && { strandedDeliveries: activeDeliveries.map(o => o.orderRef) })
+    }
   });
 
-  return { id: driver._id, name: driver.name, isLocked: true };
+  return {
+    id: driver._id, name: driver.name, isLocked: true,
+    ...(activeDeliveries.length && { activeDeliveries: activeDeliveries.map(o => o.orderRef) })
+  };
 };
 
 const unlockDriver = async (driverId, adminId, branchId, actorRole = ROLES.ADMIN) => {

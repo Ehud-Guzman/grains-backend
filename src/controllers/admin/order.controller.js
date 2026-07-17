@@ -3,9 +3,9 @@ const { success, paginated } = require('../../utils/apiResponse');
 
 const getAll = async (req, res, next) => {
   try {
-    const { page, limit, status, paymentMethod, deliveryMethod, from, to, search } = req.query;
+    const { page, limit, status, paymentMethod, paymentStatus, deliveryMethod, from, to, search } = req.query;
     const result = await orderService.getAll(
-      { status, paymentMethod, deliveryMethod, from, to, search },
+      { status, paymentMethod, paymentStatus, deliveryMethod, from, to, search },
       { page, limit },
       req.branchId
     );

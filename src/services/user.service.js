@@ -139,16 +139,35 @@ const lockAdminAccount = async (userId, superAdminId) => {
   user.isLocked = true;
   await user.save();
 
+  // Locking a driver mid-route doesn't cancel their assigned deliveries — those
+  // orders would silently strand (the driver can no longer log in to complete
+  // them). Locking still proceeds (it's often urgent — lost phone, dismissal),
+  // but the caller gets the affected orders so the admin is told to reassign.
+  let activeDeliveries = [];
+  if (user.role === ROLES.DRIVER) {
+    const Order = require('../models/Order');
+    activeDeliveries = await Order.find({
+      driverId: userId,
+      status: 'out_for_delivery'
+    }).select('orderRef').lean();
+  }
+
   await activityLogService.log({
     actorId: superAdminId,
     actorRole: ROLES.SUPERADMIN,
     action: LOG_ACTIONS.CUSTOMER_ACCOUNT_LOCKED,
     targetId: userId,
     targetType: 'User',
-    detail: { name: user.name, role: user.role }
+    detail: {
+      name: user.name, role: user.role,
+      ...(activeDeliveries.length && { strandedDeliveries: activeDeliveries.map(o => o.orderRef) })
+    }
   });
 
-  return { id: user._id, name: user.name, isLocked: true };
+  return {
+    id: user._id, name: user.name, isLocked: true,
+    ...(activeDeliveries.length && { activeDeliveries: activeDeliveries.map(o => o.orderRef) })
+  };
 };
 
 const unlockAdminAccount = async (userId, adminId, actorRole = ROLES.SUPERADMIN) => {

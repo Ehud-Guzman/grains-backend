@@ -112,8 +112,10 @@ describe('payment.service — handleCallback (success)', () => {
     const refreshedPayment = await Payment.findOne({ checkoutRequestId }).lean();
     assert.equal(refreshedPayment.status, 'refunded');
 
+    // The order mirrors the refund-owed state (never 'paid') so the admin list
+    // shows money must be returned — see handleCallback's order-terminal path.
     const refreshedOrder = await Order.findById(order._id).lean();
-    assert.equal(refreshedOrder.paymentStatus, 'pending', 'order paymentStatus must not be flipped to paid once terminal');
+    assert.equal(refreshedOrder.paymentStatus, 'refunded', 'order paymentStatus must mirror the refund, never flip to paid');
   });
 
   test('unknown CheckoutRequestID is ignored safely', async () => {

@@ -9,7 +9,7 @@ const { AppError } = require('../middleware/errorHandler.middleware');
 const activityLogService = require('./activityLog.service');
 const stockService       = require('./stock.service');
 const etimsService       = require('./etims.service');
-const { appEvents, ORDER_EVENTS } = require('../events/appEvents');
+const { appEvents, ORDER_EVENTS, STOCK_EVENTS } = require('../events/appEvents');
 const settingsService = require('./settings.service');
 const logger = require('../utils/logger');
 const generateOrderRef = require('../utils/generateOrderRef');
@@ -142,11 +142,15 @@ const reserveOrderStock = async (order, actorId, actorRole, session) => {
   await order.save({ session });
 };
 
+// Returns the released items whose stock went 0 → positive, so the caller can
+// emit back-in-stock events AFTER the transaction commits (emitting in here
+// would fire customer alerts for a release the transaction may still abort).
 const releaseOrderStock = async (order, actorId, session, note) => {
-  if (!orderHasHeldStock(order)) return false;
+  if (!orderHasHeldStock(order)) return [];
 
+  const restocked = [];
   for (const item of order.orderItems) {
-    await stockService.releaseStock(
+    const { balanceAfter } = await stockService.releaseStock(
       item.productId,
       item.variety,
       item.packaging,
@@ -156,6 +160,15 @@ const releaseOrderStock = async (order, actorId, session, note) => {
       session,
       order.branchId
     );
+    if (balanceAfter === item.quantity) {
+      restocked.push({
+        productId: item.productId,
+        branchId: order.branchId,
+        varietyName: item.variety,
+        packaging: item.packaging,
+        newStock: balanceAfter
+      });
+    }
   }
 
   order.stockReservationStatus = STOCK_RESERVATION_STATUSES.RELEASED;
@@ -165,7 +178,15 @@ const releaseOrderStock = async (order, actorId, session, note) => {
     if (historyEntry) historyEntry.note = note;
   }
 
-  return true;
+  return restocked;
+};
+
+// Fire back-in-stock events for items a release returned from 0 to available —
+// call only after the surrounding transaction has committed.
+const emitRestockEvents = (restocked = []) => {
+  for (const payload of restocked) {
+    appEvents.emit(STOCK_EVENTS.UPDATED, payload);
+  }
 };
 
 const markOrderReservationConsumed = (order) => {
@@ -324,10 +345,11 @@ const autoCancelExpiredPendingOrders = async (branchId) => {
         note
       });
 
-      await releaseOrderStock(order, actorId, session, note);
+      const restocked = await releaseOrderStock(order, actorId, session, note);
       if (order.couponCode) await couponService.releaseUsage(order.couponCode, order.branchId, session);
       await order.save({ session });
       await session.commitTransaction();
+      emitRestockEvents(restocked);
 
       // A PENDING order can already be PAID — order.status only advances to
       // APPROVED on admin action, but an M-Pesa STK payment can succeed while
@@ -704,6 +726,10 @@ const getAll = async (filters = {}, query = {}, branchId) => {
   }
 
   if (filters.paymentMethod) matchStage.paymentMethod = filters.paymentMethod;
+  // The reconciliation queues: paymentStatus=refunded → money owed back to
+  // customers; paymentStatus=unpaid + status=completed → COD cash not yet
+  // remitted by the driver.
+  if (filters.paymentStatus) matchStage.paymentStatus = filters.paymentStatus;
   if (filters.deliveryMethod) matchStage.deliveryMethod = filters.deliveryMethod;
 
   if (filters.from || filters.to) {
@@ -935,10 +961,11 @@ const reject = async (orderId, adminId, reason, branchId, actorRole = 'superviso
       note: reason
     });
 
-    await releaseOrderStock(order, adminId, session, reason);
+    const restocked = await releaseOrderStock(order, adminId, session, reason);
     if (order.couponCode) await couponService.releaseUsage(order.couponCode, order.branchId, session);
     await order.save({ session });
     await session.commitTransaction();
+    emitRestockEvents(restocked);
 
     await refundPaymentIfPaid(order, adminId, actorRole, reason);
 
@@ -977,6 +1004,12 @@ const refundPaymentIfPaid = async (order, actorId, actorRole, reason) => {
       refundedAt:   new Date(),
       refundReason: reason
     });
+    // Mirror onto the order — leaving it 'paid' shows a green Paid badge on a
+    // cancelled order and hides that money is owed back. 'refunded' here means
+    // "refund recorded/owed"; the actual M-Pesa reversal is a manual step the
+    // admin does off-system, tracked via the Payment record + activity log.
+    await Order.findByIdAndUpdate(order._id, { paymentStatus: PAYMENT_STATUSES.REFUNDED });
+    order.paymentStatus = PAYMENT_STATUSES.REFUNDED;
     await activityLogService.log({
       actorId,
       actorRole,
@@ -1032,8 +1065,9 @@ const updateStatus = async (orderId, newStatus, adminId, note = null, branchId, 
       note
     });
 
+    let restocked = [];
     if (newStatus === ORDER_STATUSES.CANCELLED) {
-      await releaseOrderStock(order, adminId, session, note || 'Cancelled by staff');
+      restocked = await releaseOrderStock(order, adminId, session, note || 'Cancelled by staff');
       if (order.couponCode) await couponService.releaseUsage(order.couponCode, order.branchId, session);
     }
 
@@ -1043,6 +1077,7 @@ const updateStatus = async (orderId, newStatus, adminId, note = null, branchId, 
 
     await order.save({ session });
     await session.commitTransaction();
+    emitRestockEvents(restocked);
 
     if (newStatus === ORDER_STATUSES.CANCELLED) {
       await refundPaymentIfPaid(order, adminId, actorRole, note || 'Cancelled by staff');
@@ -1128,10 +1163,11 @@ const cancel = async (orderId, userId) => {
       note: 'Cancelled by customer'
     });
 
-    await releaseOrderStock(order, userId, session, 'Cancelled by customer');
+    const restocked = await releaseOrderStock(order, userId, session, 'Cancelled by customer');
     if (order.couponCode) await couponService.releaseUsage(order.couponCode, order.branchId, session);
     await order.save({ session });
     await session.commitTransaction();
+    emitRestockEvents(restocked);
 
     await refundPaymentIfPaid(order, userId, 'customer', 'Cancelled by customer');
 
@@ -1252,6 +1288,12 @@ const assignDriver = async (orderId, driverId, adminId, branchId, actorRole = 'a
 
     driver = await User.findOne({ _id: driverId, role: ROLES.DRIVER, branchId }).session(session);
     if (!driver) throw new AppError('Driver not found in this branch', 404, 'DRIVER_NOT_FOUND');
+    // A locked driver can't log in to see or complete the delivery — assigning
+    // them strands the order. (isAvailableForDelivery stays a soft preference;
+    // the admin UI already filters on it but may deliberately override.)
+    if (driver.isLocked) {
+      throw new AppError('This driver\'s account is locked and cannot take deliveries', 400, 'DRIVER_LOCKED');
+    }
 
     order.driverId = driverId;
 
