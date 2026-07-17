@@ -59,7 +59,13 @@ const userSchema = new mongoose.Schema({
   isAvailableForDelivery: { type: Boolean, default: true },
   addresses: [addressSchema],
   notes: { type: String, default: null }, // internal admin notes
-  smsOptOut: { type: Boolean, default: false }, // customer opt-out of broadcast.service.js marketing SMS (transactional/order SMS are unaffected)
+  // Kenya DPA 2019 s.37 requires EXPRESS opt-in consent before using personal data
+  // for commercial messaging — default false means nobody receives marketing SMS
+  // (broadcast.service.js) until they actively consent. Transactional/order SMS in
+  // notification.service.js are unaffected. marketingConsentAt is the audit trail
+  // of when consent was given (null when consent is absent or withdrawn).
+  marketingConsent: { type: Boolean, default: false },
+  marketingConsentAt: { type: Date, default: null },
   isLocked: { type: Boolean, default: false },
   // Bumped whenever a role change must invalidate already-issued access tokens —
   // isLocked alone stops a locked account immediately, but a role DOWNGRADE

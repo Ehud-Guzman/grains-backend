@@ -86,7 +86,7 @@ const normalizeOnboarding = (onboarding = {}) => ({
 });
 
 // ── REGISTER ──────────────────────────────────────────────────────────────────
-const register = async ({ name, phone, email, password, ip = null }) => {
+const register = async ({ name, phone, email, password, marketingConsent = false, ip = null }) => {
   const existing = await User.findOne({ phone });
   if (existing) {
     throw new AppError('An account with this phone number already exists', 409, 'PHONE_TAKEN');
@@ -106,7 +106,9 @@ const register = async ({ name, phone, email, password, ip = null }) => {
     phone,
     email: email || null,
     passwordHash,
-    role: ROLES.CUSTOMER
+    role: ROLES.CUSTOMER,
+    marketingConsent: marketingConsent === true,
+    marketingConsentAt: marketingConsent === true ? new Date() : null
   });
 
   const { accessToken, refreshToken } = generateTokens(user);
@@ -797,7 +799,7 @@ const getProfile = async (userId) => {
 };
 
 // ── UPDATE PROFILE ────────────────────────────────────────────────────────────
-const updateProfile = async (userId, { name, email, addresses, kraPin, smsOptOut }, ip = null) => {
+const updateProfile = async (userId, { name, email, addresses, kraPin, marketingConsent }, ip = null) => {
   if (email) {
     const existing = await User.findOne({ email, _id: { $ne: userId } });
     if (existing) throw new AppError('Email already in use', 409, 'EMAIL_TAKEN');
@@ -810,7 +812,10 @@ const updateProfile = async (userId, { name, email, addresses, kraPin, smsOptOut
       ...(email !== undefined && { email: email || null }),
       ...(addresses  && { addresses }),
       ...(kraPin !== undefined && { kraPin: kraPin ? kraPin.trim().toUpperCase() : null }),
-      ...(typeof smsOptOut === 'boolean' && { smsOptOut }),
+      ...(typeof marketingConsent === 'boolean' && {
+        marketingConsent,
+        marketingConsentAt: marketingConsent ? new Date() : null
+      }),
     },
     { new: true, runValidators: true }
   ).select('-passwordHash -failedLoginCount');

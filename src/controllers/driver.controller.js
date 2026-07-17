@@ -4,6 +4,7 @@ const { success, paginated } = require('../utils/apiResponse');
 const { AppError } = require('../middleware/errorHandler.middleware');
 const { ORDER_STATUSES } = require('../utils/constants');
 const { withGuestFallback } = require('../utils/orderGuestFallback');
+const { isValidImageBuffer } = require('../utils/validateImageBuffer');
 
 // GET /api/driver/me — profile + stats
 const getMe = async (req, res, next) => {
@@ -63,11 +64,41 @@ const completeDelivery = async (req, res, next) => {
       return next(new AppError('Only out-for-delivery orders can be completed', 400, 'INVALID_STATUS'));
     }
 
+    // Optional proof of delivery: photo and/or recipient name. Uploaded BEFORE
+    // the status change so a Cloudinary failure surfaces to the driver for a
+    // retry, instead of completing the order with the proof silently lost.
+    let photoURL = null;
+    if (req.file) {
+      if (!isValidImageBuffer(req.file.buffer)) {
+        return next(new AppError('File is not a valid JPEG, PNG, or WebP image', 400, 'INVALID_IMAGE'));
+      }
+      const cloudinary = require('cloudinary').v2;
+      photoURL = await new Promise((resolve, reject) => {
+        const stream = cloudinary.uploader.upload_stream(
+          {
+            folder: 'grains-shop/delivery-proof',
+            public_id: `order-${order._id}`,
+            overwrite: true,
+            transformation: [{ width: 1200, crop: 'limit', quality: 'auto', fetch_format: 'auto' }]
+          },
+          (err, result) => err ? reject(err) : resolve(result.secure_url)
+        );
+        stream.end(req.file.buffer);
+      });
+    }
+
+    const recipientName = (req.body.recipientName || '').trim().slice(0, 100) || null;
+    const note = (req.body.note || '').trim().slice(0, 300) || null;
+    if (photoURL || recipientName || note) {
+      order.deliveryProof = { photoURL, recipientName, note, capturedAt: new Date() };
+      await order.save();
+    }
+
     const updated = await orderService.updateStatus(
       req.params.id,
       ORDER_STATUSES.COMPLETED,
       req.user.id,
-      'Marked as delivered by driver',
+      recipientName ? `Delivered — received by ${recipientName}` : 'Marked as delivered by driver',
       order.branchId
     );
     return success(res, updated, 'Delivery completed');

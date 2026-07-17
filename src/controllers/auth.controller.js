@@ -30,9 +30,9 @@ const extractAccessToken = (req) => {
 
 const register = async (req, res, next) => {
   try {
-    const { name, phone, email, password } = req.body;
+    const { name, phone, email, password, marketingConsent } = req.body;
     const ip = req.ip;
-    const result = await authService.register({ name, phone, email, password, ip });
+    const result = await authService.register({ name, phone, email, password, marketingConsent, ip });
     setRefreshCookie(res, result.refreshToken);
     const { refreshToken: _rt, ...data } = result;
     return success(res, data, 'Account created successfully', 201);
@@ -218,8 +218,8 @@ const getProfile = async (req, res, next) => {
 
 const updateProfile = async (req, res, next) => {
   try {
-    const { name, email, addresses, kraPin, smsOptOut } = req.body;
-    const profile = await authService.updateProfile(req.user.id, { name, email, addresses, kraPin, smsOptOut }, req.ip);
+    const { name, email, addresses, kraPin, marketingConsent } = req.body;
+    const profile = await authService.updateProfile(req.user.id, { name, email, addresses, kraPin, marketingConsent }, req.ip);
     return success(res, profile, 'Profile updated');
   } catch (err) { next(err); }
 };

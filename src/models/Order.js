@@ -71,6 +71,15 @@ const orderSchema = new mongoose.Schema({
   buyerKraPin: { type: String, default: null },
   branchId: { type: mongoose.Schema.Types.ObjectId, ref: 'Branch', required: true },
   driverId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  // Proof of delivery captured by the driver when completing a delivery —
+  // optional (drivers may have no camera/data at handover), but once present
+  // it's the wholesale dispute trail: who received the goods and when.
+  deliveryProof: {
+    photoURL: { type: String, default: null },      // Cloudinary URL
+    recipientName: { type: String, default: null }, // who physically received the goods
+    note: { type: String, default: null },
+    capturedAt: { type: Date, default: null }
+  },
   preferredDriverId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null }, // customer's requested rider at checkout — admin still confirms actual assignment
   deliveryTrackingUrl: { type: String, default: null },
   // Customer's GPS coordinates at checkout — stored for driver reference & analytics

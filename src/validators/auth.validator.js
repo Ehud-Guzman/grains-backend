@@ -21,7 +21,12 @@ const registerValidator = [
     .notEmpty().withMessage('Password is required')
     .isLength({ min: 8 }).withMessage('Password must be at least 8 characters')
     .matches(/[A-Z]/).withMessage('Password must contain at least one uppercase letter')
-    .matches(/[0-9]/).withMessage('Password must contain at least one number')
+    .matches(/[0-9]/).withMessage('Password must contain at least one number'),
+
+  body('marketingConsent')
+    .optional()
+    .isBoolean().withMessage('marketingConsent must be true or false')
+    .toBoolean()
 ];
 
 const loginValidator = [
