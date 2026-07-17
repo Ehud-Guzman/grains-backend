@@ -1004,9 +1004,17 @@ const updateStatus = async (orderId, newStatus, adminId, note = null, branchId, 
 
     validateTransition(order.status, newStatus);
 
+    // Completion payment gates by method:
+    // - mpesa:    no gate here — payment was already required at approval.
+    // - pickup:   gated — the counter staff confirming the cash and completing
+    //             the order are the same person, so confirm-then-complete.
+    // - delivery: NOT gated — the driver at the door collects the cash but has
+    //             no permission to confirm payments (supervisor+ only), so COD
+    //             orders complete with paymentStatus still unpaid and the
+    //             supervisor confirms the cash when the driver remits it.
     if (
       newStatus === ORDER_STATUSES.COMPLETED &&
-      order.paymentMethod !== PAYMENT_METHODS.MPESA &&
+      order.paymentMethod === PAYMENT_METHODS.PICKUP &&
       order.paymentStatus !== PAYMENT_STATUSES.PAID
     ) {
       throw new AppError(
@@ -1062,9 +1070,16 @@ const updateStatus = async (orderId, newStatus, adminId, note = null, branchId, 
       appEvents.emit(ORDER_EVENTS.DISPATCHED, { order, branchId: order.branchId });
     }
 
-    // eTIMS: fiscalise COD and pickup orders at the moment of completion.
+    // eTIMS: fiscalise COD and pickup orders at the moment of completion — but
+    // only if the money has actually been confirmed. A COD order can now
+    // complete unpaid (see the gate above); those are fiscalised later by
+    // manualConfirmPayment when the supervisor confirms the cash.
     // M-Pesa orders are already fiscalised when the payment callback arrives.
-    if (newStatus === ORDER_STATUSES.COMPLETED && order.paymentMethod !== 'mpesa') {
+    if (
+      newStatus === ORDER_STATUSES.COMPLETED &&
+      order.paymentMethod !== 'mpesa' &&
+      order.paymentStatus === PAYMENT_STATUSES.PAID
+    ) {
       etimsService.submitInvoice(order._id).catch(err =>
         logger.error('[eTIMS] Invoice submission failed on order completion', { orderId: order._id, err: err.message })
       );
@@ -1241,6 +1256,7 @@ const assignDriver = async (orderId, driverId, adminId, branchId, actorRole = 'a
     order.driverId = driverId;
 
     // Auto-advance: preparing → out_for_delivery when driver is first assigned
+    const dispatchedNow = order.status === ORDER_STATUSES.PREPARING;
     if (order.status === ORDER_STATUSES.PREPARING) {
       validateTransition(order.status, ORDER_STATUSES.OUT_FOR_DELIVERY);
       order.status = ORDER_STATUSES.OUT_FOR_DELIVERY;
@@ -1271,8 +1287,10 @@ const assignDriver = async (orderId, driverId, adminId, branchId, actorRole = 'a
     detail: { orderRef: order.orderRef, driverId, driverName: driver.name }
   });
 
-  // Notify customer only when the order transitions to out_for_delivery
-  if (order.status === ORDER_STATUSES.OUT_FOR_DELIVERY) {
+  // Notify customer only when this call actually transitioned the order to
+  // out_for_delivery — reassigning a driver on an already-dispatched order
+  // must not re-send the "on the way" SMS/email.
+  if (dispatchedNow) {
     appEvents.emit(ORDER_EVENTS.DISPATCHED, { order, branchId });
   }
 

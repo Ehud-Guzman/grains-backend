@@ -295,17 +295,28 @@ const dispatchOrderDispatched = async (order, branchId) => {
     const loc  = settings.shopLocation || 'Kenya';
     const ref  = order.orderRef;
 
+    // Pickup orders pass through the same out_for_delivery status on their way
+    // to completed, but "out for delivery" is the wrong message for goods the
+    // customer must come and collect.
+    const isPickup = order.deliveryMethod === 'pickup';
+
     if (settings.smsEnabled && contact.phone) {
-      await sendSMS(contact.phone,
-        `Hi ${contact.name}, your order ${ref} is OUT FOR DELIVERY! Please be available to receive it. – ${shop}`
-      ).catch(err => logger.error('[notification] dispatchOrderDispatched SMS failed', { err: err.message }));
+      const smsText = isPickup
+        ? `Hi ${contact.name}, your order ${ref} is READY FOR PICKUP! Come collect it at ${loc}. – ${shop}`
+        : `Hi ${contact.name}, your order ${ref} is OUT FOR DELIVERY! Please be available to receive it. – ${shop}`;
+      await sendSMS(contact.phone, smsText)
+        .catch(err => logger.error('[notification] dispatchOrderDispatched SMS failed', { err: err.message }));
     }
 
     if (settings.emailEnabled && contact.email) {
       await sendEmail({
         to: contact.email,
-        subject: `Your Order is On Its Way – ${ref}`,
-        html: emailShell(shop, loc, `
+        subject: isPickup ? `Your Order is Ready for Pickup – ${ref}` : `Your Order is On Its Way – ${ref}`,
+        html: emailShell(shop, loc, isPickup ? `
+          <p>Hi <strong>${escapeHtml(contact.name)}</strong>,</p>
+          <p>Your order <span class="ref">${ref}</span> is now <span class="badge blue">Ready for Pickup</span>!</p>
+          <p>Come collect it at ${escapeHtml(loc)}. Thank you for choosing ${shop}!</p>
+        ` : `
           <p>Hi <strong>${escapeHtml(contact.name)}</strong>,</p>
           <p>Your order <span class="ref">${ref}</span> is now <span class="badge blue">Out for Delivery</span>!</p>
           <p>Please be available to receive your order. Thank you for choosing ${shop}!</p>
