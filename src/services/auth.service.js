@@ -228,8 +228,9 @@ const login = async ({ phone, password }, ip, userAgent = 'unknown') => {
   }
 
   // ── ADMIN / SUPERADMIN: 2FA required before branch selection (production only) ─
-  // In development, skip 2FA entirely to avoid needing Africa's Talking credentials
-  if (TWO_FACTOR_ROLES.includes(user.role) && process.env.NODE_ENV === 'production') {
+  // In development (NODE_ENV !== 'production') or when SKIP_2FA=true is set,
+  // skip 2FA entirely to avoid needing Africa's Talking credentials.
+  if (TWO_FACTOR_ROLES.includes(user.role) && process.env.NODE_ENV === 'production' && process.env.SKIP_2FA !== 'true') {
     // Per-account resend cooldown — without this, every successful password
     // check (up to authLimiter's 10/min) regenerates and re-sends a fresh OTP,
     // the same SMS/email-bombing gap forgotPassword's cooldown already closes
