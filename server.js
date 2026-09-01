@@ -72,6 +72,11 @@ if (process.env.NODE_ENV === 'production') {
     console.warn('[STARTUP WARNING] SENTRY_DSN is not set — unhandled errors in production will not be tracked.');
   }
 
+  // Log 2FA bypass status
+  if (process.env.SKIP_2FA === 'true') {
+    console.warn('[STARTUP WARNING] SKIP_2FA=true — 2FA verification will be SKIPPED for admin/superadmin users.');
+  }
+
   // Warn if backup storage is pointing at a relative or default path.
   // Render and most PaaS platforms use ephemeral disks — backups written there
   // are lost on every deploy/restart. Set BACKUP_STORAGE_DIR to a mounted
