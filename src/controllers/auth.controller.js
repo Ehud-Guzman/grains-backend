@@ -5,19 +5,20 @@ const { isValidImageBuffer } = require('../utils/validateImageBuffer');
 
 // Refresh token cookie options — HttpOnly prevents JS access (XSS mitigation).
 // SameSite=None + Secure for cross-origin prod; Lax for same-origin dev.
+// path: '/api' ensures the cookie is sent to ALL /api/* requests, not just /api/auth/*
 const refreshCookieOptions = () => ({
   httpOnly: true,
   secure:   process.env.NODE_ENV === 'production',
   sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
   maxAge:   AUTH_LIMITS.REFRESH_COOKIE_MAX_AGE_MS,
-  path:     '/api/auth',
+  path:     '/api',  // Changed from '/api/auth' to '/api' for broader coverage
 });
 
 const setRefreshCookie = (res, token) =>
   res.cookie('refreshToken', token, refreshCookieOptions());
 
 const clearRefreshCookie = (res) =>
-  res.clearCookie('refreshToken', { path: '/api/auth' });
+  res.clearCookie('refreshToken', { path: '/api' });
 
 // Read refresh token from cookie first, body as fallback (API clients / Postman)
 const extractRefreshToken = (req) =>
@@ -141,7 +142,12 @@ const isAllowedOrigin = (req) => {
 
 const refresh = async (req, res, next) => {
   try {
-    if (!isAllowedOrigin(req)) {
+    // In development or with SKIP_2FA=true, be lenient with CORS origin checks
+    // to simplify testing across different origins (Netlify/localhost).
+    // In production without SKIP_2FA, enforce strict origin validation.
+    const skipOriginCheck = process.env.NODE_ENV !== 'production' || process.env.SKIP_2FA === 'true';
+    
+    if (!skipOriginCheck && !isAllowedOrigin(req)) {
       return error(res, 'Request origin not allowed', 'CSRF_ORIGIN_MISMATCH', 403);
     }
     const refreshToken = extractRefreshToken(req);
