@@ -64,18 +64,45 @@ const requireMinRole = (minRole) => {
   };
 };
 
+// requireBusinessRole('supervisor') — a BUSINESS operator at or above minRole.
+//
+// Superadmin is explicitly excluded. It is a platform/oversight role, not a
+// trading one: the admin UI reflects that with a separate superadmin nav whose
+// business sections are labelled "Observe (View Only)", a ViewOnlyBanner that
+// tells the user they "cannot perform operations", and `viewOnly` flags that
+// hide every action button on orders, products, stock, intake, customers,
+// reports and alerts.
+//
+// This guard is what makes that boundary real rather than cosmetic. It
+// previously *admitted* superadmin whenever a branch was selected — and since
+// the login flow forces a superadmin to pick a branch before they get a token,
+// the carve-out always applied, so every business write below was reachable
+// with a superadmin token even though the UI hid the buttons. Route comments
+// across ~15 files read "business operations — superadmin CANNOT perform",
+// which is what this now actually enforces.
+//
+// Trade-off, accepted deliberately: an owner who is the only superadmin cannot
+// run day-to-day trading with that account and must create a branch staff or
+// admin account for it. That is the behaviour the UI already describes.
+//
+// Note the split of responsibility, so this does not read as an oversight:
+//   • business operations (orders, products, stock, intake, customers,
+//     coupons, promotions, broadcast, payment confirmation) → THIS guard
+//   • platform/system concerns (branches, users, logs, backups, eTIMS
+//     credentials, cross-branch settings) → requireRole('superadmin') or
+//     requireSuperadminOrPermission(...), which superadmin passes
 const requireBusinessRole = (minRole) => {
   return (req, res, next) => {
     if (!req.user) {
       return next(new AppError('Authentication required', 401, 'UNAUTHORIZED'));
     }
 
-    // Superadmin can do business ops only when they have selected a branch
     if (req.user.role === ROLES.SUPERADMIN) {
-      if (!req.branchId) {
-        return next(new AppError('Please select a branch to perform this action', 403, 'BRANCH_REQUIRED'));
-      }
-      return next(); // superadmin with branch context has full access
+      return next(new AppError(
+        'Superadmin is a view-only oversight role for business operations. Use a branch staff or admin account to perform them.',
+        403,
+        'SUPERADMIN_VIEW_ONLY'
+      ));
     }
 
     const userIndex = ROLE_HIERARCHY.indexOf(req.user.role);

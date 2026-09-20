@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const driverController = require('../../controllers/admin/driver.controller');
 const { verifyToken } = require('../../middleware/auth.middleware');
-const { requireBusinessRole } = require('../../middleware/role.middleware');
+const { requireMinRole, requireBusinessRole } = require('../../middleware/role.middleware');
 const { validate } = require('../../middleware/validate.middleware');
 const { body, param } = require('express-validator');
 const { adminLimiter } = require('../../middleware/rateLimit.middleware');
@@ -15,11 +15,14 @@ const driverIdParamValidator = [
 // All routes: authenticated + at least supervisor
 router.use(verifyToken, adminLimiter, checkPlatformLock);
 
-// ── READ (supervisor+) ────────────────────────────────────────────────────────
-router.get('/', requireBusinessRole('supervisor'), driverController.getAll);
-router.get('/:id', requireBusinessRole('supervisor'), driverController.getById);
-router.get('/:id/orders', requireBusinessRole('supervisor'), driverController.getOrders);
-router.get('/:id/stats', requireBusinessRole('supervisor'), driverController.getStats);
+// ── READ (supervisor+ — superadmin CAN view, for oversight) ───────────────────
+// These were requireBusinessRole, which was inconsistent with every other admin
+// router (reads use requireMinRole so superadmin keeps read-only oversight) and
+// only appeared to work because the old requireBusinessRole admitted superadmin.
+router.get('/', requireMinRole('supervisor'), driverController.getAll);
+router.get('/:id', requireMinRole('supervisor'), driverController.getById);
+router.get('/:id/orders', requireMinRole('supervisor'), driverController.getOrders);
+router.get('/:id/stats', requireMinRole('supervisor'), driverController.getStats);
 
 // ── WRITE (admin+) ────────────────────────────────────────────────────────────
 router.post('/',

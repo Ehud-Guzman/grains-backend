@@ -78,8 +78,11 @@ router.post('/upload-video', requireBusinessRole('admin'), uploadVideo.single('v
 
 router.get('/',     requireMinRole('supervisor'), promoController.getAll);
 router.get('/:id',  requireMinRole('supervisor'), promoController.getById);
-router.post('/',    requireMinRole('admin'),       createPromotionValidator, validate, promoController.create);
-router.put('/:id',  requireMinRole('admin'),       updatePromotionValidator, validate, promoController.update);
-router.delete('/:id', requireMinRole('admin'),     promoController.remove);
+// ── WRITE (business operations — superadmin CANNOT perform) ───────────────────
+// See coupon.routes.js — requireMinRole let superadmin through, and promotions
+// have no superadmin nav entry.
+router.post('/',    requireBusinessRole('admin'),  createPromotionValidator, validate, promoController.create);
+router.put('/:id',  requireBusinessRole('admin'),  updatePromotionValidator, validate, promoController.update);
+router.delete('/:id', requireBusinessRole('admin'), promoController.remove);
 
 module.exports = router;

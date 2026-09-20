@@ -227,10 +227,13 @@ const login = async ({ phone, password }, ip, userAgent = 'unknown') => {
     };
   }
 
-  // ── ADMIN / SUPERADMIN: 2FA required before branch selection (production only) ─
-  // In development (NODE_ENV !== 'production') or when SKIP_2FA=true is set,
-  // skip 2FA entirely to avoid needing Africa's Talking credentials.
-  if (TWO_FACTOR_ROLES.includes(user.role) && process.env.NODE_ENV === 'production' && process.env.SKIP_2FA !== 'true') {
+  // ── ADMIN / SUPERADMIN: 2FA required before branch selection ─────────────────
+  // Enforced for these roles in EVERY environment. It used to also require
+  // NODE_ENV === 'production', which (a) meant the two highest-privilege roles
+  // were password-only in test/staging/QA as well as dev, and (b) made the whole
+  // branch untestable — the five 2FA tests could never pass and this logic
+  // therefore had no coverage. Local dev opts out with SKIP_2FA=true.
+  if (TWO_FACTOR_ROLES.includes(user.role) && process.env.SKIP_2FA !== 'true') {
     // Per-account resend cooldown — without this, every successful password
     // check (up to authLimiter's 10/min) regenerates and re-sends a fresh OTP,
     // the same SMS/email-bombing gap forgotPassword's cooldown already closes

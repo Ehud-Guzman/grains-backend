@@ -142,10 +142,12 @@ const isAllowedOrigin = (req) => {
 
 const refresh = async (req, res, next) => {
   try {
-    // In development or with SKIP_2FA=true, be lenient with CORS origin checks
-    // to simplify testing across different origins (Netlify/localhost).
-    // In production without SKIP_2FA, enforce strict origin validation.
-    const skipOriginCheck = process.env.NODE_ENV !== 'production' || process.env.SKIP_2FA === 'true';
+    // CSRF guard for the token-refresh endpoint. Gated on an explicit opt-out
+    // (SKIP_ORIGIN_CHECK=true, set in a local .env) rather than on NODE_ENV:
+    // keying off !production silently disabled this check in test, staging and
+    // QA as well as dev, and made the guard untestable — the suite's two CSRF
+    // cases could never pass. Never set this in a deployed environment.
+    const skipOriginCheck = process.env.SKIP_ORIGIN_CHECK === 'true';
     
     if (!skipOriginCheck && !isAllowedOrigin(req)) {
       return error(res, 'Request origin not allowed', 'CSRF_ORIGIN_MISMATCH', 403);

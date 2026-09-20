@@ -45,7 +45,11 @@ router.post(
 router.patch('/:id/b2b', requireBusinessRole('supervisor'), customerIdParamValidator, validate, customerController.toggleB2B);
 
 // PATCH /api/admin/customers/:id/lock
-router.patch('/:id/lock', requireMinRole('supervisor'), customerIdParamValidator, validate, customerController.lockAccount);
+// PATCH /api/admin/customers/:id/lock — business operation, superadmin excluded
+// (unlock below stays superadmin-only: it's the privileged reversal, and the
+// asymmetry is deliberate — anyone at supervisor+ can flag an account, only
+// superadmin can clear the flag).
+router.patch('/:id/lock', requireBusinessRole('supervisor'), customerIdParamValidator, validate, customerController.lockAccount);
 
 // PATCH /api/admin/customers/:id/unlock — superadmin only
 router.patch('/:id/unlock', requireRole('superadmin'), customerIdParamValidator, validate, customerController.unlockAccount);

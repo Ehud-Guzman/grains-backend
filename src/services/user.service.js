@@ -228,6 +228,20 @@ const resetPassword = async (userId, newPassword, superAdminId) => {
   if (!newPassword) throw new AppError('Password is required', 400, 'INVALID_PASSWORD');
   validatePasswordStrength(newPassword);
 
+  // Same self-modification guard as changeRole / lockAdminAccount /
+  // setPermissions. Resetting your OWN password through this admin endpoint
+  // would skip the current-password check that change-password performs — so a
+  // stolen access token could permanently lock the real owner out by rotating
+  // their password. Self-service resets must go through /auth/change-password.
+  // Resetting ANOTHER superadmin (genuine recovery) is still allowed.
+  if (userId.toString() === superAdminId.toString()) {
+    throw new AppError(
+      'Use the change-password endpoint to change your own password',
+      400,
+      'CANNOT_MODIFY_SELF'
+    );
+  }
+
   const passwordHash = await bcrypt.hash(newPassword, BCRYPT_WORK_FACTOR);
 
   // A forced reset is most often a response to a compromised or offboarded
