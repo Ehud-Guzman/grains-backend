@@ -12,7 +12,7 @@ const logger = require('../utils/logger');
 
 // ── HELPER: write stock log entry ─────────────────────────────────────────────
 const writeStockLog = async (
-  { branchId, productId, varietyName, packagingSize, changeType, quantityChange, balanceAfter, reason, orderId, supplierId, performedBy },
+  { branchId, productId, varietyName, packagingSize, changeType, quantityChange, balanceAfter, reason, orderId, supplierId, performedBy, dedupeKey },
   session = null
 ) => {
   const logData = [{
@@ -27,7 +27,10 @@ const writeStockLog = async (
     orderId: orderId || null,
     supplierId: supplierId || null,
     performedBy,
-    timestamp: new Date()
+    timestamp: new Date(),
+    // Spread conditionally — an explicit `undefined` would still be a key, and
+    // the partial unique index keys off the field being absent.
+    ...(dedupeKey ? { dedupeKey } : {})
   }];
 
   if (session) {
@@ -198,6 +201,17 @@ const addDelivery = async (productId, varietyName, packagingSize, quantity, reas
   // retry resubmitting the same delivery) landing within a short window, since this
   // write has no client-supplied idempotency key.
   const DUPLICATE_WINDOW_MS = 15000;
+  // Same fields as the query below, plus a 15-second time bucket. Enforced by the
+  // unique partial index on StockLog.dedupeKey, because the read-then-write check
+  // alone was a TOCTOU race: two concurrent identical submissions both saw no
+  // duplicate and both applied, double-counting an entire truckload. The
+  // pre-check below is kept only as a fast path that returns the same 409 without
+  // depending on a duplicate-key error.
+  const dedupeKey = [
+    branchId, productId, varietyName, packagingSize,
+    STOCK_CHANGE_TYPES.DELIVERY, quantity, performedBy,
+    Math.floor(Date.now() / DUPLICATE_WINDOW_MS),
+  ].join('|');
   const recentDuplicate = await StockLog.findOne({
     branchId,
     productId,
@@ -217,56 +231,97 @@ const addDelivery = async (productId, varietyName, packagingSize, quantity, reas
     );
   }
 
-  const product = await Product.findOneAndUpdate(
-    {
-      _id: productId,
-      branchId,
-      varieties: {
-        $elemMatch: {
-          varietyName,
-          packaging: { $elemMatch: { size: packagingSize } }
+  // The stock increment, its StockLog row and the optional StockIntake link are
+  // now ONE transaction. Previously the increment and the log were two
+  // independent writes, so a crash or connection blip between them moved stock
+  // with no audit row — an invisible movement that getLogs() and reconciliation
+  // could never account for. deductStock/releaseStock already ran inside the
+  // order transactions for exactly this reason; addDelivery did not take a
+  // session at all.
+  //
+  // withTransaction() (rather than a hand-rolled start/commit/abort) because
+  // MongoDB aborts one of two concurrent transactions that touch the same product
+  // document with a WriteConflict, and the documented handling is to retry the
+  // whole transaction. Without that retry:
+  //   • a concurrent *identical* delivery reported the raw driver error instead of
+  //     DUPLICATE_SUBMISSION, because the losing transaction never reached the
+  //     unique-index check; and
+  //   • a concurrent *different* delivery to the same product failed outright with
+  //     an opaque error instead of simply applying.
+  const session = await mongoose.startSession();
+
+  let product, balanceAfter;
+  try {
+    await session.withTransaction(async () => {
+      product = await Product.findOneAndUpdate(
+        {
+          _id: productId,
+          branchId,
+          varieties: {
+            $elemMatch: {
+              varietyName,
+              packaging: { $elemMatch: { size: packagingSize } }
+            }
+          }
+        },
+        {
+          $inc: { 'varieties.$[v].packaging.$[p].stock': quantity }
+        },
+        {
+          arrayFilters: [
+            { 'v.varietyName': varietyName },
+            { 'p.size': packagingSize }
+          ],
+          new: true,
+          session
         }
+      );
+
+      if (!product) throw new AppError('Product, variety or packaging size not found', 404, 'PRODUCT_NOT_FOUND');
+
+      const variety = product.varieties.find(v => v.varietyName === varietyName);
+      const packaging = variety?.packaging.find(p => p.size === packagingSize);
+      balanceAfter = packaging?.stock ?? 0;
+
+      await writeStockLog({
+        branchId,
+        productId,
+        varietyName,
+        packagingSize,
+        changeType: STOCK_CHANGE_TYPES.DELIVERY,
+        quantityChange: quantity,
+        balanceAfter,
+        reason: reason || 'New delivery',
+        supplierId,
+        performedBy,
+        dedupeKey
+      }, session);
+
+      // Optional audit-trail link back to the raw truck arrival this delivery packs out —
+      // closes the reconciliation gap between StockIntake and actual sellable stock.
+      if (sourceIntakeId) {
+        const StockIntake = require('../models/StockIntake');
+        await StockIntake.findOneAndUpdate(
+          { _id: sourceIntakeId, branchId },
+          { $push: { linkedDeliveries: { productId, varietyName, packagingSize, quantity, performedBy, appliedAt: new Date() } } },
+          { session }
+        );
       }
-    },
-    {
-      $inc: { 'varieties.$[v].packaging.$[p].stock': quantity }
-    },
-    {
-      arrayFilters: [
-        { 'v.varietyName': varietyName },
-        { 'p.size': packagingSize }
-      ],
-      new: true
+    });
+  } catch (err) {
+    // A concurrent identical submission won the race and its StockLog insert
+    // landed first — the unique index rejected ours, so the increment above was
+    // rolled back. Report it exactly like the pre-check does.
+    if (err?.code === 11000 && String(err.message || '').includes('dedupeKey')) {
+      throw new AppError(
+        'An identical delivery was just recorded — please wait before resubmitting',
+        409,
+        'DUPLICATE_SUBMISSION'
+      );
     }
-  );
-
-  if (!product) throw new AppError('Product, variety or packaging size not found', 404, 'PRODUCT_NOT_FOUND');
-
-  const variety = product.varieties.find(v => v.varietyName === varietyName);
-  const packaging = variety?.packaging.find(p => p.size === packagingSize);
-  const balanceAfter = packaging?.stock ?? 0;
-
-  await writeStockLog({
-    branchId,
-    productId,
-    varietyName,
-    packagingSize,
-    changeType: STOCK_CHANGE_TYPES.DELIVERY,
-    quantityChange: quantity,
-    balanceAfter,
-    reason: reason || 'New delivery',
-    supplierId,
-    performedBy
-  });
-
-  // Optional audit-trail link back to the raw truck arrival this delivery packs out —
-  // closes the reconciliation gap between StockIntake and actual sellable stock.
-  if (sourceIntakeId) {
-    const StockIntake = require('../models/StockIntake');
-    await StockIntake.findOneAndUpdate(
-      { _id: sourceIntakeId, branchId },
-      { $push: { linkedDeliveries: { productId, varietyName, packagingSize, quantity, performedBy, appliedAt: new Date() } } }
-    );
+    throw err;
+  } finally {
+    session.endSession();
   }
 
   await activityLogService.log({
@@ -300,57 +355,74 @@ const manualAdjustment = async (productId, varietyName, packagingSize, newQuanti
   // separate read-then-write where a concurrent adjustment landing in between
   // would make quantityChange/before describe a state that was never actually
   // current at write time.
-  const before = await Product.findOneAndUpdate(
-    {
-      _id: productId,
-      branchId,
-      varieties: {
-        $elemMatch: {
-          varietyName,
-          packaging: { $elemMatch: { size: packagingSize } }
+  // Same one-transaction guarantee as addDelivery: the stock write and its
+  // StockLog row commit together or not at all. Without this, a crash between
+  // the two left stock changed with no audit row — and a manual adjustment is
+  // precisely the write most likely to be questioned later.
+  const session = await mongoose.startSession();
+
+  let before, currentStock, quantityChange, product;
+  try {
+    // withTransaction() for the same reason as addDelivery — it retries on the
+    // WriteConflict MongoDB raises when two transactions touch the same product
+    // document concurrently, rather than failing the second one outright.
+    await session.withTransaction(async () => {
+      before = await Product.findOneAndUpdate(
+        {
+          _id: productId,
+          branchId,
+          varieties: {
+            $elemMatch: {
+              varietyName,
+              packaging: { $elemMatch: { size: packagingSize } }
+            }
+          }
+        },
+        {
+          $set: { 'varieties.$[v].packaging.$[p].stock': newQuantity }
+        },
+        {
+          arrayFilters: [
+            { 'v.varietyName': varietyName },
+            { 'p.size': packagingSize }
+          ],
+          new: false,
+          session
         }
-      }
-    },
-    {
-      $set: { 'varieties.$[v].packaging.$[p].stock': newQuantity }
-    },
-    {
-      arrayFilters: [
-        { 'v.varietyName': varietyName },
-        { 'p.size': packagingSize }
-      ],
-      new: false
-    }
-  );
+      );
 
-  if (!before) throw new AppError('Product, variety or packaging size not found', 404, 'PRODUCT_NOT_FOUND');
+      if (!before) throw new AppError('Product, variety or packaging size not found', 404, 'PRODUCT_NOT_FOUND');
 
-  const beforeVariety = before.varieties.find(v => v.varietyName === varietyName);
-  const beforePackaging = beforeVariety?.packaging.find(p => p.size === packagingSize);
-  const currentStock = beforePackaging?.stock ?? 0;
-  const quantityChange = newQuantity - currentStock;
+      const beforeVariety = before.varieties.find(v => v.varietyName === varietyName);
+      const beforePackaging = beforeVariety?.packaging.find(p => p.size === packagingSize);
+      currentStock = beforePackaging?.stock ?? 0;
+      quantityChange = newQuantity - currentStock;
 
-  // Build the "after" shape locally instead of a second DB round-trip — we
-  // already know exactly what our own write changed (the single stock field
-  // above); every other caller of this module returns { product, balanceAfter }
-  // the same way after their own atomic write.
-  const product = before.toObject();
-  const afterPackaging = product.varieties
-    .find(v => v.varietyName === varietyName)?.packaging
-    .find(p => p.size === packagingSize);
-  if (afterPackaging) afterPackaging.stock = newQuantity;
+      // Build the "after" shape locally instead of a second DB round-trip — we
+      // already know exactly what our own write changed (the single stock field
+      // above); every other caller of this module returns { product, balanceAfter }
+      // the same way after their own atomic write.
+      product = before.toObject();
+      const afterPackaging = product.varieties
+        .find(v => v.varietyName === varietyName)?.packaging
+        .find(p => p.size === packagingSize);
+      if (afterPackaging) afterPackaging.stock = newQuantity;
 
-  await writeStockLog({
-    branchId,
-    productId,
-    varietyName,
-    packagingSize,
-    changeType: STOCK_CHANGE_TYPES.MANUAL_ADJUSTMENT,
-    quantityChange,
-    balanceAfter: newQuantity,
-    reason,
-    performedBy
-  });
+      await writeStockLog({
+        branchId,
+        productId,
+        varietyName,
+        packagingSize,
+        changeType: STOCK_CHANGE_TYPES.MANUAL_ADJUSTMENT,
+        quantityChange,
+        balanceAfter: newQuantity,
+        reason,
+        performedBy
+      }, session);
+    });
+  } finally {
+    session.endSession();
+  }
 
   await activityLogService.log({
     actorId: performedBy,

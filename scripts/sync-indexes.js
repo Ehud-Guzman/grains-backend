@@ -30,6 +30,12 @@ const syncIndexes = async () => {
     { collection: 'users',    field: 'email' },
     { collection: 'payments', field: 'mpesaTransactionId' },
     { collection: 'payments', field: 'checkoutRequestId' },
+    // StockLog.dedupeKey (the delivery duplicate guard) declares no default and is
+    // only ever written on DELIVERY rows, so it should be absent elsewhere rather
+    // than null — the `{ dedupeKey: null }` query below matches missing fields too,
+    // making this a no-op in practice. Listed so a future write path that starts
+    // setting null cannot break the unique partial index build.
+    { collection: 'stocklogs', field: 'dedupeKey' },
   ];
   for (const { collection, field } of unsetNulls) {
     const result = await db.collection(collection).updateMany(

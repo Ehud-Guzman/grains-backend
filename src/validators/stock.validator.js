@@ -52,6 +52,11 @@ const adjustmentValidator = [
     .isLength({ min: 3, max: 500 }).withMessage('Reason must be between 3 and 500 characters')
 ];
 
+// Mirrors deliveryValidator for every row. It previously validated only
+// productId/varietyName/packagingSize/quantity, so a malformed supplierId or
+// sourceIntakeId reached addDelivery and surfaced as a raw Mongoose CastError
+// reported as a per-row failure — a confusing message for what is really bad
+// input, and inconsistent with the single-delivery endpoint.
 const batchUpdateValidator = [
   body('updates')
     .isArray({ min: 1 }).withMessage('At least one update is required'),
@@ -69,7 +74,20 @@ const batchUpdateValidator = [
     .notEmpty().withMessage('Packaging size is required'),
 
   body('updates.*.quantity')
-    .isInt({ min: 1 }).withMessage('Quantity must be at least 1')
+    .isInt({ min: 1 }).withMessage('Quantity must be at least 1'),
+
+  body('updates.*.reason')
+    .optional({ nullable: true })
+    .trim()
+    .isLength({ max: 500 }).withMessage('Reason cannot exceed 500 characters'),
+
+  body('updates.*.supplierId')
+    .optional({ nullable: true })
+    .isMongoId().withMessage('Invalid supplier ID'),
+
+  body('updates.*.sourceIntakeId')
+    .optional({ nullable: true })
+    .isMongoId().withMessage('Invalid intake ID')
 ];
 
 module.exports = { deliveryValidator, adjustmentValidator, batchUpdateValidator };

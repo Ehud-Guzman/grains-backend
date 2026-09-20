@@ -2,7 +2,7 @@ const driverService = require('../services/driver.service');
 const orderService = require('../services/order.service');
 const { success, paginated } = require('../utils/apiResponse');
 const { AppError } = require('../middleware/errorHandler.middleware');
-const { ORDER_STATUSES } = require('../utils/constants');
+const { ROLES, ORDER_STATUSES } = require('../utils/constants');
 const { withGuestFallback } = require('../utils/orderGuestFallback');
 const { isValidImageBuffer } = require('../utils/validateImageBuffer');
 
@@ -44,7 +44,14 @@ const getMyOrders = async (req, res, next) => {
 const getOrderDetail = async (req, res, next) => {
   try {
     const Order = require('../models/Order');
-    const order = await Order.findOne({ _id: req.params.id, driverId: req.user.id })
+    // driverId scoping is the real access control. The branchId filter is
+    // defence-in-depth, mirroring driverService.getMyOrders: assignDriver()
+    // already only assigns drivers from the acting admin's own branch, so this
+    // is not reachable today — but without it, any future assignment path that
+    // skipped that check would leak another branch's order address and totals.
+    const query = { _id: req.params.id, driverId: req.user.id };
+    if (req.branchId) query.branchId = req.branchId;
+    const order = await Order.findOne(query)
       .populate('userId', 'name phone')
       .populate('guestId', 'name phone')
       .lean();
@@ -57,7 +64,9 @@ const getOrderDetail = async (req, res, next) => {
 const completeDelivery = async (req, res, next) => {
   try {
     const Order = require('../models/Order');
-    const order = await Order.findOne({ _id: req.params.id, driverId: req.user.id });
+    const query = { _id: req.params.id, driverId: req.user.id };
+    if (req.branchId) query.branchId = req.branchId;   // defence-in-depth, see getOrderDetail
+    const order = await Order.findOne(query);
     if (!order) return next(new AppError('Order not found or not assigned to you', 404, 'ORDER_NOT_FOUND'));
 
     if (order.status !== ORDER_STATUSES.OUT_FOR_DELIVERY) {
@@ -99,7 +108,11 @@ const completeDelivery = async (req, res, next) => {
       ORDER_STATUSES.COMPLETED,
       req.user.id,
       recipientName ? `Delivered — received by ${recipientName}` : 'Marked as delivered by driver',
-      order.branchId
+      order.branchId,
+      // Without this, updateStatus defaults actorRole to 'staff' and every
+      // driver completion is recorded in the activity log against the staff
+      // role — misattributing the actor on the delivery audit trail.
+      ROLES.DRIVER
     );
     return success(res, updated, 'Delivery completed');
   } catch (err) { next(err); }

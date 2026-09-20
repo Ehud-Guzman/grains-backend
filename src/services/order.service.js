@@ -1328,6 +1328,7 @@ const assignDriver = async (orderId, driverId, adminId, branchId, actorRole = 'a
   // already committed, failing every assignment response.
   let order, driver;
   let dispatchedNow = false;
+  let previousDriverId = null;
   try {
     order = await Order.findOne({ _id: orderId, branchId }).session(session);
     if (!order) throw new AppError('Order not found', 404, 'ORDER_NOT_FOUND');
@@ -1350,6 +1351,10 @@ const assignDriver = async (orderId, driverId, adminId, branchId, actorRole = 'a
       throw new AppError('This driver\'s account is locked and cannot take deliveries', 400, 'DRIVER_LOCKED');
     }
 
+    // Captured BEFORE the overwrite so a reassignment can be detected afterwards
+    // and the driver being replaced can be told to stand down (see the emit at
+    // the end of this function).
+    previousDriverId = order.driverId ? String(order.driverId) : null;
     order.driverId = driverId;
 
     // Auto-advance: preparing → out_for_delivery when driver is first assigned
@@ -1381,7 +1386,7 @@ const assignDriver = async (orderId, driverId, adminId, branchId, actorRole = 'a
     branchId,
     targetId: order._id,
     targetType: 'Order',
-    detail: { orderRef: order.orderRef, driverId, driverName: driver.name }
+    detail: { orderRef: order.orderRef, driverId, driverName: driver.name, previousDriverId: previousDriverId || undefined }
   });
 
   // Notify customer only when this call actually transitioned the order to
@@ -1389,6 +1394,23 @@ const assignDriver = async (orderId, driverId, adminId, branchId, actorRole = 'a
   // must not re-send the "on the way" SMS/email.
   if (dispatchedNow) {
     appEvents.emit(ORDER_EVENTS.DISPATCHED, { order, branchId });
+  }
+
+  // A genuine reassignment (a different driver than the one currently holding it)
+  // is emitted separately from DISPATCHED, for the opposite audience: the
+  // customer must NOT be re-notified, but the previous driver MUST be told to
+  // stand down. Without this their own order list simply loses the order on the
+  // next refresh, with no explanation, possibly while already en route.
+  if (previousDriverId && previousDriverId !== String(driverId)) {
+    let previousDriver = null;
+    try {
+      previousDriver = await User.findOne({ _id: previousDriverId }).select('name phone').lean();
+    } catch {
+      // Notification is best-effort — a failed lookup must not fail the assignment.
+    }
+    if (previousDriver) {
+      appEvents.emit(ORDER_EVENTS.REASSIGNED, { order, branchId, previousDriver });
+    }
   }
 
   return order;

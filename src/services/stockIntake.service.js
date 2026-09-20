@@ -18,15 +18,39 @@ const HIGH_VARIANCE_THRESHOLD_PCT = 15;
 const round2 = (n) => Math.round(n * 100) / 100;
 
 const withReconciliation = (intake) => {
+  const linkedDeliveries = intake.linkedDeliveries || [];
   const rawTotal = intake.items.reduce((sum, i) => sum + i.quantity, 0);
-  const packedTotal = intake.linkedDeliveries.reduce((sum, d) => sum + d.quantity, 0);
+  const packedTotal = linkedDeliveries.reduce((sum, d) => sum + d.quantity, 0);
   const unitsConsistent = intake.items.every(i => i.unit === intake.items[0]?.unit);
-  const variancePct = rawTotal > 0 ? round2(((rawTotal - packedTotal) / rawTotal) * 100) : null;
+
+  // A raw intake does NOT move sellable stock — someone has to go to the stock
+  // screen and record the packed delivery rows, optionally passing sourceIntakeId
+  // to link them back here. Nothing yet does that automatically, so the common
+  // state for a fresh intake is "no deliveries linked".
+  //
+  // Without this distinction an unlinked intake computed packedTotal = 0 →
+  // variancePct = 100 → highVariance = true, i.e. every newly-logged truck looked
+  // like a 100% discrepancy and the real high-variance signal was drowned out.
+  const linked = linkedDeliveries.length > 0;
+  const variancePct = linked && rawTotal > 0
+    ? round2(((rawTotal - packedTotal) / rawTotal) * 100)
+    : null;
   const highVariance = variancePct !== null && Math.abs(variancePct) > HIGH_VARIANCE_THRESHOLD_PCT;
+
+  // 'unlinked' → nothing packed out yet (not an error, just incomplete)
+  // 'mixed_units' → totals aren't comparable, so no percentage is meaningful
+  // 'ok' / 'high_variance' → a real comparison
+  const state = !linked
+    ? 'unlinked'
+    : !unitsConsistent
+      ? 'mixed_units'
+      : highVariance
+        ? 'high_variance'
+        : 'ok';
 
   return {
     ...intake,
-    reconciliation: { rawTotal, packedTotal, variancePct, unitsConsistent, highVariance },
+    reconciliation: { rawTotal, packedTotal, variancePct, unitsConsistent, highVariance, linked, linkedCount: linkedDeliveries.length, state },
   };
 };
 

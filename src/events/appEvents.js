@@ -8,6 +8,7 @@ const ORDER_EVENTS = {
   APPROVED:   'order:approved',   // { order, branchId }
   REJECTED:   'order:rejected',   // { order, branchId }
   DISPATCHED: 'order:dispatched', // { order, branchId }
+  REASSIGNED: 'order:reassigned', // { order, branchId, previousDriver }
   COMPLETED:  'order:completed',  // { order, branchId }
   CANCELLED:  'order:cancelled',  // { order, branchId }
 };
