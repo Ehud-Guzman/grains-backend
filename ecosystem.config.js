@@ -8,6 +8,10 @@ module.exports = {
       // get true parallelism with zero code changes.
       // isRestoreInProgress() in backup.service.js is cluster-safe: it polls
       // the RESTORE_MARKER file so all workers see an in-progress restore.
+      // CONSTRAINT: on a multi-core host 'max' already breaks the rate limits. The default
+      // express-rate-limit store is per-process, so N workers multiply every limit by N
+      // (AUTH_MAX 10 -> 10*N logins/min) and the alert counters split. Pin this to 1 there,
+      // or give the limiters a shared store (Redis/Mongo) first.
       instances: 'max',
       exec_mode: 'cluster',
       watch: false,

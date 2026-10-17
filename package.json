@@ -13,7 +13,8 @@
     "sync:indexes": "node scripts/sync-indexes.js",
     "superadmin": "node scripts/promote-superadmin.js",
     "test": "node --test",
-    "audit": "npm audit --audit-level=high"
+    "audit": "npm audit --audit-level=high",
+    "lint": "eslint ."
   },
   "dependencies": {
     "@sentry/node": "^7.81.1",
@@ -40,6 +41,9 @@
     "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "eslint": "^9.39.5",
+    "globals": "^17.13.0",
     "mongodb-memory-server": "^11.2.0",
     "nodemon": "^3.0.1"
   },

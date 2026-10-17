@@ -6,22 +6,20 @@
 
 const Branch = require('../models/Branch');
 const { autoCancelExpiredPendingOrders } = require('../services/order.service');
+const { runGuarded } = require('../services/jobControl.service');
 const logger = require('../utils/logger');
 
 const RUN_INTERVAL_MS = 5 * 60 * 1000;   // every 5 minutes
 const INITIAL_DELAY_MS = 3 * 60 * 1000;  // first run 3 min after startup
 
-const runAutoCancel = async () => {
-  try {
-    const branches = await Branch.find({ isActive: true }).select('_id').lean();
-    for (const { _id } of branches) {
-      await autoCancelExpiredPendingOrders(_id);
-    }
-  } catch (err) {
-    // Log and swallow — a job failure must never crash the process
-    logger.error('[AUTO-CANCEL] Job failed', { err: err.message });
+// runGuarded honours the Control Center's pause switch, records the outcome, and
+// logs-and-swallows any failure — a job failure must never crash the process.
+const runAutoCancel = () => runGuarded('auto-cancel', async () => {
+  const branches = await Branch.find({ isActive: true }).select('_id').lean();
+  for (const { _id } of branches) {
+    await autoCancelExpiredPendingOrders(_id);
   }
-};
+});
 
 const startAutoCancelJob = () => {
   setTimeout(() => {

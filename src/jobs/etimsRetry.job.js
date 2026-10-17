@@ -6,6 +6,7 @@
 
 const Order = require('../models/Order');
 const etimsService = require('../services/etims.service');
+const { runGuarded } = require('../services/jobControl.service');
 const logger = require('../utils/logger');
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
@@ -16,7 +17,7 @@ const INITIAL_DELAY_MS = 5 * 60 * 1000;   // let startup I/O settle first
 // a human via the manual resubmit route, not another automatic attempt.
 const MAX_AGE_MS = 7 * MS_PER_DAY;
 
-const runEtimsRetry = async () => {
+const retryFailedInvoices = async () => {
   const candidates = await Order.find({
     etimsStatus: 'failed',
     updatedAt: { $gte: new Date(Date.now() - MAX_AGE_MS) }
@@ -37,12 +38,13 @@ const runEtimsRetry = async () => {
   }
 };
 
+// runGuarded honours the Control Center's pause switch and logs-and-swallows failures.
+const runEtimsRetry = () => runGuarded('etims-retry', retryFailedInvoices);
+
 const startEtimsRetryJob = () => {
   setTimeout(() => {
-    runEtimsRetry().catch(err => logger.error('[ETIMS RETRY] Job run failed', { err: err.message }));
-    setInterval(() => {
-      runEtimsRetry().catch(err => logger.error('[ETIMS RETRY] Job run failed', { err: err.message }));
-    }, RETRY_INTERVAL_MS);
+    runEtimsRetry();
+    setInterval(runEtimsRetry, RETRY_INTERVAL_MS);
   }, INITIAL_DELAY_MS);
 
   logger.info('[ETIMS RETRY] Retry job scheduled (every 30 min, first run in 5 min)');

@@ -12,3 +12,13 @@
 const bumpTokenValidAfter = () => new Date(Math.floor(Date.now() / 1000) * 1000);
 
 module.exports = { bumpTokenValidAfter };
+
+// For an explicit sign-out (the superadmin ending someone's sessions) the cut-off must
+// cover every token that already exists. Flooring to the second — as above — would let
+// a token minted earlier in the SAME second survive, because its truncated iat equals
+// the cut-off and only strictly-earlier iats are rejected. Rounding up to the next whole
+// second closes that gap; the cost is that the user cannot sign back in during the
+// remaining fraction of a second, which is not noticeable.
+const revokeAllBefore = () => new Date(Math.floor(Date.now() / 1000) * 1000 + 1000);
+
+module.exports.revokeAllBefore = revokeAllBefore;

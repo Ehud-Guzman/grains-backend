@@ -2,6 +2,7 @@
 require('dotenv').config();
 const app = require('./src/app');
 const connectDB = require('./src/config/db');
+const mongoose = require('mongoose');
 const logger = require('./src/utils/logger');
 const { startCleanupJobs }   = require('./src/jobs/cleanup.job');
 const { startKeepAlive }     = require('./src/jobs/keepAlive.job');
@@ -66,6 +67,19 @@ if (process.env.NODE_ENV === 'production') {
   if (!frontendUrl.startsWith('https://')) {
     console.error(`[STARTUP ERROR] FRONTEND_URL must start with "https://" in production. Current value: "${frontendUrl || '(empty)'}"`);
     process.exit(1);
+  }
+
+  // Integration credentials. Warnings, not exits: a missing key should be loud in the logs
+  // (and on the Control Center's health panel) but must not stop a live shop from booting.
+  const missingGroups = [
+    ['Cloudinary (product images will fail to upload)', ['CLOUDINARY_CLOUD_NAME', 'CLOUDINARY_API_KEY', 'CLOUDINARY_API_SECRET']],
+    ['M-Pesa (STK push will fail AFTER the order is created)', ['MPESA_CONSUMER_KEY', 'MPESA_CONSUMER_SECRET', 'MPESA_SHORTCODE', 'MPESA_PASSKEY', 'MPESA_CALLBACK_URL']],
+  ].map(([label, keys]) => [label, keys.filter(k => !process.env[k])]).filter(([, keys]) => keys.length);
+  for (const [label, keys] of missingGroups) {
+    console.warn(`[STARTUP WARNING] ${label}: missing ${keys.join(', ')}`);
+  }
+  if (process.env.MPESA_SHORTCODE === '174379') {
+    console.warn('[STARTUP WARNING] MPESA_SHORTCODE is the Daraja sandbox shortcode (174379) while MPESA_ENV=production — real payments will fail.');
   }
 
   if (!process.env.SENTRY_DSN) {
@@ -152,6 +166,14 @@ const startServer = async () => {
       logger.info('[SIGTERM] Graceful shutdown initiated...');
       server.close(async () => {
         logger.info('[SIGTERM] HTTP server closed. All connections drained.');
+        // Close the Mongo pool so no new writes start while we exit. `false` = don't wait for
+        // operations still running (the deadline below covers those).
+        try {
+          await mongoose.connection.close(false);
+          logger.info('[SIGTERM] Database connection closed.');
+        } catch (err) {
+          logger.error('[SIGTERM] Database close failed', { err: err.message });
+        }
         // Give in-flight DB operations 5 seconds to complete
         setTimeout(() => {
           logger.info('[SIGTERM] Shutdown complete.');
@@ -163,8 +185,9 @@ const startServer = async () => {
     // SIGINT handles Ctrl+C in development
     process.on('SIGINT', () => {
       logger.info('[SIGINT] Shutting down (Ctrl+C)...');
-      server.close(() => {
+      server.close(async () => {
         logger.info('[SIGINT] Server closed.');
+        await mongoose.connection.close(false).catch(() => {});
         process.exit(0);
       });
     });

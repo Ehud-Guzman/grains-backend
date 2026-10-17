@@ -5,21 +5,18 @@
 // tied to a fixed wall-clock time.
 
 const adminAlertService = require('../services/adminAlert.service');
+const { runGuarded } = require('../services/jobControl.service');
 const logger = require('../utils/logger');
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 // Delay first run so startup I/O settles before hitting the DB
 const INITIAL_DELAY_MS = 5 * 60 * 1000;
 
-const runDailySalesReport = async () => {
+const runDailySalesReport = () => runGuarded('daily-sales-report', async () => {
   logger.info('[DAILY SALES REPORT] Starting...');
-  try {
-    await adminAlertService.sendDailySalesReportEmail();
-    logger.info('[DAILY SALES REPORT] Done.');
-  } catch (err) {
-    logger.error('[DAILY SALES REPORT] Failed', { err: err.message });
-  }
-};
+  await adminAlertService.sendDailySalesReportEmail();
+  logger.info('[DAILY SALES REPORT] Done.');
+});
 
 const startDailySalesReportJob = () => {
   setTimeout(() => {

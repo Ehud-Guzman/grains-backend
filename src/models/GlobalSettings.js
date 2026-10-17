@@ -21,7 +21,12 @@ const globalSettingsSchema = new mongoose.Schema({
       enum:    ETIMS_ALLOWED_ROLES,
       default: ['admin', 'superadmin']
     }
-  }
+  },
+
+  // Background jobs the superadmin has paused from the Control Center
+  // (names from services/jobControl.service.js). Read straight from the DB by
+  // the jobs themselves, so a pause holds across PM2 workers and restarts.
+  pausedJobs: { type: [String], default: [] }
 }, {
   timestamps: true,
   _id: false   // suppress auto ObjectId — we use the string 'global'

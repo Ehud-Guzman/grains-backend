@@ -15,11 +15,19 @@ const ROLE_HIERARCHY = [
   ROLES.SUPERADMIN
 ];
 
+// Guards are plain closures, so there is nothing on them to inspect. The Control
+// Center's permission matrix (utils/permissionMatrix.js) reads who may reach each
+// route straight out of the router stack, which only works if every guard says what
+// it admits. `allowedRoles` is that statement; it never affects enforcement.
+const withRoles = (guard, allowedRoles, extra = {}) => Object.assign(guard, { allowedRoles, ...extra });
+
+const rolesFrom = (minRole) => ROLE_HIERARCHY.slice(ROLE_HIERARCHY.indexOf(minRole));
+
 
 
 // requireRole('supervisor', 'admin', 'superadmin') - user must have one of these roles
 const requireRole = (...roles) => {
-  return (req, res, next) => {
+  return withRoles((req, res, next) => {
     if (!req.user) {
       return next(new AppError('Authentication required', 401, 'UNAUTHORIZED'));
     }
@@ -29,12 +37,12 @@ const requireRole = (...roles) => {
     }
 
     next();
-  };
+  }, roles);
 };
 
 // requireMinRole('supervisor') - user must be supervisor or above
 const requireMinRole = (minRole) => {
-  return (req, res, next) => {
+  return withRoles((req, res, next) => {
     if (!req.user) {
       return next(new AppError('Authentication required', 401, 'UNAUTHORIZED'));
     }
@@ -61,7 +69,7 @@ const requireMinRole = (minRole) => {
     }
 
     next();
-  };
+  }, rolesFrom(minRole));
 };
 
 // requireBusinessRole('supervisor') — a BUSINESS operator at or above minRole.
@@ -92,7 +100,7 @@ const requireMinRole = (minRole) => {
 //     credentials, cross-branch settings) → requireRole('superadmin') or
 //     requireSuperadminOrPermission(...), which superadmin passes
 const requireBusinessRole = (minRole) => {
-  return (req, res, next) => {
+  return withRoles((req, res, next) => {
     if (!req.user) {
       return next(new AppError('Authentication required', 401, 'UNAUTHORIZED'));
     }
@@ -113,7 +121,7 @@ const requireBusinessRole = (minRole) => {
     }
 
     next();
-  };
+  }, rolesFrom(minRole).filter(r => r !== ROLES.SUPERADMIN));
 };
 
 // Ensures a non-superadmin request has a branchId (auto-enforced via JWT)
@@ -126,7 +134,7 @@ const requireBranch = (req, res, next) => {
 
 // requireSuperadminOrPermission('manage_branches') — superadmin OR a user explicitly granted the named permission
 const requireSuperadminOrPermission = (permission) => {
-  return (req, res, next) => {
+  return withRoles((req, res, next) => {
     if (!req.user) {
       return next(new AppError('Authentication required', 401, 'UNAUTHORIZED'));
     }
@@ -134,7 +142,7 @@ const requireSuperadminOrPermission = (permission) => {
       return next();
     }
     return next(new AppError('You do not have permission to perform this action', 403, 'FORBIDDEN'));
-  };
+  }, [ROLES.SUPERADMIN], { grantedByPermission: permission });
 };
 
 module.exports = { requireRole, requireMinRole, requireBusinessRole, requireBranch, requireSuperadminOrPermission };

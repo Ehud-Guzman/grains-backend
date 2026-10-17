@@ -6,7 +6,8 @@ const mongoSanitize = require('express-mongo-sanitize');
 const hpp = require('hpp');
 const cookieParser = require('cookie-parser');
 const Sentry = require('@sentry/node');
-require('dotenv').config();
+// Environment is loaded once, in server.js, before validation runs. app.js stays a pure factory
+// (tests require it directly and set their own env).
 
 const { errorHandler } = require('./middleware/errorHandler.middleware');
 const { publicLimiter } = require('./middleware/rateLimit.middleware');
@@ -67,6 +68,7 @@ const adminPromotionRoutes       = require('./routes/admin/promotion.routes');
 const adminGlobalSettingsRoutes  = require('./routes/admin/globalSettings.routes');
 const adminAlertRoutes           = require('./routes/admin/alert.routes');
 const adminBroadcastRoutes       = require('./routes/admin/broadcast.routes');
+const adminControlCenterRoutes   = require('./routes/admin/controlCenter.routes');
 
 const app = express();
 
@@ -102,6 +104,9 @@ if (process.env.NODE_ENV === 'production' && process.env.SENTRY_DSN) {
 }
 
 // ── SECURITY HEADERS ──────────────────────────────────────────────────────────
+// This CSP covers the API only. The storefront's CSP is a separate policy in
+// vittoriosfrontend/public/_headers — enabling GA4 or frontend Sentry means editing THAT one
+// (see CLAUDE.md, "Frontend analytics & error tracking").
 app.use(helmet({
   hsts: {
     maxAge: 63072000,
@@ -272,6 +277,7 @@ app.use('/api/admin/promotions',       adminPromotionRoutes);
 app.use('/api/admin/global-settings',  adminGlobalSettingsRoutes);
 app.use('/api/admin/alerts',           adminAlertRoutes);
 app.use('/api/admin/broadcast',        adminBroadcastRoutes);
+app.use('/api/admin/control-center',   adminControlCenterRoutes);
 
 // ── 404 HANDLER ───────────────────────────────────────────────────────────────
 app.use((req, res) => {

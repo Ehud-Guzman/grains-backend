@@ -7,6 +7,7 @@ const ActivityLog = require('../models/ActivityLog');
 const Settings    = require('../models/Settings');
 const Guest       = require('../models/Guest');
 const logger      = require('../utils/logger');
+const { runGuarded } = require('../services/jobControl.service');
 
 const MS_PER_DAY             = 24 * 60 * 60 * 1000;
 const DEFAULT_RETENTION_DAYS = 90;
@@ -85,13 +86,16 @@ const runGuestCleanup = async () => {
 
 // ── SCHEDULER ─────────────────────────────────────────────────────────────────
 const startCleanupJobs = () => {
+  // Both tasks swallow their own errors, so one failing can't stop the other;
+  // runGuarded adds the Control Center's pause switch and last-run record.
+  const runCleanup = () => runGuarded('cleanup', async () => {
+    await runActivityLogCleanup();
+    await runGuestCleanup();
+  });
+
   setTimeout(() => {
-    runActivityLogCleanup();
-    runGuestCleanup();
-    setInterval(() => {
-      runActivityLogCleanup();
-      runGuestCleanup();
-    }, RUN_INTERVAL_MS);
+    runCleanup();
+    setInterval(runCleanup, RUN_INTERVAL_MS);
   }, INITIAL_DELAY_MS);
 
   logger.info('[CLEANUP] Cleanup jobs scheduled (daily, first run in 2 min)');

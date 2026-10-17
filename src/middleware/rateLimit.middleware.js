@@ -1,4 +1,5 @@
 const rateLimit = require('express-rate-limit');
+const logger = require('../utils/logger');
 const alertService = require('../services/alert.service');
 const { RATE_LIMITS } = require('../utils/constants');
 
@@ -77,7 +78,7 @@ const callbackLimiter = rateLimit({
   legacyHeaders: false,
   // Always return 200 so Safaricom doesn't enter a retry loop on a rate-limit response
   handler: (req, res) => {
-    console.warn(`[M-PESA] Callback rate limit hit from IP: ${req.ip}`);
+    logger.warn('[M-PESA] Callback rate limit hit', { requestId: req.requestId, ip: req.ip });
     res.status(200).json({ ResultCode: 0, ResultDesc: 'Accepted' });
   }
 });
