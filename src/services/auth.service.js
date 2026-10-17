@@ -1,4 +1,5 @@
 const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const Branch = require('../models/Branch');
@@ -10,6 +11,7 @@ const alertService = require('./alert.service');
 const notificationService = require('./notification.service');
 const logger = require('../utils/logger');
 const { bumpTokenValidAfter } = require('../utils/tokenValidAfter');
+const { phoneVariants, toLocalPhone } = require('../utils/mpesaHelpers');
 
 const MAX_FAILED_LOGINS = AUTH_LIMITS.MAX_FAILED_LOGINS;
 const BCRYPT_WORK_FACTOR = AUTH_LIMITS.BCRYPT_WORK_FACTOR;
@@ -18,6 +20,25 @@ const OTP_MAX_ATTEMPTS = AUTH_LIMITS.OTP_MAX_ATTEMPTS;
 const OTP_RESEND_COOLDOWN_MS = AUTH_LIMITS.OTP_RESEND_COOLDOWN_MS;
 
 const GENERIC_RESET_ERROR = 'Invalid or expired code. Please request a new one.';
+
+// Wrong-password lockout is TIMED, not permanent. It used to set isLocked: true, which
+// let anyone who knew a phone number lock that account (a customer, a driver, or the
+// superadmin) in five requests, with recovery depending on an OTP that may not even
+// be deliverable. isLocked is now only for deliberate admin locks.
+const LOGIN_LOCKOUT_MS = 15 * 60 * 1000;
+
+// Six-digit one-time code from a CSPRNG (Math.random is predictable).
+const generateOtp = () => String(crypto.randomInt(100000, 1000000));
+
+// Accounts exist in several stored phone formats (0712…, +254712…, 254712…): customers
+// registered with whatever they typed. Every lookup therefore matches all variants —
+// a plain { phone } equality made login depend on typing the number exactly as at
+// signup, and let one number register twice.
+const findUserByPhone = (phone) => {
+  let variants;
+  try { variants = phoneVariants(phone); } catch { variants = [phone]; }
+  return User.findOne({ phone: { $in: variants } });
+};
 
 // ── GENERATE TOKENS ───────────────────────────────────────────────────────────
 const generateTokens = (user, branchId = null) => {
@@ -104,7 +125,7 @@ const register = async ({ name, phone, email, password, marketingConsent = false
     }
   }
 
-  const existing = await User.findOne({ phone });
+  const existing = await findUserByPhone(phone);
   if (existing) {
     throw new AppError('An account with this phone number already exists', 409, 'PHONE_TAKEN');
   }
@@ -120,7 +141,7 @@ const register = async ({ name, phone, email, password, marketingConsent = false
 
   const user = await User.create({
     name,
-    phone,
+    phone: toLocalPhone(phone),
     email: email || null,
     passwordHash,
     role: ROLES.CUSTOMER,
@@ -150,10 +171,21 @@ const register = async ({ name, phone, email, password, marketingConsent = false
 // Customers get tokens immediately.
 // Staff/Admin/Superadmin get a preAuthToken + branch list for step-2 branch selection.
 const login = async ({ phone, password }, ip, userAgent = 'unknown') => {
-  const user = await User.findOne({ phone });
+  const user = await findUserByPhone(phone);
 
   if (!user) {
     throw new AppError('Invalid phone number or password', 401, 'INVALID_CREDENTIALS');
+  }
+
+  // Temporary lockout after repeated wrong passwords — checked before the (slow)
+  // password compare so a locked account can't be used to burn CPU either.
+  if (user.loginLockedUntil && user.loginLockedUntil > new Date()) {
+    const minutes = Math.max(1, Math.ceil((user.loginLockedUntil.getTime() - Date.now()) / 60000));
+    throw new AppError(
+      `Too many failed attempts. Try again in ${minutes} minute${minutes === 1 ? '' : 's'}, or reset your password.`,
+      429,
+      'ACCOUNT_TEMP_LOCKED'
+    );
   }
 
   if (user.isLocked) {
@@ -201,6 +233,7 @@ const login = async ({ phone, password }, ip, userAgent = 'unknown') => {
   // Reset failed login count on success
   await User.findByIdAndUpdate(user._id, {
     failedLoginCount: 0,
+    loginLockedUntil: null,
     lastLoginAt: new Date(),
     lastLoginIp: ip || null,
     lastLoginUserAgent: userAgent
@@ -245,7 +278,7 @@ const login = async ({ phone, password }, ip, userAgent = 'unknown') => {
       (Date.now() - (user.twoFactorExpires.getTime() - OTP_EXPIRY_MINUTES * 60 * 1000)) < OTP_RESEND_COOLDOWN_MS;
 
     if (!withinCooldown) {
-      const otp = String(Math.floor(100000 + Math.random() * 900000));
+      const otp = generateOtp();
       const twoFactorOtpHash = await bcrypt.hash(otp, BCRYPT_WORK_FACTOR);
 
       await User.findByIdAndUpdate(user._id, {
@@ -599,7 +632,15 @@ const incrementFailedLogin = async (userId, ip = null) => {
   }
 
   if (user.failedLoginCount >= MAX_FAILED_LOGINS) {
-    await lockAccount(userId);
+    await User.findByIdAndUpdate(userId, {
+      loginLockedUntil: new Date(Date.now() + LOGIN_LOCKOUT_MS),
+      failedLoginCount: 0   // a fresh allowance once the window has passed
+    });
+    alertService.sendAlert(
+      'ACCOUNT_LOCKED',
+      { Phone: user.phone, Role: user.role, Reason: `Too many failed login attempts — login blocked for ${LOGIN_LOCKOUT_MS / 60000} minutes`, 'User ID': String(userId) },
+      String(userId)
+    ).catch(err => logger.error('[auth] Alert send failed', { err: err.message }));
   }
 };
 
@@ -633,7 +674,7 @@ const lockAccount = async (userId) => {
 const unlockAccount = async (userId, adminId, actorRole = ROLES.ADMIN) => {
   const user = await User.findByIdAndUpdate(
     userId,
-    { isLocked: false, failedLoginCount: 0 },
+    { isLocked: false, failedLoginCount: 0, loginLockedUntil: null },
     { new: true }
   );
 
@@ -710,7 +751,7 @@ const changePassword = async (userId, currentPassword, newPassword, ip = null, c
 // Always returns the same generic result regardless of whether the phone is
 // registered, so the response can't be used to enumerate accounts.
 const forgotPassword = async (phone, ip = null) => {
-  const user = await User.findOne({ phone });
+  const user = await findUserByPhone(phone);
 
   // Locked accounts can still request a code — proving phone/email ownership
   // via OTP is exactly how a legitimately locked-out customer recovers, and
@@ -730,7 +771,7 @@ const forgotPassword = async (phone, ip = null) => {
       }
     }
 
-    const otp = String(Math.floor(100000 + Math.random() * 900000));
+    const otp = generateOtp();
     const passwordResetOtpHash = await bcrypt.hash(otp, BCRYPT_WORK_FACTOR);
 
     await User.findByIdAndUpdate(user._id, {
@@ -757,7 +798,7 @@ const forgotPassword = async (phone, ip = null) => {
 
 // ── RESET PASSWORD (via OTP) ──────────────────────────────────────────────────
 const resetPassword = async (phone, otp, newPassword, ip = null) => {
-  const user = await User.findOne({ phone });
+  const user = await findUserByPhone(phone);
 
   if (!user || !user.passwordResetOtpHash || !user.passwordResetExpires) {
     throw new AppError(GENERIC_RESET_ERROR, 400, 'INVALID_RESET_CODE');
@@ -794,6 +835,7 @@ const resetPassword = async (phone, otp, newPassword, ip = null) => {
     passwordHash,
     isLocked: false,
     failedLoginCount: 0,
+    loginLockedUntil: null,
     passwordResetOtpHash: null,
     passwordResetExpires: null,
     passwordResetAttempts: 0,
@@ -922,6 +964,7 @@ module.exports = {
   lockAccount,
   unlockAccount,
   incrementFailedLogin,
+  findUserByPhone,
   changePassword,
   forgotPassword,
   resetPassword,

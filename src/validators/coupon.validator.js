@@ -27,6 +27,10 @@ const optionalFieldRules = [
     .optional({ nullable: true })
     .isInt({ min: 1 }).withMessage('Usage limit must be at least 1'),
 
+  body('perCustomerLimit')
+    .optional({ nullable: true })
+    .isInt({ min: 1 }).withMessage('Per-customer limit must be at least 1'),
+
   body('assignedTo')
     .optional({ nullable: true })
     .isMongoId().withMessage('Invalid user ID'),
@@ -81,6 +85,12 @@ const validateCouponValidator = [
   body('branchId')
     .optional({ nullable: true })
     .isMongoId().withMessage('Invalid branch'),
+
+  // Lets a guest's per-customer limit be checked before they place the order
+  body('phone')
+    .optional({ nullable: true, checkFalsy: true })
+    .trim()
+    .matches(/^(\+254|0)[17]\d{8}$/).withMessage('Invalid phone number'),
 ];
 
 module.exports = { createCouponValidator, updateCouponValidator, validateCouponValidator };

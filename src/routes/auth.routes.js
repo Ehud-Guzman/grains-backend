@@ -3,7 +3,7 @@ const router = express.Router();
 const authController = require('../controllers/auth.controller');
 const {
   registerValidator, loginValidator, refreshValidator,
-  forgotPasswordValidator, resetPasswordValidator
+  forgotPasswordValidator, resetPasswordValidator, updateProfileValidator
 } = require('../validators/auth.validator');
 const { validate } = require('../middleware/validate.middleware');
 const { verifyToken, optionalAuth } = require('../middleware/auth.middleware');
@@ -62,7 +62,7 @@ router.post('/change-password', verifyToken, authLimiter, authController.changeP
 router.get('/me', verifyToken, authController.getProfile);
 
 // PUT /api/auth/me — update own profile
-router.put('/me', verifyToken, authController.updateProfile);
+router.put('/me', verifyToken, updateProfileValidator, validate, authController.updateProfile);
 
 // GET /api/auth/onboarding — get own onboarding state
 router.get('/onboarding', verifyToken, authController.getOnboarding);

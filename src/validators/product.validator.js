@@ -1,6 +1,19 @@
 const { body } = require('express-validator');
+const { findProductRuleViolation } = require('../utils/productRules');
+
+// Duplicate variety/size names and unpriced non-quote packaging corrupt stock and sell
+// at KES 0 — see utils/productRules.js.
+const structureValidator = body('varieties')
+  .optional()
+  .custom((varieties) => {
+    const problem = findProductRuleViolation(varieties);
+    if (problem) throw new Error(problem);
+    return true;
+  });
 
 const packagingValidator = [
+  structureValidator,
+
   body('varieties.*.packaging.*.size')
     .trim()
     .notEmpty().withMessage('Packaging size is required'),

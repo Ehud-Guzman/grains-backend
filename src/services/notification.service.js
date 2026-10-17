@@ -328,7 +328,76 @@ const dispatchOrderDispatched = async (order, branchId) => {
   }
 };
 
-// 5. Password reset OTP — security-critical, so it always goes out on every
+
+// Shared sender for the lifecycle messages below: resolves the contact, honours the
+// per-branch channel switches and the given gate flag, then sends SMS + email.
+const notifyCustomer = async ({ order, branchId, gate, label, sms, subject, body }) => {
+  try {
+    const [settings, contact] = await Promise.all([
+      settingsService.getSettings(branchId),
+      getOrderContact(order),
+    ]);
+    if (!contact || (gate && !settings[gate])) return;
+
+    const shop = settings.shopName || 'Vittorios Grains & Cereals';
+    const loc  = settings.shopLocation || 'Kenya';
+    const phone = settings.shopPhone || '';
+    const ctx = { shop, loc, phone, contact, ref: order.orderRef, total: `KES ${Number(order.total || 0).toLocaleString()}` };
+
+    if (settings.smsEnabled && contact.phone) {
+      await sendSMS(contact.phone, sms(ctx))
+        .catch(err => logger.error(`[notification] ${label} SMS failed`, { err: err.message }));
+    }
+    if (settings.emailEnabled && contact.email) {
+      await sendEmail({ to: contact.email, subject: subject(ctx), html: emailShell(shop, loc, body(ctx)) })
+        .catch(err => logger.error(`[notification] ${label} email failed`, { err: err.message }));
+    }
+  } catch (err) {
+    logger.error(`[notification] ${label} failed`, { err: err.message });
+  }
+};
+
+// 5. Order cancelled (by staff, automatically, or by the customer). A customer who
+// cancels on their own already knows — they are only messaged when money is owed back.
+const dispatchOrderCancelled = (order, branchId, { refundOwed = false, byCustomer = false, automatic = false, reason = null } = {}) => {
+  if (byCustomer && !refundOwed) return Promise.resolve();
+  return notifyCustomer({
+    order, branchId, gate: 'notifyCustomerOnRejection', label: 'dispatchOrderCancelled',
+    sms: ({ contact, ref, phone, shop }) =>
+      `Hi ${contact.name}, your order ${ref} was cancelled${automatic ? ' because it was not confirmed in time' : ''}.` +
+      `${refundOwed ? ' Your payment will be refunded — we will contact you.' : ''}${phone ? ` Questions? ${phone}.` : ''} – ${shop}`,
+    subject: ({ ref }) => `Order Cancelled – ${ref}`,
+    body: ({ contact, ref, phone }) => `
+      <p>Hi <strong>${escapeHtml(contact.name)}</strong>,</p>
+      <p>Your order <span class="ref">${ref}</span> has been <span class="badge red">Cancelled</span>${automatic ? ' because it was not confirmed in time' : ''}.</p>
+      ${reason && !automatic ? `<p><strong>Reason:</strong> ${escapeHtml(reason)}</p>` : ''}
+      ${refundOwed ? '<p>You had already paid, so your payment will be <strong>refunded</strong>. Our team will contact you to arrange it.</p>' : ''}
+      ${phone ? `<p>If you have questions, please contact us on <strong>${phone}</strong>.</p>` : ''}`,
+  });
+};
+
+// 6. Order completed — delivered or collected.
+const dispatchOrderCompleted = (order, branchId) => notifyCustomer({
+  order, branchId, gate: 'notifyCustomerOnDelivery', label: 'dispatchOrderCompleted',
+  sms: ({ contact, ref, shop }) => `Hi ${contact.name}, your order ${ref} is complete. Thank you for shopping with us! – ${shop}`,
+  subject: ({ ref }) => `Order Complete – ${ref}`,
+  body: ({ contact, ref, shop }) => `
+    <p>Hi <strong>${escapeHtml(contact.name)}</strong>,</p>
+    <p>Your order <span class="ref">${ref}</span> is <span class="badge green">Complete</span>.</p>
+    <p>Thank you for choosing ${shop} — we hope to serve you again soon.</p>`,
+});
+
+// 7. Payment received — M-Pesa callback or a supervisor's manual confirmation.
+const dispatchPaymentReceived = (order, branchId) => notifyCustomer({
+  order, branchId, gate: null, label: 'dispatchPaymentReceived',
+  sms: ({ contact, ref, total, shop }) => `Hi ${contact.name}, we have received your payment of ${total} for order ${ref}. – ${shop}`,
+  subject: ({ ref }) => `Payment Received – ${ref}`,
+  body: ({ contact, ref, total }) => `
+    <p>Hi <strong>${escapeHtml(contact.name)}</strong>,</p>
+    <p>We have received your payment of <strong>${total}</strong> for order <span class="ref">${ref}</span>. <span class="badge green">Paid</span></p>`,
+});
+
+// 8. Password reset OTP — security-critical, so it always goes out on every
 // channel the user has (unlike order notifications, it isn't gated by the
 // per-branch smsEnabled/emailEnabled toggles, and customers have no branchId
 // to look those up by anyway).
@@ -359,7 +428,7 @@ const dispatchPasswordResetOtp = async (user, otp) => {
   }
 };
 
-// 6. Admin/superadmin login 2FA OTP — security-critical, always goes out on
+// 9. Admin/superadmin login 2FA OTP — security-critical, always goes out on
 // every channel the user has, same rationale as dispatchPasswordResetOtp.
 const dispatchTwoFactorOtp = async (user, otp) => {
   try {
@@ -393,6 +462,9 @@ module.exports = {
   dispatchOrderApproved,
   dispatchOrderRejected,
   dispatchOrderDispatched,
+  dispatchOrderCancelled,
+  dispatchOrderCompleted,
+  dispatchPaymentReceived,
   dispatchPasswordResetOtp,
   dispatchTwoFactorOtp,
   sendEmail,

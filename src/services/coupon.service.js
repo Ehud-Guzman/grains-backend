@@ -5,11 +5,12 @@ const { AppError } = require('../middleware/errorHandler.middleware');
 const { endOfDayEAT } = require('../utils/businessTime');
 const { paginate, buildPaginationMeta } = require('../utils/paginate');
 const { withGuestFallbackList } = require('../utils/orderGuestFallback');
+const { phoneVariants } = require('../utils/mpesaHelpers');
 
 // ── VALIDATE & COMPUTE DISCOUNT ───────────────────────────────────────────────
 // Returns { coupon, discountAmount } or throws AppError.
 // subtotal is the pre-coupon, pre-delivery order subtotal.
-const validate = async (code, branchId, userId, subtotal) => {
+const validate = async (code, branchId, userId, subtotal, guestPhone = null) => {
   const coupon = await Coupon.findOne({ code: code.toUpperCase().trim(), branchId }).lean();
   if (!coupon || !coupon.isActive) {
     throw new AppError('Coupon code is invalid or expired.', 400, 'COUPON_INVALID');
@@ -27,6 +28,38 @@ const validate = async (code, branchId, userId, subtotal) => {
   }
   if (coupon.assignedTo && coupon.assignedTo.toString() !== userId?.toString()) {
     throw new AppError('This coupon is not available for your account.', 403, 'COUPON_NOT_YOURS');
+  }
+  // Per-customer cap: counts this customer's orders that still hold the coupon
+  // (cancelled/rejected ones gave it back). A guest is identified by phone; when
+  // neither a user nor a phone is known (an early preview) it can only be enforced
+  // when the order is placed.
+  if (coupon.perCustomerLimit) {
+    let identity = null;
+    if (userId) {
+      identity = { userId };
+    } else if (guestPhone) {
+      let variants;
+      try { variants = phoneVariants(guestPhone); } catch { variants = null; }
+      if (variants) {
+        const Guest = require('../models/Guest');
+        const guest = await Guest.findOne({ phone: { $in: variants } }).select('_id').lean();
+        if (guest) identity = { guestId: guest._id };
+      }
+    }
+    if (identity) {
+      const used = await Order.countDocuments({
+        branchId, couponCode: coupon.code, ...identity,
+        status: { $nin: ['cancelled', 'rejected'] },
+      });
+      if (used >= coupon.perCustomerLimit) {
+        throw new AppError(
+          coupon.perCustomerLimit === 1
+            ? 'You have already used this coupon.'
+            : `You have already used this coupon ${coupon.perCustomerLimit} times.`,
+          400, 'COUPON_CUSTOMER_LIMIT'
+        );
+      }
+    }
   }
   if (coupon.minOrderValue > 0 && subtotal < coupon.minOrderValue) {
     throw new AppError(
@@ -115,7 +148,7 @@ const getById = async (id, branchId) => {
 // Whitelist client-settable fields — branchId/createdBy/usedCount must never
 // come from the request body (mass-assignment guard)
 const pickCouponFields = (data) => {
-  const allowed = ['code', 'discountType', 'discountValue', 'minOrderValue', 'expiresAt', 'usageLimit', 'assignedTo', 'isActive'];
+  const allowed = ['code', 'discountType', 'discountValue', 'minOrderValue', 'expiresAt', 'usageLimit', 'perCustomerLimit', 'assignedTo', 'isActive'];
   return Object.fromEntries(
     Object.entries(data || {}).filter(([key]) => allowed.includes(key))
   );
@@ -131,6 +164,19 @@ const create = async (data, branchId, actorId) => {
 const update = async (id, data, branchId) => {
   const fields = pickCouponFields(data);
   if (typeof fields.code === 'string') fields.code = fields.code.toUpperCase().trim();
+
+  // The model's own >100% check can't see the other half of the pair on an update
+  // (findOneAndUpdate validators have no document), so a 10% coupon could be edited
+  // to 500%. Check the resulting combination here.
+  if (fields.discountType !== undefined || fields.discountValue !== undefined) {
+    const current = await Coupon.findOne({ _id: id, branchId }).select('discountType discountValue').lean();
+    if (!current) throw new AppError('Coupon not found', 404, 'COUPON_NOT_FOUND');
+    const type = fields.discountType ?? current.discountType;
+    const value = fields.discountValue ?? current.discountValue;
+    if (type === 'percentage' && Number(value) > 100) {
+      throw new AppError('Percentage discount cannot exceed 100%', 400, 'INVALID_DISCOUNT');
+    }
+  }
   const coupon = await Coupon.findOneAndUpdate(
     { _id: id, branchId },
     fields,

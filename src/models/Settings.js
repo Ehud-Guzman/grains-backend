@@ -21,7 +21,7 @@ const settingsSchema = new mongoose.Schema({
   deliveryFee:          { type: Number, default: 0 },
   minimumOrderValue:    { type: Number, default: 0 },
   minimumOrderQuantity: { type: Number, default: 0 }, // total bags across the cart; 0 = no minimum
-  autoCancelHours:      { type: Number, default: 0 },
+  autoCancelHours:      { type: Number, default: 24 }, // 0 = never; new branches start at 24h so unanswered/unpaid orders don't hold stock forever
   allowGuestOrders:     { type: Boolean, default: true },
   allowCashOnDelivery:  { type: Boolean, default: true },
   allowPayOnPickup:     { type: Boolean, default: true },

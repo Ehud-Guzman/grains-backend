@@ -23,11 +23,13 @@ const formatPhone = (phone) => {
 };
 
 // Generate timestamp in YYYYMMDDHHmmss format (Daraja requirement)
-const generateTimestamp = () => {
-  const d = new Date();
+// Daraja expects Nairobi time (UTC+3, no DST). Render runs in UTC, and the old
+// local-clock version sent a timestamp three hours behind.
+const generateTimestamp = (now = new Date()) => {
+  const d = new Date(now.getTime() + 3 * 60 * 60 * 1000);
   const pad = (n) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}` +
-         `${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+  return `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}` +
+         `${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}${pad(d.getUTCSeconds())}`;
 };
 
 // Generate STK push password: Base64(shortcode + passkey + timestamp)
@@ -82,8 +84,14 @@ const phoneVariants = (phone) => {
   ])];
 };
 
+// The one stored form for NEW accounts: local format, 0XXXXXXXXX. Login, register,
+// reset and the duplicate check all go through phoneVariants() so accounts stored
+// in the older +254 / 254 forms are still found; this keeps new ones consistent.
+const toLocalPhone = (phone) => `0${formatPhone(String(phone)).slice(3)}`;
+
 module.exports = {
   formatPhone,
+  toLocalPhone,
   phoneVariants,
   generateTimestamp,
   generatePassword,

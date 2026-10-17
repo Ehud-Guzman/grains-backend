@@ -14,6 +14,9 @@ const couponSchema = new mongoose.Schema({
   expiresAt:     { type: Date, default: null },
   usageLimit:    { type: Number, default: null }, // null = unlimited
   usedCount:     { type: Number, default: 0 },
+  // How many times ONE customer may use it (counted from their non-cancelled orders).
+  // null = no per-customer cap (only usageLimit applies).
+  perCustomerLimit: { type: Number, default: null, min: 1 },
   assignedTo:    { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null }, // null = public
   isActive:      { type: Boolean, default: true },
   branchId:      { type: mongoose.Schema.Types.ObjectId, ref: 'Branch', required: true },

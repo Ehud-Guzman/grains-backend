@@ -17,16 +17,17 @@ after(async () => { await testDb.disconnect(); });
 
 const PASSWORD = 'Password1';
 
-// login()'s OTP generation is `Math.floor(100000 + Math.random() * 900000)` —
-// pinning Math.random() to 0 makes the OTP deterministic ('100000') so tests
-// can verify it without ever seeing the plaintext code returned from the service.
+// login()'s OTP comes from crypto.randomInt(100000, 1000000) — pinning it to its lower
+// bound makes the OTP deterministic ('100000') so tests can verify it without ever
+// seeing the plaintext code returned from the service.
+const crypto = require('crypto');
 const withFixedOtp = async (fn) => {
-  const original = Math.random;
-  Math.random = () => 0;
+  const original = crypto.randomInt;
+  crypto.randomInt = () => 100000;
   try {
     return await fn();
   } finally {
-    Math.random = original;
+    crypto.randomInt = original;
   }
 };
 const FIXED_OTP = '100000';

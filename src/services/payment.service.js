@@ -10,8 +10,10 @@ const { PAYMENT_STATUSES, PAYMENT_METHODS, LOG_ACTIONS, ROLES, MPESA_RECEIPT_REG
 const activityLogService = require('./activityLog.service');
 const etimsService       = require('./etims.service');
 const alertService       = require('./alert.service');
+const settingsService    = require('./settings.service');
 const { getDarajaToken, getUrls } = require('../config/mpesa.config');
 const logger = require('../utils/logger');
+const { appEvents, ORDER_EVENTS } = require('../events/appEvents');
 const {
   formatPhone,
   generateTimestamp,
@@ -19,9 +21,43 @@ const {
   parseCallbackMetadata
 } = require('../utils/mpesaHelpers');
 
+// Tells the customer their payment landed. Fire-and-forget: a lookup or listener
+// failure must never fail a payment that has already been recorded.
+const emitOrderPaid = (orderId) => {
+  Order.findById(orderId).lean()
+    .then(order => { if (order) appEvents.emit(ORDER_EVENTS.PAID, { order, branchId: order.branchId }); })
+    .catch(err => logger.error('[payment] order:paid event failed', { orderId, err: err.message }));
+};
+
 // ── INITIATE STK PUSH ─────────────────────────────────────────────────────────
+const NON_PAYABLE_ORDER_STATUSES = ['cancelled', 'rejected', 'completed'];
+
 const initiateStkPush = async (orderId, phone) => {
   const reservedPaymentId = new mongoose.Types.ObjectId();
+
+  // Everything that can fail WITHOUT touching the order is checked before the
+  // atomic claim below. The claim flips paymentStatus to PENDING and points the
+  // order at a Payment document that does not exist yet — if a config or amount
+  // check threw after that, nothing reset it, and every retry answered
+  // PAYMENT_IN_PROGRESS forever (the stale-retry path needs a real Payment doc).
+  const candidate = await Order.findById(orderId).select('status paymentMethod total').lean();
+  if (!candidate) throw new AppError('Order not found', 404, 'ORDER_NOT_FOUND');
+  if (NON_PAYABLE_ORDER_STATUSES.includes(candidate.status)) {
+    throw new AppError(`This order is ${candidate.status} and can no longer be paid`, 400, 'ORDER_NOT_PAYABLE');
+  }
+  if (candidate.paymentMethod !== PAYMENT_METHODS.MPESA) {
+    throw new AppError('This order is not set to pay by M-Pesa', 400, 'NOT_MPESA_ORDER');
+  }
+  if (!candidate.total || candidate.total <= 0) {
+    throw new AppError('Order has an invalid total amount', 400, 'INVALID_ORDER_AMOUNT');
+  }
+  const shortcode   = process.env.MPESA_SHORTCODE;
+  const passkey     = process.env.MPESA_PASSKEY;
+  const callbackURL = process.env.MPESA_CALLBACK_URL;
+  if (!shortcode || !passkey || !callbackURL) {
+    throw new AppError('M-Pesa is not configured. Please contact support.', 503, 'MPESA_NOT_CONFIGURED');
+  }
+  const formattedPhone = formatPhone(phone);
 
   // Atomic guard: flip paymentStatus to PENDING only if the order is not already
   // PAID or PENDING. This prevents two concurrent requests both passing the check
@@ -55,7 +91,9 @@ const initiateStkPush = async (orderId, phone) => {
     if (!order && existing.paymentStatus === PAYMENT_STATUSES.PENDING && existing.paymentId) {
       const STALE_MS = 90_000;
       const oldPayment = await Payment.findById(existing.paymentId).select('createdAt').lean();
-      const ageMs = oldPayment ? Date.now() - new Date(oldPayment.createdAt).getTime() : 0;
+      // A claim whose Payment document never got created (crash between the claim and
+      // Payment.create) can never be completed by a callback — treat it as stale.
+      const ageMs = oldPayment ? Date.now() - new Date(oldPayment.createdAt).getTime() : Infinity;
 
       if (ageMs >= STALE_MS) {
         // Atomically claim the slot by swapping to the new paymentId.
@@ -85,19 +123,7 @@ const initiateStkPush = async (orderId, phone) => {
 
   // Always derive amount from the order — never trust client-supplied values
   const amount = order.total;
-  if (!amount || amount <= 0) {
-    throw new AppError('Order has an invalid total amount', 400, 'INVALID_ORDER_AMOUNT');
-  }
 
-  const shortcode  = process.env.MPESA_SHORTCODE;
-  const passkey    = process.env.MPESA_PASSKEY;
-  const callbackURL = process.env.MPESA_CALLBACK_URL;
-
-  if (!shortcode || !passkey || !callbackURL) {
-    throw new AppError('M-Pesa is not configured. Please contact support.', 503, 'MPESA_NOT_CONFIGURED');
-  }
-
-  const formattedPhone = formatPhone(phone);
   let payment;
   try {
     payment = await Payment.create({
@@ -186,6 +212,91 @@ const initiateStkPush = async (orderId, phone) => {
     merchantRequestId: MerchantRequestID,
     paymentId:         payment._id
   };
+};
+
+// ── CHANGE PAYMENT METHOD ─────────────────────────────────────────────────────
+// Lets a customer move an unpaid, still-pending order between M-Pesa, pay-on-pickup
+// and pay-on-delivery. Without this, "Pay on Pickup Instead" after a failed STK push
+// only changed what the screen said — the order stayed M-Pesa, and the approval gate
+// (M-Pesa must be paid first) meant it could never be approved. Ownership is checked
+// by the caller (payment.controller), the same way as for initiate.
+const STK_IN_FLIGHT_MS = 90_000;
+
+const changePaymentMethod = async (orderId, newMethod) => {
+  if (!Object.values(PAYMENT_METHODS).includes(newMethod)) {
+    throw new AppError('Invalid payment method', 400, 'INVALID_PAYMENT_METHOD');
+  }
+  const order = await Order.findById(orderId);
+  if (!order) throw new AppError('Order not found', 404, 'ORDER_NOT_FOUND');
+  if (order.status !== 'pending') {
+    throw new AppError('Payment can only be changed while the order is awaiting approval.', 400, 'ORDER_NOT_EDITABLE');
+  }
+  if (order.paymentStatus === PAYMENT_STATUSES.PAID) {
+    throw new AppError('This order has already been paid', 400, 'ALREADY_PAID');
+  }
+  if (order.paymentMethod === newMethod) return order;
+
+  const settings = await settingsService.getSettings(order.branchId);
+  if (newMethod === PAYMENT_METHODS.MPESA && !settings.allowMpesa) {
+    throw new AppError('M-Pesa payments are currently unavailable.', 400, 'PAYMENT_METHOD_DISABLED');
+  }
+  if (newMethod === PAYMENT_METHODS.PICKUP) {
+    if (!settings.allowPayOnPickup) throw new AppError('Pay on pickup is currently unavailable.', 400, 'PAYMENT_METHOD_DISABLED');
+    if (order.deliveryMethod !== 'pickup') throw new AppError('Pay on pickup is only available for pickup orders.', 400, 'INVALID_PAYMENT_METHOD');
+  }
+  if (newMethod === PAYMENT_METHODS.DELIVERY) {
+    if (!settings.allowCashOnDelivery) throw new AppError('Cash on delivery is currently unavailable.', 400, 'PAYMENT_METHOD_DISABLED');
+    if (order.deliveryMethod !== 'delivery') throw new AppError('Pay on delivery is only available for delivery orders.', 400, 'INVALID_PAYMENT_METHOD');
+  }
+
+  // Don't pull the rug out from under an STK prompt the customer may be answering.
+  if (order.paymentStatus === PAYMENT_STATUSES.PENDING && order.paymentId) {
+    const inflight = await Payment.findById(order.paymentId).select('createdAt status').lean();
+    if (inflight?.status === PAYMENT_STATUSES.PENDING
+        && Date.now() - new Date(inflight.createdAt).getTime() < STK_IN_FLIGHT_MS) {
+      throw new AppError('A payment prompt was just sent. Please wait a minute before changing the payment method.', 400, 'PAYMENT_IN_PROGRESS');
+    }
+  }
+
+  const previous = order.paymentMethod;
+  const actorId = order.userId || order.guestId;
+  const updated = await Order.findOneAndUpdate(
+    { _id: orderId, status: 'pending', paymentStatus: { $ne: PAYMENT_STATUSES.PAID } },
+    {
+      paymentMethod: newMethod,
+      paymentStatus: PAYMENT_STATUSES.UNPAID,
+      paymentId: null,
+      $push: {
+        statusHistory: {
+          status: 'pending', changedAt: new Date(), changedBy: actorId,
+          note: `Payment method changed from ${previous} to ${newMethod}`
+        }
+      }
+    },
+    { new: true }
+  );
+  if (!updated) throw new AppError('This order can no longer be changed', 409, 'ORDER_NOT_EDITABLE');
+
+  // Any open attempt on the old method is dead — mark it so a late callback is
+  // reconciled (late-success alert) rather than silently flipping a pickup order to paid.
+  if (order.paymentId) {
+    await Payment.findOneAndUpdate(
+      { _id: order.paymentId, status: PAYMENT_STATUSES.PENDING },
+      { status: PAYMENT_STATUSES.FAILED }
+    ).catch(err => logger.error('[payment] Failed to close old payment on method change', { orderId, err: err.message }));
+  }
+
+  await activityLogService.log({
+    actorId,
+    actorRole: order.userId ? 'customer' : 'guest',
+    action: LOG_ACTIONS.PAYMENT_METHOD_CHANGED,
+    branchId: order.branchId,
+    targetId: order._id,
+    targetType: 'Order',
+    detail: { orderRef: order.orderRef, from: previous, to: newMethod }
+  });
+
+  return updated;
 };
 
 // ── HANDLE SAFARICOM CALLBACK ─────────────────────────────────────────────────
@@ -347,24 +458,58 @@ const handleCallback = async (callbackData) => {
       return { success: false, status: 'order_terminal', mpesaTransactionId };
     }
 
-    const claimed = await Payment.findOneAndUpdate(
-      { _id: payment._id, status: payment.status },
-      {
-        status:            PAYMENT_STATUSES.PAID,
-        mpesaTransactionId,
-        paidAt:            new Date(),
-        safaricomTimestamp
-      },
-      { new: true }
-    );
+    // Payment and Order flip to PAID together. As two independent writes a crash
+    // between them left a paid Payment on an order still showing unpaid (and the
+    // eTIMS/approval gates then never opened).
+    let claimed = null;
+    let paidOrder = null;
+    const paySession = await mongoose.startSession();
+    try {
+      await paySession.withTransaction(async () => {
+        claimed = await Payment.findOneAndUpdate(
+          { _id: payment._id, status: payment.status },
+          {
+            status:            PAYMENT_STATUSES.PAID,
+            mpesaTransactionId,
+            paidAt:            new Date(),
+            safaricomTimestamp
+          },
+          { new: true, session: paySession }
+        );
+        if (!claimed) return;
+        paidOrder = await Order.findByIdAndUpdate(
+          payment.orderId,
+          { paymentStatus: PAYMENT_STATUSES.PAID },
+          { session: paySession }
+        ).select('branchId');
+      });
+    } finally {
+      paySession.endSession();
+    }
     if (!claimed) {
       logger.info('[M-PESA] Duplicate callback ignored (success path)', { CheckoutRequestID });
       return { success: true, message: 'Already processed' };
     }
 
-    const paidOrder = await Order.findByIdAndUpdate(payment.orderId, {
-      paymentStatus: PAYMENT_STATUSES.PAID
-    }).select('branchId');
+    // Overpayments are kept (never rejected) but must not just vanish into a log
+    // line — someone has to return the surplus.
+    if (Math.ceil(paidAmount) > Math.ceil(payment.amount)) {
+      const surplus = Math.ceil(paidAmount) - Math.ceil(payment.amount);
+      await activityLogService.log({
+        actorId:    payment.orderId,
+        actorRole:  'customer',
+        action:     LOG_ACTIONS.PAYMENT_OVERPAID,
+        branchId:   paidOrder?.branchId || null,
+        targetId:   payment._id,
+        targetType: 'Payment',
+        detail:     { mpesaTransactionId, expected: payment.amount, received: paidAmount, surplus }
+      });
+      alertService.sendAlert(
+        'MPESA_OVERPAYMENT',
+        { 'M-Pesa receipt': mpesaTransactionId || 'unknown', Expected: payment.amount, Received: paidAmount, 'Surplus to return': surplus },
+        String(payment._id)
+      ).catch(() => {});
+    }
 
     await activityLogService.log({
       actorId:    payment.orderId,
@@ -381,6 +526,7 @@ const handleCallback = async (callbackData) => {
     etimsService.submitInvoice(payment.orderId).catch(err =>
       logger.error('[eTIMS] Invoice submission failed after M-Pesa callback', { orderId: payment.orderId, err: err.message })
     );
+    emitOrderPaid(payment.orderId);
 
     return { success: true, status: 'paid', mpesaTransactionId };
 
@@ -484,6 +630,17 @@ const manualConfirmPayment = async (orderId, adminId, transactionRef, actorRole 
   if (!order) throw new AppError('Order not found', 404, 'ORDER_NOT_FOUND');
   if (order.paymentStatus === PAYMENT_STATUSES.PAID) {
     throw new AppError('Payment is already confirmed', 400, 'ALREADY_PAID');
+  }
+  // A cancelled/rejected order has had its stock released and, if it was paid, its
+  // refund recorded — confirming a payment on it would leave a cancelled order
+  // marked PAID with nothing owed back. If real money arrived for it, that is a
+  // refund case, not a confirmation.
+  if (['cancelled', 'rejected'].includes(order.status)) {
+    throw new AppError(
+      `This order was ${order.status}, so a payment cannot be confirmed on it. If money was received, record a refund instead.`,
+      400,
+      'ORDER_NOT_PAYABLE'
+    );
   }
 
   const isMpesa = order.paymentMethod === PAYMENT_METHODS.MPESA;
@@ -602,6 +759,7 @@ const manualConfirmPayment = async (orderId, adminId, transactionRef, actorRole 
   etimsService.submitInvoice(orderId).catch(err =>
     logger.error('[eTIMS] Invoice submission failed after manual confirmation', { orderId, err: err.message })
   );
+  emitOrderPaid(orderId);
 
   return payment;
 };
@@ -610,5 +768,6 @@ module.exports = {
   initiateStkPush,
   handleCallback,
   checkPaymentStatus,
-  manualConfirmPayment
+  manualConfirmPayment,
+  changePaymentMethod
 };

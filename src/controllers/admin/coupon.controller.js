@@ -36,7 +36,7 @@ const create = async (req, res, next) => {
     const coupon = await couponService.create(req.body, req.branchId, req.user.id);
     await activityLogService.log({
       actorId: req.user.id, actorRole: req.user.role,
-      action: LOG_ACTIONS.SETTINGS_UPDATED,
+      action: LOG_ACTIONS.COUPON_CREATED,
       branchId: req.branchId, targetId: coupon._id, targetType: 'Coupon',
       detail: { code: coupon.code, action: 'created' },
     });
@@ -49,7 +49,7 @@ const update = async (req, res, next) => {
     const coupon = await couponService.update(req.params.id, req.body, req.branchId);
     await activityLogService.log({
       actorId: req.user.id, actorRole: req.user.role,
-      action: LOG_ACTIONS.SETTINGS_UPDATED,
+      action: LOG_ACTIONS.COUPON_UPDATED,
       branchId: req.branchId, targetId: coupon._id, targetType: 'Coupon',
       detail: { code: coupon.code, action: 'updated' },
     });
@@ -62,7 +62,7 @@ const remove = async (req, res, next) => {
     await couponService.remove(req.params.id, req.branchId);
     await activityLogService.log({
       actorId: req.user.id, actorRole: req.user.role,
-      action: LOG_ACTIONS.SETTINGS_UPDATED,
+      action: LOG_ACTIONS.COUPON_DELETED,
       branchId: req.branchId, targetId: req.params.id, targetType: 'Coupon',
       detail: { action: 'deleted' },
     });
@@ -79,7 +79,7 @@ const validatePublic = async (req, res, next) => {
     // shared across branches) — the resolved shop branch travels in the body,
     // same as order creation. req.branchId only applies to staff/driver JWTs.
     const branchId = req.body.branchId || req.branchId || (await require('../../services/defaultBranch.service').getDefaultBranch())?._id;
-    const { coupon, discountAmount } = await couponService.validate(code, branchId, userId, Number(subtotal));
+    const { coupon, discountAmount } = await couponService.validate(code, branchId, userId, Number(subtotal), req.body.phone || null);
     return success(res, {
       code: coupon.code,
       discountType: coupon.discountType,

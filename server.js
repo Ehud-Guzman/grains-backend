@@ -74,6 +74,9 @@ if (process.env.NODE_ENV === 'production') {
   const missingGroups = [
     ['Cloudinary (product images will fail to upload)', ['CLOUDINARY_CLOUD_NAME', 'CLOUDINARY_API_KEY', 'CLOUDINARY_API_SECRET']],
     ['M-Pesa (STK push will fail AFTER the order is created)', ['MPESA_CONSUMER_KEY', 'MPESA_CONSUMER_SECRET', 'MPESA_SHORTCODE', 'MPESA_PASSKEY', 'MPESA_CALLBACK_URL']],
+    // Admin and superadmin sign-in needs a one-time code. SMS is sandbox until Africa's Talking
+    // goes live, so email is the channel that actually arrives — without it nobody can log in.
+    ['Gmail (admin sign-in codes and order emails will not send)', ['GMAIL_USER', 'GMAIL_APP_PASSWORD']],
   ].map(([label, keys]) => [label, keys.filter(k => !process.env[k])]).filter(([, keys]) => keys.length);
   for (const [label, keys] of missingGroups) {
     console.warn(`[STARTUP WARNING] ${label}: missing ${keys.join(', ')}`);

@@ -34,6 +34,25 @@ router.post(
   paymentController.initiate
 );
 
+// POST /api/payments/change-method — move an unpaid pending order to another payment
+// method (e.g. "pay on pickup instead" after a failed STK push). Same ownership proof
+// as initiate; stkLimiter keeps it from being used to hammer the order.
+router.post(
+  '/change-method',
+  stkLimiter,
+  optionalAuth,
+  [
+    body('orderId').trim().isMongoId().withMessage('Invalid order ID'),
+    body('paymentMethod').isIn(['mpesa', 'pickup', 'delivery']).withMessage('Invalid payment method'),
+    body('contactPhone')
+      .optional({ nullable: true, checkFalsy: true })
+      .trim()
+      .matches(/^(\+254|0)[17]\d{8}$/).withMessage('Enter a valid Kenyan contact phone number')
+  ],
+  validate,
+  paymentController.changeMethod
+);
+
 // POST /api/payments/mpesa/callback — Safaricom calls this
 // Guards: rate limit → IP whitelist (prod) → payload structure check → controller
 router.post(

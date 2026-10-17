@@ -153,8 +153,8 @@ const validateRow = (row, rowNum) => {
     if (!quoteOnly) {
       if (priceRaw === '' || priceRaw === null || priceRaw === undefined) {
         errors.push('Price KES is required (or set Quote Only to TRUE)');
-      } else if (isNaN(Number(priceRaw)) || Number(priceRaw) < 0) {
-        errors.push(`Price KES must be a positive number (got: "${priceRaw}")`);
+      } else if (isNaN(Number(priceRaw)) || Number(priceRaw) <= 0) {
+        errors.push(`Price KES must be above 0 (got: "${priceRaw}") — or set Quote Only to TRUE`);
       }
       if (stockRaw !== '' && stockRaw !== null && stockRaw !== undefined) {
         if (isNaN(Number(stockRaw)) || Number(stockRaw) < 0) {
@@ -216,8 +216,16 @@ const buildMergedVarieties = (existingVarieties = [], importedVarieties = []) =>
       const pkgKey = String(importedPkg.size || '').trim().toLowerCase();
       const existingPkg = existingPackagingMap.get(pkgKey);
 
+      // Start from the stored packaging so fields the spreadsheet has no column for
+      // (volume pricing tiers, cost price) survive a re-import — building a fresh
+      // object here silently wiped them. Keep the stored spelling of the size too:
+      // open orders and carts address it by exact text.
+      const kept = existingPkg
+        ? (typeof existingPkg.toObject === 'function' ? existingPkg.toObject() : { ...existingPkg })
+        : {};
       return {
-        size: importedPkg.size,
+        ...kept,
+        size: existingPkg?.size ?? importedPkg.size,
         priceKES: importedPkg.quoteOnly
           ? null
           : (importedPkg.priceKES ?? existingPkg?.priceKES ?? null),
@@ -238,7 +246,7 @@ const buildMergedVarieties = (existingVarieties = [], importedVarieties = []) =>
     existingMap.delete(varietyKey);
 
     return {
-      varietyName: importedVariety.varietyName,
+      varietyName: existingVariety?.varietyName ?? importedVariety.varietyName,
       description: importedVariety.description || existingVariety?.description || '',
       imageURLs: importedVariety.imageURLs?.length > 0
         ? mergeUniqueStrings(existingVariety?.imageURLs, importedVariety.imageURLs)
@@ -329,7 +337,9 @@ const importProducts = async (fileBuffer, adminId, options = {}) => {
     const productName = String(row[0] || '').trim();
     const category    = String(row[1] || '').trim();
     const productDesc = String(row[2] || '').trim();
-    const isActive    = String(row[3] || '').trim().toUpperCase() === 'TRUE';
+    // Blank = leave an existing product as it is (it used to switch the product OFF).
+    const activeRaw   = String(row[3] || '').trim().toUpperCase();
+    const isActive    = activeRaw === '' ? null : activeRaw === 'TRUE';
     const varietyName = String(row[4] || '').trim();
     const varietyDesc = String(row[5] || '').trim();
     const pkgSize     = String(row[6] || '').trim();
@@ -357,7 +367,7 @@ const importProducts = async (fileBuffer, adminId, options = {}) => {
     }
 
     const product = productMap.get(key);
-    product.isActive = isActive;
+    if (isActive !== null) product.isActive = isActive;
     product.taxable = taxable;
     product.category = category;
     if (productDesc) product.description = productDesc;
@@ -415,7 +425,7 @@ const importProducts = async (fileBuffer, adminId, options = {}) => {
           name: productData.name,
           category: productData.category,
           description: productData.description || '',
-          isActive: productData.isActive,
+          ...(productData.isActive !== null && { isActive: productData.isActive }),
           taxable: productData.taxable,
           imageURLs: productData.imageURLs,
           varieties,
@@ -553,7 +563,15 @@ const importProducts = async (fileBuffer, adminId, options = {}) => {
           if (!dryRun) await assertProductCapNotReached(branch._id);
           results.created++;
           if (!dryRun) {
-            const newProduct = await Product.create({ ...payload, createdBy: adminId });
+            // New packaging with a blank stock cell starts at 0 — null made the item
+            // look "low stock" with no number and broke stock arithmetic.
+            const createVarieties = varieties.map(v => ({
+              ...v,
+              packaging: v.packaging.map(p => (p.quoteOnly ? p : { ...p, stock: p.stock ?? 0 })),
+            }));
+            const newProduct = await Product.create({
+              ...payload, isActive: payload.isActive ?? false, varieties: createVarieties, createdBy: adminId,
+            });
             await activityLogService.log({
               actorId: adminId,
               actorRole,

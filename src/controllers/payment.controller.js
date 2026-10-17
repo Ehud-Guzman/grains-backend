@@ -6,6 +6,41 @@ const Order = require('../models/Order');
 const Guest = require('../models/Guest');
 const { formatPhone } = require('../utils/mpesaHelpers');
 
+// Ownership check shared by every customer-facing payment action — prevents acting
+// on someone else's order. Returns null when the caller owns the order, otherwise
+// the 404 response to send (404, not 403, so order ids can't be probed).
+const ownershipFailure = async (req, res, orderId, contactPhone, fallbackPhone) => {
+  const order = await Order.findById(orderId).select('userId guestId').lean();
+  if (!order) return error(res, 'Order not found', 'NOT_FOUND', 404);
+
+  if (req.user) {
+    // Authenticated customer — must own the order
+    if (!order.userId || order.userId.toString() !== req.user.id) {
+      return error(res, 'Order not found', 'NOT_FOUND', 404);
+    }
+    return null;
+  }
+
+  // Guest — ownership is proven by knowing the CONTACT phone the order was
+  // placed under. The STK target (`phone`) may legitimately be a different
+  // number (paying from a spouse's or business line), so it must not be the
+  // thing we verify — previously it was, and any guest paying with a
+  // different M-Pesa number was dead-ended with a 404. `contactPhone` falls
+  // back to `phone` for older clients that only send one number.
+  if (!order.guestId) return error(res, 'Order not found', 'NOT_FOUND', 404);
+  const guest = await Guest.findById(order.guestId).select('phone').lean();
+  let ownershipPhone;
+  try {
+    ownershipPhone = formatPhone(contactPhone || fallbackPhone);
+  } catch {
+    return error(res, 'Order not found', 'NOT_FOUND', 404);
+  }
+  if (!guest || formatPhone(guest.phone) !== ownershipPhone) {
+    return error(res, 'Order not found', 'NOT_FOUND', 404);
+  }
+  return null;
+};
+
 // POST /api/payments/mpesa/initiate — guest or authenticated customer
 const initiate = async (req, res, next) => {
   try {
@@ -13,38 +48,23 @@ const initiate = async (req, res, next) => {
     if (!orderId || !phone) {
       return error(res, 'orderId and phone are required', 'MISSING_FIELDS');
     }
-
-    // Ownership check — prevents triggering STK push on someone else's order
-    const order = await Order.findById(orderId).select('userId guestId').lean();
-    if (!order) return error(res, 'Order not found', 'NOT_FOUND', 404);
-
-    if (req.user) {
-      // Authenticated customer — must own the order
-      if (!order.userId || order.userId.toString() !== req.user.id) {
-        return error(res, 'Order not found', 'NOT_FOUND', 404);
-      }
-    } else {
-      // Guest — ownership is proven by knowing the CONTACT phone the order was
-      // placed under. The STK target (`phone`) may legitimately be a different
-      // number (paying from a spouse's or business line), so it must not be the
-      // thing we verify — previously it was, and any guest paying with a
-      // different M-Pesa number was dead-ended with a 404. `contactPhone` falls
-      // back to `phone` for older clients that only send one number.
-      if (!order.guestId) return error(res, 'Order not found', 'NOT_FOUND', 404);
-      const guest = await Guest.findById(order.guestId).select('phone').lean();
-      let ownershipPhone;
-      try {
-        ownershipPhone = formatPhone(contactPhone || phone);
-      } catch {
-        return error(res, 'Order not found', 'NOT_FOUND', 404);
-      }
-      if (!guest || formatPhone(guest.phone) !== ownershipPhone) {
-        return error(res, 'Order not found', 'NOT_FOUND', 404);
-      }
-    }
+    const denied = await ownershipFailure(req, res, orderId, contactPhone, phone);
+    if (denied) return denied;
 
     const result = await paymentService.initiateStkPush(orderId, phone);
     return success(res, result, 'STK push sent to your phone');
+  } catch (err) { next(err); }
+};
+
+// POST /api/payments/change-method — move an unpaid pending order to another payment method
+const changeMethod = async (req, res, next) => {
+  try {
+    const { orderId, paymentMethod, contactPhone } = req.body;
+    const denied = await ownershipFailure(req, res, orderId, contactPhone, contactPhone);
+    if (denied) return denied;
+
+    const order = await paymentService.changePaymentMethod(orderId, paymentMethod);
+    return success(res, { orderId: order._id, paymentMethod: order.paymentMethod, paymentStatus: order.paymentStatus }, 'Payment method updated');
   } catch (err) { next(err); }
 };
 
@@ -84,4 +104,4 @@ const manualConfirm = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-module.exports = { initiate, callback, getStatus, manualConfirm };
+module.exports = { initiate, changeMethod, callback, getStatus, manualConfirm };

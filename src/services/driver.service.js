@@ -9,6 +9,7 @@ const { startOfDayEAT } = require('../utils/businessTime');
 const { withGuestFallbackList } = require('../utils/orderGuestFallback');
 const { escapeRegex } = require('../utils/escapeRegex');
 const { bumpTokenValidAfter } = require('../utils/tokenValidAfter');
+const { toLocalPhone } = require('../utils/mpesaHelpers');
 
 const BCRYPT_WORK_FACTOR = AUTH_LIMITS.BCRYPT_WORK_FACTOR;
 
@@ -50,7 +51,10 @@ const getDriverById = async (driverId, branchId) => {
 
 // ── CREATE DRIVER ACCOUNT ─────────────────────────────────────────────────────
 const createDriver = async ({ name, phone, email, password, vehicleType, vehiclePlate }, adminId, branchId, actorRole = ROLES.ADMIN) => {
-  const existing = await User.findOne({ phone });
+  const { validatePasswordStrength, findUserByPhone } = require('./auth.service');
+  validatePasswordStrength(password);
+
+  const existing = await findUserByPhone(phone);
   if (existing) throw new AppError('An account with this phone number already exists', 409, 'PHONE_TAKEN');
 
   if (email) {
@@ -62,7 +66,7 @@ const createDriver = async ({ name, phone, email, password, vehicleType, vehicle
 
   const driver = await User.create({
     name,
-    phone,
+    phone: toLocalPhone(phone),
     email: email || null,
     passwordHash,
     role: ROLES.DRIVER,
@@ -173,7 +177,7 @@ const lockDriver = async (driverId, adminId, branchId, actorRole = ROLES.ADMIN) 
 const unlockDriver = async (driverId, adminId, branchId, actorRole = ROLES.ADMIN) => {
   const driver = await User.findOneAndUpdate(
     { _id: driverId, role: ROLES.DRIVER, branchId },
-    { isLocked: false, failedLoginCount: 0 },
+    { isLocked: false, failedLoginCount: 0, loginLockedUntil: null },
     { new: true }
   );
   if (!driver) throw new AppError('Driver not found', 404, 'DRIVER_NOT_FOUND');
@@ -200,7 +204,7 @@ const resetDriverPassword = async (driverId, newPassword, adminId, branchId, act
   // means a lost phone or offboarding (see auth.middleware tokenValidAfter check).
   const driver = await User.findOneAndUpdate(
     { _id: driverId, role: ROLES.DRIVER, branchId },
-    { passwordHash, failedLoginCount: 0, isLocked: false, tokenValidAfter: bumpTokenValidAfter() },
+    { passwordHash, failedLoginCount: 0, loginLockedUntil: null, isLocked: false, tokenValidAfter: bumpTokenValidAfter() },
     { new: true }
   );
   if (!driver) throw new AppError('Driver not found', 404, 'DRIVER_NOT_FOUND');
@@ -259,7 +263,7 @@ const getMyOrders = async (driverId, filters = {}, query = {}, branchId = null) 
   const [total, orders] = await Promise.all([
     Order.countDocuments(match),
     Order.find(match)
-      .select('orderRef status deliveryMethod deliveryAddress total deliveryFee createdAt orderItems userId guestId guestName guestPhone specialInstructions')
+      .select('orderRef status deliveryMethod deliveryAddress deliveryCoordinates total deliveryFee createdAt orderItems userId guestId guestName guestPhone specialInstructions paymentMethod paymentStatus preferredDeliveryDate')
       .populate('userId', 'name phone')
       .populate('guestId', 'name phone')
       .sort({ createdAt: -1 })
@@ -278,7 +282,9 @@ const getMyStats = async (driverId) => {
 
   const [active, completedToday, totalCompleted] = await Promise.all([
     Order.countDocuments({ driverId, status: ORDER_STATUSES.OUT_FOR_DELIVERY }),
-    Order.countDocuments({ driverId, status: ORDER_STATUSES.COMPLETED, updatedAt: { $gte: today } }),
+    // deliveredAt, not updatedAt: a later write to a completed order (eTIMS status,
+    // refund flag) bumps updatedAt and re-counted an old delivery as today's.
+    Order.countDocuments({ driverId, status: ORDER_STATUSES.COMPLETED, deliveredAt: { $gte: today } }),
     Order.countDocuments({ driverId, status: ORDER_STATUSES.COMPLETED })
   ]);
 

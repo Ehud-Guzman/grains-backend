@@ -181,7 +181,9 @@ const getSegments = async (branchId = null) => {
     }
   ]);
 
-  if (stats.length === 0) return { repeat: [], highValue: [], inactive: [] };
+  if (stats.length === 0) {
+    return { repeat: 0, highValue: 0, inactive: 0, repeatIds: [], highValueIds: [], inactiveIds: [] };
+  }
 
   // High value = top 10% by spend
   const sorted = [...stats].sort((a, b) => b.totalSpend - a.totalSpend);
@@ -225,7 +227,7 @@ const lockCustomer = async (userId, adminId, adminRole) => {
 const unlockCustomer = async (userId, adminId, adminRole) => {
   const user = await User.findOneAndUpdate(
     { _id: userId, role: 'customer' },
-    { isLocked: false, failedLoginCount: 0 },
+    { isLocked: false, failedLoginCount: 0, loginLockedUntil: null },
     { new: true }
   );
   if (!user) throw new AppError('Customer not found', 404, 'USER_NOT_FOUND');

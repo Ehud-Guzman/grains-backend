@@ -31,6 +31,7 @@ const { withGuestFallback, withGuestFallbackList } = require('../utils/orderGues
 const { escapeRegex } = require('../utils/escapeRegex');
 const couponService = require('./coupon.service');
 const { startOfMonthEAT } = require('../utils/businessTime');
+const { safeAbort } = require('../utils/transaction');
 
 // Guards against float noise (e.g. 120.10 * 3 === 360.29999999999995) leaking into
 // stored order totals and downstream CSV/eTIMS output — not a business-rounding
@@ -80,6 +81,10 @@ const buildOrderItems = async (cartItems, options = {}) => {
     if (!packaging) throw new AppError(`Packaging ${item.variety} ${item.packaging} not found`, 404, 'PACKAGING_NOT_FOUND');
     if (packaging.quoteOnly) {
       throw new AppError(`${item.variety} ${item.packaging} requires a quote and cannot be ordered online`, 400, 'QUOTE_ONLY');
+    }
+    // A packaging saved without a price (it is nullable) used to sell at KES 0.
+    if (!(Number(packaging.priceKES) > 0)) {
+      throw new AppError(`${item.variety} ${item.packaging} is not available to order online right now`, 409, 'PRICE_NOT_SET');
     }
     if (packaging.stock < item.quantity) {
       throw new AppError(
@@ -138,7 +143,10 @@ const reserveOrderStock = async (order, actorId, actorRole, session) => {
   order.stockReservedAt = new Date();
   order.stockReleasedAt = null;
   order.stockConsumedAt = null;
-  order.statusHistory[0].note = 'Order placed and stock reserved';
+  // Keep whatever the placement note already says (delivery zone, "no location
+  // shared") — overwriting it threw that information away.
+  const placed = order.statusHistory[0].note || 'Order placed';
+  order.statusHistory[0].note = placed.replace(/^Order placed/, 'Order placed and stock reserved');
   await order.save({ session });
 };
 
@@ -150,16 +158,30 @@ const releaseOrderStock = async (order, actorId, session, note) => {
 
   const restocked = [];
   for (const item of order.orderItems) {
-    const { balanceAfter } = await stockService.releaseStock(
-      item.productId,
-      item.variety,
-      item.packaging,
-      item.quantity,
-      order._id,
-      actorId,
-      session,
-      order.branchId
-    );
+    let released;
+    try {
+      released = await stockService.releaseStock(
+        item.productId,
+        item.variety,
+        item.packaging,
+        item.quantity,
+        order._id,
+        actorId,
+        session,
+        order.branchId
+      );
+    } catch (err) {
+      // The line was renamed or removed from the catalogue after the order was
+      // placed. There is nothing left to put the stock back into — letting this
+      // throw made the order impossible to cancel or reject (and auto-cancel failed
+      // every run). Skip the line, keep the rest, and leave a trail.
+      if (err.errorCode !== 'PRODUCT_NOT_FOUND') throw err;
+      logger.warn('[stock] Release skipped — packaging no longer exists', {
+        orderRef: order.orderRef, productId: String(item.productId), variety: item.variety, packaging: item.packaging
+      });
+      continue;
+    }
+    const { balanceAfter } = released;
     if (balanceAfter === item.quantity) {
       restocked.push({
         productId: item.productId,
@@ -388,15 +410,17 @@ const autoCancelExpiredPendingOrders = async (branchId) => {
 
       const restocked = await releaseOrderStock(order, actorId, session, note);
       if (order.couponCode) await couponService.releaseUsage(order.couponCode, order.branchId, session);
-      await order.save({ session });
-      await session.commitTransaction();
-      emitRestockEvents(restocked);
-
       // A PENDING order can already be PAID — order.status only advances to
       // APPROVED on admin action, but an M-Pesa STK payment can succeed while
       // an order still sits PENDING awaiting approval (handleCallback never
       // touches order.status). Same gap as reject()/cancel() — see refundPaymentIfPaid.
-      await refundPaymentIfPaid(order, actorId, order.userId ? 'customer' : 'guest', note);
+      // Inside the transaction so the refund is recorded or the cancel doesn't happen.
+      const refunded = await refundPaymentIfPaid(order, note, session);
+      await order.save({ session });
+      await session.commitTransaction();
+      emitRestockEvents(restocked);
+      if (refunded) await logRefund(order, actorId, order.userId ? 'customer' : 'guest', note);
+      appEvents.emit(ORDER_EVENTS.CANCELLED, { order, branchId: order.branchId, refundOwed: refunded, automatic: true });
 
       await activityLogService.log({
         actorId,
@@ -413,7 +437,7 @@ const autoCancelExpiredPendingOrders = async (branchId) => {
         }
       });
     } catch (err) {
-      await session.abortTransaction();
+      await safeAbort(session);
       // Don't let one order's failure (e.g. a write conflict with a concurrent
       // admin approve()) abort the rest of this cycle's batch — log and move on,
       // the next 5-minute run will pick this order back up if it's still eligible.
@@ -447,6 +471,18 @@ const assertNoDuplicateOrder = async ({ branchId, userId = null, guestId = null,
       'DUPLICATE_SUBMISSION'
     );
   }
+};
+
+// What the order's first history line says. In distance-pricing mode a delivery order
+// with no location shared pays the flat fee and skips the delivery-radius check
+// (the customer's own GPS is the only input) — say so on the order so staff can
+// adjust at approval instead of finding out at the door.
+const placementNote = ({ zoneName, distanceKm, settings, deliveryMethod }) => {
+  if (zoneName) return `Order placed · delivery zone: ${zoneName} (${distanceKm} km)`;
+  if (deliveryMethod === 'delivery' && settings.deliveryPricingMode === 'distance' && distanceKm == null) {
+    return 'Order placed · no location shared, flat delivery fee charged — check distance before approving';
+  }
+  return 'Order placed';
 };
 
 // ── CREATE GUEST ORDER ────────────────────────────────────────────────────────
@@ -483,7 +519,7 @@ const createGuestOrder = async (orderData, branchId) => {
   let couponDiscount = 0;
   if (orderData.couponCode) {
     const { coupon, discountAmount } = await couponService.validate(
-      orderData.couponCode, branchId, null, subtotal
+      orderData.couponCode, branchId, null, subtotal, orderData.phone
     );
     couponCode = coupon.code;
     couponDiscount = discountAmount;
@@ -552,7 +588,7 @@ const createGuestOrder = async (orderData, branchId) => {
       orderRef,
       branchId,
       guestId: guest._id,
-      guestName: guest.name,
+      guestName: orderData.name?.trim() || guest.name,
       guestPhone: guest.phone,
       userId: null,
       orderItems: items,
@@ -582,7 +618,7 @@ const createGuestOrder = async (orderData, branchId) => {
         status: ORDER_STATUSES.PENDING,
         changedAt: new Date(),
         changedBy: guest._id,
-        note: zoneName ? `Order placed · delivery zone: ${zoneName} (${distanceKm} km)` : 'Order placed'
+        note: placementNote({ zoneName, distanceKm, settings, deliveryMethod: orderData.deliveryMethod })
       }]
     }], { session });
 
@@ -608,7 +644,7 @@ const createGuestOrder = async (orderData, branchId) => {
 
     return order;
   } catch (err) {
-    await session.abortTransaction();
+    await safeAbort(session);
     throw err;
   } finally {
     session.endSession();
@@ -707,7 +743,7 @@ const createCustomerOrder = async (orderData, userId, branchId) => {
         status: ORDER_STATUSES.PENDING,
         changedAt: new Date(),
         changedBy: userId,
-        note: zoneName ? `Order placed · delivery zone: ${zoneName} (${distanceKm} km)` : 'Order placed'
+        note: placementNote({ zoneName, distanceKm, settings, deliveryMethod: orderData.deliveryMethod })
       }]
     }], { session });
 
@@ -733,7 +769,7 @@ const createCustomerOrder = async (orderData, userId, branchId) => {
 
     return order;
   } catch (err) {
-    await session.abortTransaction();
+    await safeAbort(session);
     throw err;
   } finally {
     session.endSession();
@@ -820,7 +856,7 @@ const getAll = async (filters = {}, query = {}, branchId) => {
 };
 
 // ── GET MY ORDERS (CUSTOMER) ──────────────────────────────────────────────────
-const CUSTOMER_ORDER_FIELDS = 'orderRef orderItems subtotal deliveryFee vatEnabled vatRate vatAmount total deliveryMethod deliveryAddress paymentMethod paymentStatus status rejectionReason specialInstructions buyerKraPin branchId createdAt updatedAt statusHistory driverId preferredDriverId deliveredAt';
+const CUSTOMER_ORDER_FIELDS = 'orderRef orderItems subtotal deliveryFee couponCode couponDiscount vatEnabled vatRate vatAmount total deliveryMethod deliveryAddress paymentMethod paymentStatus status rejectionReason specialInstructions buyerKraPin branchId createdAt updatedAt statusHistory driverId preferredDriverId deliveredAt';
 
 const getMyOrders = async (userId, query = {}, branchId) => {
   // Auto-cancel is handled by autoCancel.job.js — no per-request call needed
@@ -872,7 +908,7 @@ const getMyOrderById = async (userId, orderId) => {
 // Field list mirrors CUSTOMER_ORDER_FIELDS — this is an unauthenticated lookup
 // (phone + ref only), so GPS coordinates, buyerKraPin, and statusHistory actor
 // IDs must never be exposed here even though they're safe on the authed routes.
-const TRACK_ORDER_FIELDS = 'orderRef orderItems subtotal deliveryFee vatEnabled vatRate vatAmount total deliveryMethod paymentMethod paymentStatus status rejectionReason createdAt statusHistory.status statusHistory.changedAt statusHistory.note';
+const TRACK_ORDER_FIELDS = 'orderRef orderItems subtotal deliveryFee couponCode couponDiscount vatEnabled vatRate vatAmount total deliveryMethod paymentMethod paymentStatus status rejectionReason createdAt statusHistory.status statusHistory.changedAt statusHistory.note';
 
 const trackByRef = async (phone, orderRef) => {
   // Auto-cancel is handled by autoCancel.job.js — no per-request call needed
@@ -977,7 +1013,7 @@ const approve = async (orderId, adminId, branchId, actorRole = 'supervisor') => 
     return order;
 
   } catch (err) {
-    await session.abortTransaction();
+    await safeAbort(session);
     throw err;
   } finally {
     session.endSession();
@@ -1013,11 +1049,11 @@ const reject = async (orderId, adminId, reason, branchId, actorRole = 'superviso
 
     const restocked = await releaseOrderStock(order, adminId, session, reason);
     if (order.couponCode) await couponService.releaseUsage(order.couponCode, order.branchId, session);
+    const refunded = await refundPaymentIfPaid(order, reason, session);
     await order.save({ session });
     await session.commitTransaction();
     emitRestockEvents(restocked);
-
-    await refundPaymentIfPaid(order, adminId, actorRole, reason);
+    if (refunded) await logRefund(order, adminId, actorRole, reason);
 
     await activityLogService.log({
       actorId: adminId,
@@ -1036,7 +1072,7 @@ const reject = async (orderId, adminId, reason, branchId, actorRole = 'superviso
 
     return order;
   } catch (err) {
-    await session.abortTransaction();
+    await safeAbort(session);
     throw err;
   } finally {
     session.endSession();
@@ -1047,30 +1083,38 @@ const reject = async (orderId, adminId, reason, branchId, actorRole = 'superviso
 // Mirrors the refund side-effect in reject(): any terminal transition away from
 // a paid order must flip the Payment to REFUNDED so the money owed is tracked,
 // not just the stock/coupon release.
-const refundPaymentIfPaid = async (order, actorId, actorRole, reason) => {
-  if (order.paymentStatus === PAYMENT_STATUSES.PAID && order.paymentId) {
-    await Payment.findByIdAndUpdate(order.paymentId, {
-      status:       PAYMENT_STATUSES.REFUNDED,
-      refundedAt:   new Date(),
-      refundReason: reason
-    });
-    // Mirror onto the order — leaving it 'paid' shows a green Paid badge on a
-    // cancelled order and hides that money is owed back. 'refunded' here means
-    // "refund recorded/owed"; the actual M-Pesa reversal is a manual step the
-    // admin does off-system, tracked via the Payment record + activity log.
-    await Order.findByIdAndUpdate(order._id, { paymentStatus: PAYMENT_STATUSES.REFUNDED });
-    order.paymentStatus = PAYMENT_STATUSES.REFUNDED;
-    await activityLogService.log({
-      actorId,
-      actorRole,
-      action:     LOG_ACTIONS.PAYMENT_REFUNDED,
-      branchId:   order.branchId,
-      targetId:   order.paymentId,
-      targetType: 'Payment',
-      detail:     { orderRef: order.orderRef, reason }
-    });
-  }
+//
+// Runs INSIDE the cancel/reject transaction (pass the session), together with the
+// stock release and coupon release. It used to run after commit as separate writes:
+// a failure there left a cancelled order still marked paid — money owed, not
+// recorded — and surfaced to the caller as a transaction error. It only touches the
+// Payment document and sets order.paymentStatus in memory; the caller's own
+// order.save({ session }) persists the order side. Returns true when a refund was
+// recorded, so the caller can log it (logRefund) after commit.
+const refundPaymentIfPaid = async (order, reason, session) => {
+  if (!(order.paymentStatus === PAYMENT_STATUSES.PAID && order.paymentId)) return false;
+  await Payment.findByIdAndUpdate(order.paymentId, {
+    status:       PAYMENT_STATUSES.REFUNDED,
+    refundedAt:   new Date(),
+    refundReason: reason
+  }, session ? { session } : {});
+  // Mirror onto the order — leaving it 'paid' shows a green Paid badge on a
+  // cancelled order and hides that money is owed back. 'refunded' here means
+  // "refund recorded/owed"; the actual M-Pesa reversal is a manual step the
+  // admin does off-system, tracked via the Payment record + activity log.
+  order.paymentStatus = PAYMENT_STATUSES.REFUNDED;
+  return true;
 };
+
+const logRefund = (order, actorId, actorRole, reason) => activityLogService.log({
+  actorId,
+  actorRole,
+  action:     LOG_ACTIONS.PAYMENT_REFUNDED,
+  branchId:   order.branchId,
+  targetId:   order.paymentId,
+  targetType: 'Payment',
+  detail:     { orderRef: order.orderRef, reason }
+});
 
 // ── UPDATE STATUS ─────────────────────────────────────────────────────────────
 // SRS 5.2 - staff+ moves order through the pipeline
@@ -1116,9 +1160,11 @@ const updateStatus = async (orderId, newStatus, adminId, note = null, branchId, 
     });
 
     let restocked = [];
+    let refunded = false;
     if (newStatus === ORDER_STATUSES.CANCELLED) {
       restocked = await releaseOrderStock(order, adminId, session, note || 'Cancelled by staff');
       if (order.couponCode) await couponService.releaseUsage(order.couponCode, order.branchId, session);
+      refunded = await refundPaymentIfPaid(order, note || 'Cancelled by staff', session);
     }
 
     if (newStatus === ORDER_STATUSES.COMPLETED && !order.deliveredAt) {
@@ -1129,8 +1175,12 @@ const updateStatus = async (orderId, newStatus, adminId, note = null, branchId, 
     await session.commitTransaction();
     emitRestockEvents(restocked);
 
+    if (refunded) await logRefund(order, adminId, actorRole, note || 'Cancelled by staff');
     if (newStatus === ORDER_STATUSES.CANCELLED) {
-      await refundPaymentIfPaid(order, adminId, actorRole, note || 'Cancelled by staff');
+      appEvents.emit(ORDER_EVENTS.CANCELLED, { order, branchId: order.branchId, refundOwed: refunded, reason: note });
+    }
+    if (newStatus === ORDER_STATUSES.COMPLETED) {
+      appEvents.emit(ORDER_EVENTS.COMPLETED, { order, branchId: order.branchId });
     }
 
     await activityLogService.log({
@@ -1172,7 +1222,7 @@ const updateStatus = async (orderId, newStatus, adminId, note = null, branchId, 
 
     return order;
   } catch (err) {
-    await session.abortTransaction();
+    await safeAbort(session);
     throw err;
   } finally {
     session.endSession();
@@ -1215,11 +1265,13 @@ const cancel = async (orderId, userId) => {
 
     const restocked = await releaseOrderStock(order, userId, session, 'Cancelled by customer');
     if (order.couponCode) await couponService.releaseUsage(order.couponCode, order.branchId, session);
+    const refunded = await refundPaymentIfPaid(order, 'Cancelled by customer', session);
     await order.save({ session });
     await session.commitTransaction();
     emitRestockEvents(restocked);
 
-    await refundPaymentIfPaid(order, userId, 'customer', 'Cancelled by customer');
+    if (refunded) await logRefund(order, userId, 'customer', 'Cancelled by customer');
+    appEvents.emit(ORDER_EVENTS.CANCELLED, { order, branchId: order.branchId, refundOwed: refunded, byCustomer: true });
 
     await activityLogService.log({
       actorId: userId,
@@ -1236,7 +1288,7 @@ const cancel = async (orderId, userId) => {
 
     return order;
   } catch (err) {
-    await session.abortTransaction();
+    await safeAbort(session);
     throw err;
   } finally {
     session.endSession();
@@ -1246,38 +1298,36 @@ const cancel = async (orderId, userId) => {
 // ── BULK APPROVE ──────────────────────────────────────────────────────────────
 // SRS 5.2 admin - approve multiple pending orders
 // Each order runs in its own session (partial success semantics: some can fail
-// while others succeed). Promise.allSettled processes all concurrently.
+// while others succeed). Processed one at a time — fired concurrently, up to 50
+// transactions at once contended for the connection pool and for the same product
+// documents (shared stock lines), turning ordinary approvals into write conflicts.
 const bulkApprove = async (orderIds, adminId, branchId, actorRole = 'supervisor') => {
-  const settled = await Promise.allSettled(
-    orderIds.map(id => approve(id, adminId, branchId, actorRole))
-  );
-
-  return settled.reduce((acc, result, i) => {
-    if (result.status === 'fulfilled') {
-      acc.approved.push(result.value.orderRef);
-    } else {
-      acc.failed.push({ id: orderIds[i], error: result.reason?.message || 'Unknown error' });
+  const result = { approved: [], failed: [] };
+  for (const id of orderIds) {
+    try {
+      const order = await approve(id, adminId, branchId, actorRole);
+      result.approved.push(order.orderRef);
+    } catch (err) {
+      result.failed.push({ id, error: err?.message || 'Unknown error' });
     }
-    return acc;
-  }, { approved: [], failed: [] });
+  }
+  return result;
 };
 
 // ── BULK REJECT ───────────────────────────────────────────────────────────────
 const bulkReject = async (orderIds, adminId, reason, branchId, actorRole = 'supervisor') => {
   validateReason(reason, 'A rejection reason');
 
-  const settled = await Promise.allSettled(
-    orderIds.map(id => reject(id, adminId, reason, branchId, actorRole))
-  );
-
-  return settled.reduce((acc, result, i) => {
-    if (result.status === 'fulfilled') {
-      acc.rejected.push(result.value.orderRef);
-    } else {
-      acc.failed.push({ id: orderIds[i], error: result.reason?.message || 'Unknown error' });
+  const result = { rejected: [], failed: [] };
+  for (const id of orderIds) {
+    try {
+      const order = await reject(id, adminId, reason, branchId, actorRole);
+      result.rejected.push(order.orderRef);
+    } catch (err) {
+      result.failed.push({ id, error: err?.message || 'Unknown error' });
     }
-    return acc;
-  }, { rejected: [], failed: [] });
+  }
+  return result;
 };
 
 // ── PACKING SLIP DATA ─────────────────────────────────────────────────────────
@@ -1373,7 +1423,7 @@ const assignDriver = async (orderId, driverId, adminId, branchId, actorRole = 'a
     await order.save({ session });
     await session.commitTransaction();
   } catch (err) {
-    await session.abortTransaction();
+    await safeAbort(session);
     throw err;
   } finally {
     session.endSession();

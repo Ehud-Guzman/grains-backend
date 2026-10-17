@@ -10,7 +10,8 @@ const ORDER_EVENTS = {
   DISPATCHED: 'order:dispatched', // { order, branchId }
   REASSIGNED: 'order:reassigned', // { order, branchId, previousDriver }
   COMPLETED:  'order:completed',  // { order, branchId }
-  CANCELLED:  'order:cancelled',  // { order, branchId }
+  CANCELLED:  'order:cancelled',  // { order, branchId, refundOwed, byCustomer }
+  PAID:       'order:paid',       // { order, branchId } — M-Pesa callback or manual confirmation
 };
 
 const STOCK_EVENTS = {

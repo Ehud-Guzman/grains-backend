@@ -319,6 +319,9 @@ const getOverview = async () => {
       if (card.switches.platformLocked) flag('medium', `locked-${card.id}`, `${card.name} is locked`, 'Nobody can change anything on this branch and customers cannot order.', 'switches');
       if (card.switches.maintenanceMode) flag('medium', `maint-${card.id}`, `${card.name} is in maintenance mode`, 'Customers cannot place orders. Switch it off when you are done.', 'switches');
       if (card.isActive && !card.hasCoordinates) flag('info', `coords-${card.id}`, `${card.name} has no map coordinates`, 'Without them the shop can never pick it as the nearest branch, and distance-based delivery pricing cannot work.', 'branches');
+      if (card.isActive && settingsByBranch.has(card.id) && !(Number(settingsByBranch.get(card.id).autoCancelHours) > 0)) {
+        flag('info', `autocancel-${card.id}`, `${card.name} never auto-cancels pending orders`, 'Orders nobody answers (or that were never paid) keep their stock reserved until a person cancels them. Set "Auto-cancel after" in Settings → Orders.', 'branches');
+      }
       if (card.isActive && !settingsByBranch.has(card.id)) flag('medium', `settings-${card.id}`, `${card.name}: settings could not be read`, 'Orders for this branch may fail.', 'branches');
       const fg = card.figures;
       if (fg) {
@@ -344,7 +347,7 @@ const getOverview = async () => {
       flag('info', 'one-superadmin', 'There is only one superadmin', 'If that account is lost, nobody can restore backups, reset staff passwords or change these switches. Consider a second.', 'accounts');
     }
     for (const u of accounts.filter(x => !x.isLocked && (x.failedLoginCount || 0) >= 3)) {
-      flag('medium', `failed-${u._id}`, `${u.name}: ${u.failedLoginCount} wrong passwords in a row`, 'Either they forgot, or somebody is guessing. The account locks at 5.', 'accounts');
+      flag('medium', `failed-${u._id}`, `${u.name}: ${u.failedLoginCount} wrong passwords in a row`, 'Either they forgot, or somebody is guessing. Sign-in is blocked for 15 minutes after 5.', 'accounts');
     }
     const orphaned = accounts.filter(u => [ROLES.STAFF, ROLES.SUPERVISOR, ROLES.ADMIN, ROLES.DRIVER].includes(u.role) && !u.branchId);
     if (orphaned.length) flag('medium', 'no-branch-staff', `${orphaned.length} staff account(s) belong to no branch`, `${orphaned.map(u => u.name).join(', ')} cannot do branch work.`, 'accounts');

@@ -123,6 +123,11 @@ const ALERT_CONFIG = {
     title: 'M-Pesa Payment Received After Order Already Marked Failed',
     sms: (d) => `[ALERT] M-Pesa receipt ${d['M-Pesa receipt']} (KES ${d.Amount}) received for order ${d['Order ref']} after it was already marked failed. Needs manual reconciliation.`,
   },
+  MPESA_OVERPAYMENT: {
+    severity: 'medium',
+    title: 'M-Pesa Overpayment Received',
+    sms: (d) => `[ALERT] M-Pesa receipt ${d['M-Pesa receipt']} was KES ${d['Surplus to return']} more than the order total. Return the surplus to the customer.`,
+  },
 };
 
 // ── SEVERITY BADGE COLOURS ────────────────────────────────────────────────────

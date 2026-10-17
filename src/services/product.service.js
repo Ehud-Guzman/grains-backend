@@ -11,6 +11,8 @@ const priceLogService = require('./priceLog.service');
 const { appEvents, PRICE_EVENTS } = require('../events/appEvents');
 const logger = require('../utils/logger');
 const { escapeRegex } = require('../utils/escapeRegex');
+const { findProductRuleViolation } = require('../utils/productRules');
+const { ORDER_STATUSES } = require('../utils/constants');
 
 // Strip business-sensitive fields from products served to the public storefront.
 // costPriceKES is the shop's purchase cost / margin data — it must never leave
@@ -86,15 +88,30 @@ const getAll = async (filters = {}, query = {}, branchId) => {
     matchStage['varieties.packaging.priceKES'] = priceFilter;
   }
 
-  const [total, products] = await Promise.all([
-    Product.countDocuments(matchStage),
-    Product.find(matchStage)
+  const run = (match, textSort) => Promise.all([
+    Product.countDocuments(match),
+    Product.find(match)
       .select('name category description imageURLs isActive taxable varieties')
-      .sort(filters.search ? { score: { $meta: 'textScore' } } : { createdAt: -1 })
+      .sort(textSort ? { score: { $meta: 'textScore' } } : { createdAt: -1 })
       .skip(skip)
       .limit(limit)
       .lean()
   ]);
+
+  let [total, products] = await run(matchStage, Boolean(filters.search));
+
+  // $text only matches whole (stemmed) words, so "mai" or "whe" found nothing while the
+  // autocomplete — a substring match — suggested "Maize" for the same input. When the
+  // text search comes back empty, fall back to a case-insensitive substring match on
+  // the name, category, description and variety names.
+  if (filters.search && total === 0) {
+    const { $text, ...rest } = matchStage;
+    const re = { $regex: escapeRegex(String(filters.search).trim()), $options: 'i' };
+    [total, products] = await run({
+      ...rest,
+      $or: [{ name: re }, { category: re }, { description: re }, { 'varieties.varietyName': re }],
+    }, false);
+  }
 
   return {
     products: products.map(exposePublicStockFields),
@@ -151,15 +168,24 @@ const getAllAdmin = async (filters = {}, query = {}, branchId) => {
   if (filters.isActive !== undefined) matchStage.isActive = filters.isActive === 'true';
   if (filters.search) matchStage.$text = { $search: filters.search };
 
-  const [total, products] = await Promise.all([
-    Product.countDocuments(matchStage),
-    Product.find(matchStage)
+  const run = (match) => Promise.all([
+    Product.countDocuments(match),
+    Product.find(match)
       .populate('createdBy', 'name')
       .sort({ updatedAt: -1 })
       .skip(skip)
       .limit(limit)
       .lean()
   ]);
+
+  let [total, products] = await run(matchStage);
+
+  // Same partial-word fallback as the public catalogue ($text matches whole words only).
+  if (filters.search && total === 0) {
+    const { $text, ...rest } = matchStage;
+    const re = { $regex: escapeRegex(String(filters.search).trim()), $options: 'i' };
+    [total, products] = await run({ ...rest, $or: [{ name: re }, { category: re }, { description: re }, { 'varieties.varietyName': re }] });
+  }
 
   return {
     products,
@@ -185,7 +211,45 @@ const assertProductCapNotReached = async (branchId) => {
 };
 
 // ── ADMIN: CREATE PRODUCT ─────────────────────────────────────────────────────
+const assertValidStructure = (varieties) => {
+  const problem = findProductRuleViolation(varieties);
+  if (problem) throw new AppError(problem, 400, 'INVALID_PRODUCT_STRUCTURE');
+};
+
+// Stock reservations, cart lines and order history all address a packaging by its
+// exact (variety, size) text. Renaming or deleting one while an open order still
+// points at it stranded that order — stock could not be released back, so it could
+// not be cancelled or rejected. Make the admin finish those orders first.
+const assertNoOpenOrdersOnRemovedLines = async (product, newVarieties) => {
+  const keep = new Set();
+  for (const v of newVarieties) for (const p of (v.packaging || [])) keep.add(`${v.varietyName}::${p.size}`);
+
+  const removed = [];
+  for (const v of (product.varieties || [])) {
+    for (const p of (v.packaging || [])) {
+      if (!keep.has(`${v.varietyName}::${p.size}`)) removed.push({ variety: v.varietyName, packaging: p.size });
+    }
+  }
+  if (removed.length === 0) return;
+
+  const open = await Order.find({
+    branchId: product.branchId,
+    status: { $nin: [ORDER_STATUSES.COMPLETED, ORDER_STATUSES.REJECTED, ORDER_STATUSES.CANCELLED] },
+    orderItems: { $elemMatch: { productId: product._id, $or: removed.map(r => ({ variety: r.variety, packaging: r.packaging })) } },
+  }).select('orderRef').limit(5).lean();
+
+  if (open.length > 0) {
+    throw new AppError(
+      `Cannot rename or remove a variety/pack size that open orders still use (${open.map(o => o.orderRef).join(', ')}). ` +
+      'Complete or cancel those orders first, or keep the old name and add a new pack size instead.',
+      409,
+      'PACKAGING_IN_USE'
+    );
+  }
+};
+
 const create = async (data, adminId, branchId, actorRole = 'admin') => {
+  assertValidStructure(data.varieties);
   await assertProductCapNotReached(branchId);
   const product = await Product.create({
     ...data,
@@ -272,6 +336,11 @@ const update = async (productId, data, adminId, branchId, actorRole = 'admin') =
         packaging,
       };
     });
+  }
+
+  if (Array.isArray(data.varieties)) {
+    assertValidStructure(data.varieties);
+    await assertNoOpenOrdersOnRemovedLines(product, data.varieties);
   }
 
   Object.assign(product, data);

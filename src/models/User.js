@@ -74,6 +74,9 @@ const userSchema = new mongoose.Schema({
   // stateless — only explicitly logged-out/refreshed tokens are in TokenBlacklist).
   tokenValidAfter: { type: Date, default: null },
   failedLoginCount: { type: Number, default: 0 },
+  // Timed lockout after repeated wrong passwords (auth.service.js) — distinct from
+  // isLocked, which is a deliberate admin lock and never expires on its own.
+  loginLockedUntil: { type: Date, default: null },
   lastLoginAt: { type: Date, default: null },
   passwordResetOtpHash: { type: String, default: null },
   passwordResetExpires: { type: Date, default: null },

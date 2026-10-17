@@ -34,7 +34,7 @@ const deliveryCoordinatesValidator =
 
 const orderItemsValidator = [
   body('orderItems')
-    .isArray({ min: 1 }).withMessage('Order must contain at least one item'),
+    .isArray({ min: 1, max: 100 }).withMessage('An order can contain between 1 and 100 items'),
 
   body('orderItems.*.productId')
     .notEmpty().withMessage('Product ID is required for each item')
@@ -148,7 +148,7 @@ const updateStatusValidator = [
 
 const bulkActionValidator = [
   body('orderIds')
-    .isArray({ min: 1 }).withMessage('At least one order ID is required'),
+    .isArray({ min: 1, max: 50 }).withMessage('Select between 1 and 50 orders at a time'),
 
   body('orderIds.*')
     .isMongoId().withMessage('Invalid order ID in list')

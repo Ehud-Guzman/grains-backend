@@ -6,6 +6,7 @@ const { ROLES, LOG_ACTIONS, AUTH_LIMITS } = require('../utils/constants');
 const { paginate, buildPaginationMeta } = require('../utils/paginate');
 const { escapeRegex } = require('../utils/escapeRegex');
 const { bumpTokenValidAfter } = require('../utils/tokenValidAfter');
+const { toLocalPhone } = require('../utils/mpesaHelpers');
 
 const BCRYPT_WORK_FACTOR = AUTH_LIMITS.BCRYPT_WORK_FACTOR;
 
@@ -79,7 +80,11 @@ const createAdminUser = async ({ name, phone, email, password, role }, superAdmi
     }
   }
 
-  const existing = await User.findOne({ phone });
+  // Admin-created accounts get the same strength rule as reset and self-service change.
+  const { validatePasswordStrength, findUserByPhone } = require('./auth.service');
+  validatePasswordStrength(password);
+
+  const existing = await findUserByPhone(phone);
   if (existing) throw new AppError('An account with this phone number already exists', 409, 'PHONE_TAKEN');
 
   if (email) {
@@ -91,7 +96,7 @@ const createAdminUser = async ({ name, phone, email, password, role }, superAdmi
 
   const user = await User.create({
     name,
-    phone,
+    phone: toLocalPhone(phone),
     email: email || null,
     passwordHash,
     role
@@ -201,7 +206,7 @@ const lockAdminAccount = async (userId, superAdminId) => {
 const unlockAdminAccount = async (userId, adminId, actorRole = ROLES.SUPERADMIN) => {
   const user = await User.findByIdAndUpdate(
     userId,
-    { isLocked: false, failedLoginCount: 0 },
+    { isLocked: false, failedLoginCount: 0, loginLockedUntil: null },
     { new: true }
   );
 
@@ -249,7 +254,7 @@ const resetPassword = async (userId, newPassword, superAdminId) => {
   // password (mirrors changePassword/resetPassword in auth.service.js).
   const user = await User.findByIdAndUpdate(
     userId,
-    { passwordHash, failedLoginCount: 0, isLocked: false, tokenValidAfter: bumpTokenValidAfter() },
+    { passwordHash, failedLoginCount: 0, loginLockedUntil: null, isLocked: false, tokenValidAfter: bumpTokenValidAfter() },
     { new: true }
   );
 

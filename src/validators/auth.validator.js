@@ -70,7 +70,42 @@ const resetPasswordValidator = [
     .matches(/[0-9]/).withMessage('Password must contain at least one number'),
 ];
 
+// PUT /auth/me — every field optional, but anything sent must be well-formed and
+// bounded (addresses and names were stored as-is, with no length limits).
+const updateProfileValidator = [
+  body('name')
+    .optional()
+    .trim()
+    .isLength({ min: 2, max: 100 }).withMessage('Name must be between 2 and 100 characters'),
+
+  body('email')
+    .optional({ nullable: true, checkFalsy: true })
+    .trim()
+    .isEmail().withMessage('Enter a valid email address'),
+
+  body('kraPin')
+    .optional({ nullable: true, checkFalsy: true })
+    .trim()
+    .toUpperCase()
+    .matches(/^[A-Z]\d{9}[A-Z]$/).withMessage('KRA PIN must look like A012345678B'),
+
+  body('addresses')
+    .optional()
+    .isArray({ max: 10 }).withMessage('You can save up to 10 addresses'),
+  body('addresses.*.label')
+    .trim().notEmpty().withMessage('Each address needs a label')
+    .isLength({ max: 60 }).withMessage('Address label cannot exceed 60 characters'),
+  body('addresses.*.value')
+    .trim().notEmpty().withMessage('Each address needs its details')
+    .isLength({ max: 500 }).withMessage('Address cannot exceed 500 characters'),
+
+  body('marketingConsent')
+    .optional()
+    .isBoolean().withMessage('marketingConsent must be true or false')
+];
+
 module.exports = {
+  updateProfileValidator,
   registerValidator, loginValidator, refreshValidator,
   forgotPasswordValidator, resetPasswordValidator
 };

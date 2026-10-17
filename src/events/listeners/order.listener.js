@@ -44,8 +44,20 @@ const register = () => {
       .catch(err => logger.error('[notification] order:reassigned SMS failed', { err: err.message }));
   });
 
-  // ORDER_EVENTS.COMPLETED and ORDER_EVENTS.CANCELLED have no listeners yet.
-  // Phase 2 alert + churn jobs will attach here.
+  appEvents.on(ORDER_EVENTS.CANCELLED, ({ order, branchId, ...opts }) => {
+    notificationService.dispatchOrderCancelled(order, branchId, opts)
+      .catch(err => logger.error('[notification] order:cancelled failed', { err: err.message }));
+  });
+
+  appEvents.on(ORDER_EVENTS.COMPLETED, ({ order, branchId }) => {
+    notificationService.dispatchOrderCompleted(order, branchId)
+      .catch(err => logger.error('[notification] order:completed failed', { err: err.message }));
+  });
+
+  appEvents.on(ORDER_EVENTS.PAID, ({ order, branchId }) => {
+    notificationService.dispatchPaymentReceived(order, branchId)
+      .catch(err => logger.error('[notification] order:paid failed', { err: err.message }));
+  });
 };
 
 module.exports = { register };
