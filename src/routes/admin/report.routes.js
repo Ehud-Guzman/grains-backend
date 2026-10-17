@@ -53,6 +53,10 @@ router.get('/margins', requireMinRole('supervisor'), reportController.getMarginR
 // GET /api/admin/reports/riders?period=month
 router.get('/riders', requireMinRole('supervisor'), reportController.getRiderReport);
 
+// ── CASH-UP / M-PESA RECONCILIATION - supervisor+ ─────────────────────────────
+// GET /api/admin/reports/cash-up?period=today
+router.get('/cash-up', requireMinRole('supervisor'), reportController.getCashUpReport);
+
 // ── VAT REPORT - supervisor+ ──────────────────────────────────────────────────
 // GET /api/admin/reports/vat?period=month
 router.get('/vat', requireMinRole('supervisor'), reportController.getVatReport);

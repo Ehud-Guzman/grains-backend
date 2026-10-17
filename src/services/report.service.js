@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const Order = require('../models/Order');
+const Payment = require('../models/Payment');
 const Product = require('../models/Product');
 const StockLog = require('../models/StockLog');
 const User = require('../models/User');
@@ -1151,6 +1152,107 @@ const getRiderReport = async (period, from, to, branchId) => {
   };
 };
 
+// ── CASH-UP & M-PESA RECONCILIATION ──────────────────────
+// One page to close the day: what came in (by method), what each driver still has to account for,
+// and the payments that need a human. Without it an admin confirms cash order by order and has no
+// way to see what is missing.
+const STUCK_PENDING_MINUTES = 15;
+
+const getCashUpReport = async (period, from, to, branchId) => {
+  const { start, end } = getDateRange(period, from, to);
+  const oid = branchId ? new mongoose.Types.ObjectId(String(branchId)) : null;
+  const orderBranch = oid ? { branchId: oid } : {};
+  const joinOrder = [
+    { $lookup: { from: 'orders', localField: 'orderId', foreignField: '_id', as: 'order' } },
+    { $unwind: '$order' },
+    ...(oid ? [{ $match: { 'order.branchId': oid } }] : []),
+  ];
+
+  // 1. Money in. M-Pesa with no confirmedBy came from Safaricom's callback; with one, a person typed it in.
+  const paid = await Payment.aggregate([
+    { $match: { status: 'paid', paidAt: { $gte: start, $lte: end } } },
+    ...joinOrder,
+    { $group: {
+      _id: { method: '$method', manual: { $cond: [{ $ifNull: ['$confirmedBy', false] }, true, false] } },
+      count: { $sum: 1 }, amount: { $sum: '$amount' },
+    } },
+  ]);
+  const money = (rows) => rows.reduce((a, r) => ({ count: a.count + r.count, amount: a.amount + r.amount }), { count: 0, amount: 0 });
+  const mpesaRows = paid.filter(r => r._id.method === 'mpesa');
+  const cashRows = paid.filter(r => r._id.method !== 'mpesa');
+  const byMethod = {
+    mpesaAutomatic: money(mpesaRows.filter(r => !r._id.manual)),
+    mpesaManual: money(mpesaRows.filter(r => r._id.manual)),
+    cash: money(cashRows),
+  };
+  const totalIn = byMethod.mpesaAutomatic.amount + byMethod.mpesaManual.amount + byMethod.cash.amount;
+
+  // 2. Cash confirmed, by the person who confirmed it.
+  const cashByCollector = await Payment.aggregate([
+    { $match: { status: 'paid', method: { $ne: 'mpesa' }, paidAt: { $gte: start, $lte: end } } },
+    ...joinOrder,
+    { $group: { _id: '$confirmedBy', count: { $sum: 1 }, amount: { $sum: '$amount' } } },
+    { $lookup: { from: 'users', localField: '_id', foreignField: '_id', as: 'user' } },
+    { $unwind: { path: '$user', preserveNullAndEmptyArrays: true } },
+    { $project: { _id: 0, userId: '$_id', name: '$user.name', role: '$user.role', count: 1, amount: 1 } },
+    { $sort: { amount: -1 } },
+  ]);
+
+  // 3. Per driver: cash-on-delivery orders they completed vs what has been confirmed as received.
+  const drivers = await Order.aggregate([
+    { $match: {
+      ...orderBranch, status: 'completed', deliveryMethod: 'delivery', paymentMethod: 'delivery',
+      driverId: { $ne: null }, deliveredAt: { $gte: start, $lte: end },
+    } },
+    { $group: {
+      _id: '$driverId',
+      deliveries: { $sum: 1 },
+      due: { $sum: '$total' },
+      confirmed: { $sum: { $cond: [{ $eq: ['$paymentStatus', 'paid'] }, '$total', 0] } },
+      unconfirmedOrders: { $sum: { $cond: [{ $ne: ['$paymentStatus', 'paid'] }, 1, 0] } },
+    } },
+    { $lookup: { from: 'users', localField: '_id', foreignField: '_id', as: 'driver' } },
+    { $unwind: { path: '$driver', preserveNullAndEmptyArrays: true } },
+    { $project: {
+      _id: 0, driverId: '$_id', driverName: '$driver.name', deliveries: 1, due: 1, confirmed: 1,
+      outstanding: { $subtract: ['$due', '$confirmed'] }, unconfirmedOrders: 1,
+    } },
+    { $sort: { outstanding: -1, deliveries: -1 } },
+  ]);
+
+  // 4. Orders that finished with money still unconfirmed (cash orders can complete unpaid by design).
+  const unpaidCompleted = await Order.find({
+    ...orderBranch, status: 'completed', paymentStatus: { $ne: 'paid' }, deliveredAt: { $gte: start, $lte: end },
+  }).select('orderRef total paymentMethod deliveryMethod deliveredAt driverId').populate('driverId', 'name')
+    .sort({ deliveredAt: -1 }).limit(100).lean();
+
+  // 5. M-Pesa payments that need a person: money that arrived after the attempt was given up on,
+  //    and prompts sent more than a quarter of an hour ago that never resolved.
+  const stuckBefore = new Date(Date.now() - STUCK_PENDING_MINUTES * 60 * 1000);
+  const attention = (match) => Payment.aggregate([
+    { $match: match },
+    ...joinOrder,
+    { $sort: { createdAt: -1 } },
+    { $limit: 50 },
+    { $project: { _id: 0, paymentId: '$_id', orderRef: '$order.orderRef', amount: 1, mpesaPhone: 1, createdAt: 1, lateSuccessMeta: 1 } },
+  ]);
+  const lateSuccess = await attention({ lateSuccessMeta: { $ne: null }, 'lateSuccessMeta.receivedAt': { $gte: start, $lte: end } });
+  const stuckPending = await attention({ method: 'mpesa', status: 'pending', createdAt: { $gte: start, $lte: stuckBefore } });
+
+  return {
+    period: { start, end },
+    totalIn,
+    byMethod,
+    cashByCollector,
+    drivers,
+    totals: {
+      cashOutstanding: drivers.reduce((s, d) => s + d.outstanding, 0),
+      needsAttention: unpaidCompleted.length + lateSuccess.length + stuckPending.length,
+    },
+    exceptions: { unpaidCompleted, lateSuccess, stuckPending },
+  };
+};
+
 // ── VAT REPORT ────────────────────────────────────────────────────────────────
 // Monthly VAT summary for KRA filing
 const getVatReport = async (period, from, to, branchId) => {
@@ -1250,6 +1352,7 @@ module.exports = {
   getOnboardingAnalytics,
   getMarginReport,
   getRiderReport,
+  getCashUpReport,
   getVatReport,
   getCustomerStatement,
 };

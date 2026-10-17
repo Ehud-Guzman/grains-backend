@@ -43,11 +43,19 @@ const THROTTLE_MS = {
   BACKUP_RESTORED:     0,               // always send
   BACKUP_RESTORE_DATA_LOSS: 0,          // always send
   MPESA_LATE_SUCCESS_UNRECONCILED: 0,   // always send — money received but unaccounted for
+  MPESA_STK_FAILING:  10 * 60 * 1000,   // counter window (see COUNTER_ALERTS)
+  MPESA_CALLBACK_UNKNOWN: 10 * 60 * 1000, // 10 min global
 };
 
 // SERVER_ERROR is counter-based: send the alert only after this many errors
 // in the window (avoids noisy alerts on a single transient error)
 const SERVER_ERROR_THRESHOLD = 3;
+
+// Counter-based alert types: fire only once this many events land inside the type's window.
+const COUNTER_ALERTS = {
+  SERVER_ERROR: SERVER_ERROR_THRESHOLD,
+  MPESA_STK_FAILING: 3,
+};
 
 // throttleState entries are keyed per IP / per userId+route and never removed
 // on their own — left unchecked this grows forever over the life of a
@@ -123,6 +131,16 @@ const ALERT_CONFIG = {
     title: 'M-Pesa Payment Received After Order Already Marked Failed',
     sms: (d) => `[ALERT] M-Pesa receipt ${d['M-Pesa receipt']} (KES ${d.Amount}) received for order ${d['Order ref']} after it was already marked failed. Needs manual reconciliation.`,
   },
+  MPESA_STK_FAILING: {
+    severity: 'high',
+    title: 'M-Pesa Payment Prompts Are Failing',
+    sms: (d) => `[ALERT] ${d.Failures} M-Pesa STK pushes failed within 10 minutes. Latest: ${d.Reason}. Customers cannot pay by M-Pesa — check Daraja credentials and callback URL.`,
+  },
+  MPESA_CALLBACK_UNKNOWN: {
+    severity: 'medium',
+    title: 'M-Pesa Callback Received For An Unknown Payment',
+    sms: (d) => `[ALERT] M-Pesa callback for unknown CheckoutRequestID ${d['Checkout request']} (result ${d['Result code']}). If money moved, reconcile by hand.`,
+  },
   MPESA_OVERPAYMENT: {
     severity: 'medium',
     title: 'M-Pesa Overpayment Received',
@@ -144,14 +162,14 @@ const shouldAlert = (type, key) => {
   const now = Date.now();
   const state = throttleState.get(mapKey);
 
-  if (type === 'SERVER_ERROR') {
-    // Counter-based: accumulate errors in window, fire when threshold reached
+  if (COUNTER_ALERTS[type]) {
+    // Counter-based: accumulate events in window, fire when threshold reached
     if (!state || now - state.windowStart > window) {
       throttleState.set(mapKey, { count: 1, windowStart: now, lastSentAt: null });
       return false;
     }
     state.count++;
-    if (state.count >= SERVER_ERROR_THRESHOLD &&
+    if (state.count >= COUNTER_ALERTS[type] &&
         (!state.lastSentAt || now - state.lastSentAt > window)) {
       state.lastSentAt = now;
       state.count = 0;

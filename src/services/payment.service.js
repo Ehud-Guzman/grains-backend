@@ -189,6 +189,9 @@ const initiateStkPush = async (orderId, phone) => {
       .catch(resetErr => logger.error('[M-PESA] Failed to reset paymentStatus after STK error', { orderId, err: resetErr.message }));
     const msg = err.response?.data?.errorMessage || err.message;
     logger.error('[M-PESA] STK push failed', { orderId, msg });
+    // Counter alert: one failure is a customer problem, three in ten minutes is an outage.
+    alertService.sendAlert('MPESA_STK_FAILING', { Failures: 3, Reason: msg }, 'global')
+      .catch(alertErr => logger.error('[M-PESA] Alert failed', { err: alertErr.message }));
     throw new AppError(`M-Pesa request failed: ${msg}`, 502, 'MPESA_REQUEST_FAILED');
   }
 
@@ -313,6 +316,8 @@ const handleCallback = async (callbackData) => {
   const payment = await Payment.findOne({ checkoutRequestId: CheckoutRequestID });
   if (!payment) {
     logger.warn('[M-PESA] Callback for unknown CheckoutRequestID', { CheckoutRequestID });
+    alertService.sendAlert('MPESA_CALLBACK_UNKNOWN', { 'Checkout request': CheckoutRequestID, 'Result code': ResultCode }, 'global')
+      .catch(alertErr => logger.error('[M-PESA] Alert failed', { err: alertErr.message }));
     return { success: false, message: 'Payment record not found' };
   }
 

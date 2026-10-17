@@ -11,6 +11,7 @@ const Sentry = require('@sentry/node');
 
 const { errorHandler } = require('./middleware/errorHandler.middleware');
 const { publicLimiter } = require('./middleware/rateLimit.middleware');
+const { isAllowedOriginValue } = require('./utils/origins');
 const { requestTiming } = require('./middleware/requestTiming.middleware');
 const { isRestoreInProgress } = require('./services/backup.service');
 const alertService = require('./services/alert.service');
@@ -131,7 +132,8 @@ app.use(helmet({
 
 // ── CORS ──────────────────────────────────────────────────────────────────────
 app.use(cors({
-  origin: process.env.FRONTEND_URL,
+  // A request without an Origin (server-to-server, curl, health checks) is not a browser CORS call.
+  origin: (origin, cb) => cb(null, !origin || isAllowedOriginValue(origin)),
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
   allowedHeaders: ['Content-Type', 'Authorization']

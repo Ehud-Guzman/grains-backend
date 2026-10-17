@@ -18,6 +18,9 @@ router.get('/', requireMinRole('supervisor'), stockController.getOverview);
 // GET /api/admin/stock/low
 router.get('/low', requireMinRole('supervisor'), stockController.getLowStock);
 
+// GET /api/admin/stock/forecast - days of stock left at the current sales pace
+router.get('/forecast', requireMinRole('supervisor'), stockController.getForecast);
+
 // GET /api/admin/stock/logs
 router.get('/logs', requireMinRole('supervisor'), (req, res, next) => {
   req.params.productId = null;

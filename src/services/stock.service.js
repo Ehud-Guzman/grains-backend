@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const Product = require('../models/Product');
+const Order = require('../models/Order');
 const StockLog = require('../models/StockLog');
 const { AppError } = require('../middleware/errorHandler.middleware');
 const activityLogService = require('./activityLog.service');
@@ -536,6 +537,68 @@ const getLowStock = async (branchId) => {
   return rows.filter(r => r.status !== 'in_stock' && !r.quoteOnly);
 };
 
+// ── STOCK FORECAST ───────────────────────────────────────
+// "At the current pace this runs out in N days." Pace is units ordered per day over the last
+// FORECAST_WINDOW_DAYS. Pending orders count (their stock is already reserved, so they are real demand);
+// cancelled and rejected ones do not (their stock was released). Only items that actually sold are
+// returned: with no sales there is nothing to forecast, and the low-stock list already covers empty shelves.
+const FORECAST_WINDOW_DAYS = 30;
+const FORECAST_ORDER_STATUSES = ['pending', 'approved', 'preparing', 'out_for_delivery', 'completed'];
+const forecastSeverity = (daysLeft) =>
+  daysLeft <= 3 ? 'critical' : daysLeft <= 7 ? 'soon' : daysLeft <= 14 ? 'watch' : 'ok';
+
+const getForecast = async (branchId, days = FORECAST_WINDOW_DAYS) => {
+  const maxWindow = Math.min(Math.max(parseInt(days, 10) || FORECAST_WINDOW_DAYS, 7), 90);
+  const DAY = 24 * 60 * 60 * 1000;
+  const since = new Date(Date.now() - maxWindow * DAY);
+  const scope = {
+    ...(branchId ? { branchId: new mongoose.Types.ObjectId(String(branchId)) } : {}),
+    status: { $in: FORECAST_ORDER_STATUSES },
+    createdAt: { $gte: since },
+  };
+
+  // A shop with five days of history has not sold "over 30 days": dividing by 30 would make everything
+  // look six times slower than it is. Use the real length of the history, never less than a week.
+  const [oldest] = await Order.aggregate([{ $match: scope }, { $group: { _id: null, first: { $min: '$createdAt' } } }]);
+  const window = oldest?.first
+    ? Math.min(maxWindow, Math.max(7, Math.ceil((Date.now() - new Date(oldest.first).getTime()) / DAY)))
+    : maxWindow;
+
+  const sold = await Order.aggregate([
+    { $match: scope },
+    { $unwind: '$orderItems' },
+    { $group: {
+      _id: { p: '$orderItems.productId', v: '$orderItems.variety', k: '$orderItems.packaging' },
+      units: { $sum: '$orderItems.quantity' },
+    } },
+  ]);
+  const unitsByKey = new Map(sold.map(s => [`${s._id.p}|${s._id.v}|${s._id.k}`, s.units]));
+
+  const rows = await getOverview({}, branchId);
+  return rows
+    .filter(r => r.isActive !== false && !r.quoteOnly)
+    .map(r => {
+      const units = unitsByKey.get(`${r.productId}|${r.varietyName}|${r.packagingSize}`) || 0;
+      if (!units) return null;
+      const perDay = units / window;
+      const daysLeft = r.stock <= 0 ? 0 : Math.floor(r.stock / perDay);
+      return {
+        productId: r.productId,
+        productName: r.productName,
+        varietyName: r.varietyName,
+        packagingSize: r.packagingSize,
+        stock: r.stock,
+        unitsSold: units,
+        perDay: Math.round(perDay * 10) / 10,
+        daysLeft,
+        windowDays: window,
+        severity: r.stock <= 0 ? 'critical' : forecastSeverity(daysLeft),
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.daysLeft - b.daysLeft);
+};
+
 // ── GET STOCK LOGS ────────────────────────────────────────────────────────────
 // SRS 5.4 - movement history per product, paginated
 const getLogs = async (productId, filters = {}, query = {}, branchId) => {
@@ -577,5 +640,6 @@ module.exports = {
   batchUpdate,
   getOverview,
   getLowStock,
+  getForecast,
   getLogs
 };

@@ -106,6 +106,14 @@ const getRiderReport = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+const getCashUpReport = async (req, res, next) => {
+  try {
+    const { period, from, to } = req.query;
+    const data = await reportService.getCashUpReport(period, from, to, req.branchId);
+    return success(res, data);
+  } catch (err) { next(err); }
+};
+
 const getVatReport = async (req, res, next) => {
   try {
     const { period, from, to } = req.query;
@@ -136,6 +144,7 @@ module.exports = {
   exportReport,
   getMarginReport,
   getRiderReport,
+  getCashUpReport,
   getVatReport,
   getCustomerStatement,
 };

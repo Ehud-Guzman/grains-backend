@@ -15,6 +15,13 @@ const getLowStock = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+const getForecast = async (req, res, next) => {
+  try {
+    const rows = await stockService.getForecast(req.branchId, req.query.days);
+    return success(res, rows);
+  } catch (err) { next(err); }
+};
+
 const getLogs = async (req, res, next) => {
   try {
     const { productId } = req.params;
@@ -50,4 +57,4 @@ const batchUpdate = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-module.exports = { getOverview, getLowStock, getLogs, addDelivery, manualAdjustment, batchUpdate };
+module.exports = { getOverview, getLowStock, getForecast, getLogs, addDelivery, manualAdjustment, batchUpdate };

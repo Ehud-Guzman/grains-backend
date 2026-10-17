@@ -2,6 +2,7 @@ const authService = require('../services/auth.service');
 const { success, error } = require('../utils/apiResponse');
 const { AUTH_LIMITS } = require('../utils/constants');
 const { isValidImageBuffer } = require('../utils/validateImageBuffer');
+const { isAllowedOriginValue } = require('../utils/origins');
 
 // Refresh token cookie options — HttpOnly prevents JS access (XSS mitigation).
 // SameSite=None + Secure for cross-origin prod; Lax for same-origin dev.
@@ -9,7 +10,12 @@ const { isValidImageBuffer } = require('../utils/validateImageBuffer');
 const refreshCookieOptions = () => ({
   httpOnly: true,
   secure:   process.env.NODE_ENV === 'production',
-  sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+  // COOKIE_DOMAIN (e.g. .vittorios.co.ke) is set once the shop and API share a registrable domain
+  // (www. and api.). The cookie is then first-party, so Safari/iOS stops dropping it and Lax is
+  // enough. Without it the shop (netlify.app) and API (onrender.com) are different sites and the
+  // cookie has to be SameSite=None, which Safari and strict browsers block.
+  sameSite: process.env.NODE_ENV === 'production' && !process.env.COOKIE_DOMAIN ? 'none' : 'lax',
+  ...(process.env.COOKIE_DOMAIN ? { domain: process.env.COOKIE_DOMAIN } : {}),
   maxAge:   AUTH_LIMITS.REFRESH_COOKIE_MAX_AGE_MS,
   path:     '/api',  // Changed from '/api/auth' to '/api' for broader coverage
 });
@@ -18,7 +24,10 @@ const setRefreshCookie = (res, token) =>
   res.cookie('refreshToken', token, refreshCookieOptions());
 
 const clearRefreshCookie = (res) =>
-  res.clearCookie('refreshToken', { path: '/api' });
+  res.clearCookie('refreshToken', {
+    path: '/api',
+    ...(process.env.COOKIE_DOMAIN ? { domain: process.env.COOKIE_DOMAIN } : {}),
+  });
 
 // Read refresh token from cookie first, body as fallback (API clients / Postman)
 const extractRefreshToken = (req) =>
@@ -129,15 +138,8 @@ const switchBranch = async (req, res, next) => {
 const isAllowedOrigin = (req) => {
   const origin = req.headers.origin || req.headers.referer;
   if (!origin) return true;
-  // Compare parsed origins, not raw strings — a substring/prefix check here
-  // (e.g. origin.startsWith(FRONTEND_URL)) would let a lookalike domain like
-  // "<FRONTEND_URL>.evil.com" pass, since that string also starts with the
-  // real frontend URL.
-  try {
-    return new URL(origin).origin === new URL(process.env.FRONTEND_URL).origin;
-  } catch {
-    return false;
-  }
+  // Parsed-origin comparison against FRONTEND_URL (+ FRONTEND_URLS), see utils/origins.js.
+  return isAllowedOriginValue(origin);
 };
 
 const refresh = async (req, res, next) => {
@@ -292,6 +294,7 @@ const uploadAvatar = async (req, res, next) => {
 };
 
 module.exports = {
+  refreshCookieOptions, // exported for tests
   register,
   login,
   verifyTwoFactor,
