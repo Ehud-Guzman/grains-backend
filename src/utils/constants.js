@@ -184,8 +184,14 @@ const DB_RETRY = {
 
 const RATE_LIMITS = {
   WINDOW_MS: 60 * 1000,
-  PUBLIC_MAX: 100,
+  // Anonymous traffic (shop browsing, tracking): per IP, and carrier/shop wifi NAT puts many
+  // people behind one IP, so 100 was easy to exhaust. Signed-in users get their own bucket.
+  PUBLIC_MAX: 240,
+  USER_MAX: 600,
   AUTH_MAX: 10,
+  // Token refresh runs on every page load and tab wake-up, and mobile carriers put many
+  // customers behind one IP, so it cannot share the 10/min login bucket.
+  REFRESH_MAX: 120,
   ADMIN_MAX: 300,
   CALLBACK_MAX: 30,
   STK_MAX: 5,

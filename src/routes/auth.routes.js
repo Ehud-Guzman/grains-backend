@@ -7,7 +7,7 @@ const {
 } = require('../validators/auth.validator');
 const { validate } = require('../middleware/validate.middleware');
 const { verifyToken, optionalAuth } = require('../middleware/auth.middleware');
-const { authLimiter } = require('../middleware/rateLimit.middleware');
+const { authLimiter, refreshLimiter } = require('../middleware/rateLimit.middleware');
 const multer = require('multer');
 const { UPLOAD_LIMITS } = require('../utils/constants');
 
@@ -32,7 +32,7 @@ router.post('/register', authLimiter, registerValidator, validate, authControlle
 router.post('/login', authLimiter, loginValidator, validate, authController.login);
 
 // POST /api/auth/refresh
-router.post('/refresh', authLimiter, refreshValidator, validate, authController.refresh);
+router.post('/refresh', refreshLimiter, refreshValidator, validate, authController.refresh);
 
 // POST /api/auth/verify-2fa — admin/superadmin OTP step (exchange twoFactorToken + otp for the branch-selection challenge)
 router.post('/verify-2fa', authLimiter, authController.verifyTwoFactor);

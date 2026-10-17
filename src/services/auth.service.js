@@ -49,12 +49,17 @@ const generateTokens = (user, branchId = null) => {
     customPermissions: user.customPermissions || []
   };
 
+  // jwtid makes every token unique. iat only has one-second resolution, so a token issued in the
+  // same second as the one it replaces used to be byte-identical to it: the "new" refresh token
+  // was already blacklisted and the session died on its next use.
   const accessToken = jwt.sign(payload, process.env.JWT_ACCESS_SECRET, {
-    expiresIn: process.env.JWT_ACCESS_EXPIRY || '15m'
+    expiresIn: process.env.JWT_ACCESS_EXPIRY || '15m',
+    jwtid: crypto.randomUUID()
   });
 
   const refreshToken = jwt.sign(payload, process.env.JWT_REFRESH_SECRET, {
-    expiresIn: process.env.JWT_REFRESH_EXPIRY || '7d'
+    expiresIn: process.env.JWT_REFRESH_EXPIRY || '7d',
+    jwtid: crypto.randomUUID()
   });
 
   return { accessToken, refreshToken };
@@ -532,10 +537,17 @@ const switchBranch = async (userId, branchId, oldRefreshToken = null, oldAccessT
 };
 
 // ── REFRESH ───────────────────────────────────────────────────────────────────
+// Refresh tokens are single-use, but several tabs (or a retry after a dropped response) can
+// legitimately present the same one within moments of each other. Without a grace window the
+// loser gets a 401, the frontend treats that as a dead session and signs every tab out.
+const REFRESH_REUSE_GRACE_MS = 30 * 1000;
+
 const refreshToken = async (token, ip = null) => {
   // 1. Check blacklist first — fast fail if already invalidated
   const blacklisted = await TokenBlacklist.findOne({ token });
-  if (blacklisted) {
+  const withinGrace = !!blacklisted?.rotatedAt &&
+    Date.now() - new Date(blacklisted.rotatedAt).getTime() < REFRESH_REUSE_GRACE_MS;
+  if (blacklisted && !withinGrace) {
     throw new AppError('Token has been invalidated. Please log in again.', 401, 'TOKEN_REVOKED');
   }
 
@@ -564,11 +576,14 @@ const refreshToken = async (token, ip = null) => {
 
   // 4. Token rotation — blacklist the used token so it can't be reused
   const expiresAt = new Date(decoded.exp * 1000);
-  try {
-    await TokenBlacklist.create({ token, userId: user._id, expiresAt });
-  } catch (err) {
-    // Ignore duplicate key — already blacklisted, still reject
-    if (err.code !== 11000) throw err;
+  if (!blacklisted) {
+    try {
+      await TokenBlacklist.create({ token, userId: user._id, expiresAt, rotatedAt: new Date() });
+    } catch (err) {
+      // Duplicate key: a concurrent refresh with the same token just recorded it. That request
+      // is the other tab's, which is exactly the case the grace window exists for.
+      if (err.code !== 11000) throw err;
+    }
   }
 
   // 5. Issue new token pair — preserve branchId from old token

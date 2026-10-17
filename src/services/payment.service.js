@@ -55,7 +55,7 @@ const initiateStkPush = async (orderId, phone) => {
   const passkey     = process.env.MPESA_PASSKEY;
   const callbackURL = process.env.MPESA_CALLBACK_URL;
   if (!shortcode || !passkey || !callbackURL) {
-    throw new AppError('M-Pesa is not configured. Please contact support.', 503, 'MPESA_NOT_CONFIGURED');
+    throw new AppError('M-Pesa payment is temporarily unavailable. Please try again shortly, or contact us to pay another way.', 503, 'MPESA_NOT_CONFIGURED');
   }
   const formattedPhone = formatPhone(phone);
 

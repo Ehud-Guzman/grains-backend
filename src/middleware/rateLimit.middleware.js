@@ -1,4 +1,5 @@
 const rateLimit = require('express-rate-limit');
+const jwt = require('jsonwebtoken');
 const logger = require('../utils/logger');
 const alertService = require('../services/alert.service');
 const { RATE_LIMITS } = require('../utils/constants');
@@ -20,19 +21,50 @@ const keyByBranchAndIp = (req) => {
   return `${branchId}:${req.ip}`;
 };
 
-// Public routes - 100 req/min per branch+IP
-const publicLimiter = rateLimit({
+// This limiter runs on every /api request, before verifyToken, so it cannot read req.user.
+// It used to give the whole IP one 100/min bucket, which meant a shop's staff, its driver and
+// a few customers on the same wifi (or mobile NAT) locked each other out and made the 300/min
+// adminLimiter unreachable. A request carrying a VERIFIED access token is now counted per user;
+// an unsigned or forged token falls back to the per-IP bucket, so it cannot mint fresh buckets.
+const verifiedUserId = (req) => {
+  if (req._rateLimitUserId !== undefined) return req._rateLimitUserId;
+  let id = null;
+  const header = req.headers.authorization;
+  if (header && header.startsWith('Bearer ') && process.env.JWT_ACCESS_SECRET) {
+    try { id = jwt.verify(header.slice(7), process.env.JWT_ACCESS_SECRET).id || null; } catch { id = null; }
+  }
+  req._rateLimitUserId = id;
+  return id;
+};
+
+const tooManyRequests = {
+  success: false,
+  error: 'RATE_LIMIT_EXCEEDED',
+  message: 'Too many requests, please try again in a minute'
+};
+
+// Anonymous traffic - per branch+IP
+const anonymousLimiter = rateLimit({
   windowMs: RATE_LIMITS.WINDOW_MS,
   max: RATE_LIMITS.PUBLIC_MAX,
   keyGenerator: keyByBranchAndIp,
   standardHeaders: true,
   legacyHeaders: false,
-  message: {
-    success: false,
-    error: 'RATE_LIMIT_EXCEEDED',
-    message: 'Too many requests, please try again in a minute'
-  }
+  message: tooManyRequests
 });
+
+// Signed-in traffic - per user
+const signedInLimiter = rateLimit({
+  windowMs: RATE_LIMITS.WINDOW_MS,
+  max: RATE_LIMITS.USER_MAX,
+  keyGenerator: (req) => `user:${verifiedUserId(req)}`,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: tooManyRequests
+});
+
+const publicLimiter = (req, res, next) =>
+  (verifiedUserId(req) ? signedInLimiter : anonymousLimiter)(req, res, next);
 
 // Auth routes (login/register) - stricter, 10 req/min per branch+IP
 const authLimiter = rateLimit({
@@ -52,6 +84,20 @@ const authLimiter = rateLimit({
       error: 'RATE_LIMIT_EXCEEDED',
       message: 'Too many login attempts, please try again in a minute'
     });
+  }
+});
+
+// Session refresh - separate from login so page reloads never lock people out of their session
+const refreshLimiter = rateLimit({
+  windowMs: RATE_LIMITS.WINDOW_MS,
+  max: RATE_LIMITS.REFRESH_MAX,
+  keyGenerator: keyByBranchAndIp,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    error: 'RATE_LIMIT_EXCEEDED',
+    message: 'Too many requests, please try again in a minute'
   }
 });
 
@@ -132,4 +178,4 @@ const trackLimiter = rateLimit({
   }
 });
 
-module.exports = { publicLimiter, authLimiter, adminLimiter, callbackLimiter, stkLimiter, trackLimiter, guestOrderLimiter };
+module.exports = { publicLimiter, authLimiter, refreshLimiter, adminLimiter, callbackLimiter, stkLimiter, trackLimiter, guestOrderLimiter };
