@@ -4,22 +4,16 @@ const logger = require('../utils/logger');
 const alertService = require('../services/alert.service');
 const { RATE_LIMITS } = require('../utils/constants');
 
-const OBJECT_ID_RE = /^[0-9a-fA-F]{24}$/;
-
 // Key by branchId + IP so branches don't throttle each other.
-// branchId comes from the JWT (set by verifyToken as req.branchId) for
-// authenticated routes, or from ?branchId query param for public routes — the
-// query param is validated as a plausible Mongo ObjectId first, since it's
-// client-controlled on unauthenticated routes: without this check, an attacker
-// could vary ?branchId= on every request to mint a fresh rate-limit bucket each
-// time, completely defeating the per-branch+IP cap.
-const keyByBranchAndIp = (req) => {
-  const queryBranchId = typeof req.query?.branchId === 'string' && OBJECT_ID_RE.test(req.query.branchId)
-    ? req.query.branchId
-    : null;
-  const branchId = req.branchId || queryBranchId || 'public';
-  return `${branchId}:${req.ip}`;
-};
+//
+// branchId may come ONLY from the verified JWT (verifyToken sets req.branchId before the admin
+// limiters run). Anything the client controls - a ?branchId= query parameter or a body field - must
+// never be part of the key: the previous version accepted any well-formed 24-hex string from the
+// query, and checking only that it LOOKED like an ObjectId did not stop an attacker appending a
+// fresh random one to every request to mint a new bucket each time. That made the login (10/min),
+// STK-push (5/min) and guest-order caps meaningless: 14 of 14 login attempts and 9 of 9 STK pushes
+// went through. Unauthenticated traffic is therefore keyed by IP alone.
+const keyByBranchAndIp = (req) => `${req.branchId || 'public'}:${req.ip}`;
 
 // This limiter runs on every /api request, before verifyToken, so it cannot read req.user.
 // It used to give the whole IP one 100/min bucket, which meant a shop's staff, its driver and

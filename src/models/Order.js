@@ -26,7 +26,9 @@ const statusHistorySchema = new mongoose.Schema({
 }, { _id: false });
 
 const orderSchema = new mongoose.Schema({
-  orderRef: { type: String, required: true, unique: true }, // ORD-2025-0001
+  // NAI-2026-0153 (branch code - year - per-branch sequence); orders from before branch codes look like
+  // ORD-2026-0152. Unique across ALL branches - utils/branchCode.js is what keeps that true.
+  orderRef: { type: String, required: true, unique: true },
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
   guestId: { type: mongoose.Schema.Types.ObjectId, ref: 'Guest', default: null },
   // Snapshot of the guest's name/phone at order placement — Guest documents can be

@@ -31,7 +31,7 @@ const { withGuestFallback, withGuestFallbackList } = require('../utils/orderGues
 const { escapeRegex } = require('../utils/escapeRegex');
 const couponService = require('./coupon.service');
 const { startOfMonthEAT } = require('../utils/businessTime');
-const { safeAbort } = require('../utils/transaction');
+const { runTransaction } = require('../utils/transaction');
 
 // Guards against float noise (e.g. 120.10 * 3 === 360.29999999999995) leaking into
 // stored order totals and downstream CSV/eTIMS output — not a business-rounding
@@ -386,38 +386,37 @@ const autoCancelExpiredPendingOrders = async (branchId) => {
   }).select('_id').lean();
 
   for (const { _id } of expiredOrders) {
-    const session = await mongoose.startSession();
-    session.startTransaction();
-
     try {
-      const order = await Order.findById(_id).session(session);
-      if (!order || order.status !== ORDER_STATUSES.PENDING) {
-        await session.commitTransaction();
-        continue;
-      }
+      const outcome = await runTransaction(async (session) => {
+        const order = await Order.findById(_id).session(session);
+        if (!order || order.status !== ORDER_STATUSES.PENDING) return null; // acted on since the list was read
 
-      const actorId = order.userId || order.guestId;
-      const note = `Auto-cancelled after ${settings.autoCancelHours} hour(s) in pending status`;
+        const actorId = order.userId || order.guestId;
+        const note = `Auto-cancelled after ${settings.autoCancelHours} hour(s) in pending status`;
 
-      validateTransition(order.status, ORDER_STATUSES.CANCELLED);
-      order.status = ORDER_STATUSES.CANCELLED;
-      order.statusHistory.push({
-        status: ORDER_STATUSES.CANCELLED,
-        changedAt: new Date(),
-        changedBy: actorId,
-        note
+        validateTransition(order.status, ORDER_STATUSES.CANCELLED);
+        order.status = ORDER_STATUSES.CANCELLED;
+        order.statusHistory.push({
+          status: ORDER_STATUSES.CANCELLED,
+          changedAt: new Date(),
+          changedBy: actorId,
+          note
+        });
+
+        const restocked = await releaseOrderStock(order, actorId, session, note);
+        if (order.couponCode) await couponService.releaseUsage(order.couponCode, order.branchId, session);
+        // A PENDING order can already be PAID — order.status only advances to
+        // APPROVED on admin action, but an M-Pesa STK payment can succeed while
+        // an order still sits PENDING awaiting approval (handleCallback never
+        // touches order.status). Same gap as reject()/cancel() — see refundPaymentIfPaid.
+        // Inside the transaction so the refund is recorded or the cancel doesn't happen.
+        const refunded = await refundPaymentIfPaid(order, note, session);
+        await order.save({ session });
+        return { order, actorId, restocked, refunded, note };
       });
+      if (!outcome) continue;
 
-      const restocked = await releaseOrderStock(order, actorId, session, note);
-      if (order.couponCode) await couponService.releaseUsage(order.couponCode, order.branchId, session);
-      // A PENDING order can already be PAID — order.status only advances to
-      // APPROVED on admin action, but an M-Pesa STK payment can succeed while
-      // an order still sits PENDING awaiting approval (handleCallback never
-      // touches order.status). Same gap as reject()/cancel() — see refundPaymentIfPaid.
-      // Inside the transaction so the refund is recorded or the cancel doesn't happen.
-      const refunded = await refundPaymentIfPaid(order, note, session);
-      await order.save({ session });
-      await session.commitTransaction();
+      const { order, actorId, restocked, refunded, note } = outcome;
       emitRestockEvents(restocked);
       if (refunded) await logRefund(order, actorId, order.userId ? 'customer' : 'guest', note);
       appEvents.emit(ORDER_EVENTS.CANCELLED, { order, branchId: order.branchId, refundOwed: refunded, automatic: true });
@@ -437,13 +436,10 @@ const autoCancelExpiredPendingOrders = async (branchId) => {
         }
       });
     } catch (err) {
-      await safeAbort(session);
-      // Don't let one order's failure (e.g. a write conflict with a concurrent
-      // admin approve()) abort the rest of this cycle's batch — log and move on,
-      // the next 5-minute run will pick this order back up if it's still eligible.
+      // Don't let one order's failure abort the rest of this cycle's batch — log and
+      // move on, the next 5-minute run will pick this order back up if it's still eligible.
+      // (A write conflict with a concurrent admin approve() is retried inside runTransaction.)
       logger.error('[autoCancel] Failed to auto-cancel order', { orderId: _id, err: err.message });
-    } finally {
-      session.endSession();
     }
   }
 };
@@ -453,9 +449,16 @@ const autoCancelExpiredPendingOrders = async (branchId) => {
 // retry resubmitting the same checkout) landing within a short window, since order
 // creation has no client-supplied idempotency key. Mirrors stock.service.js's
 // addDelivery duplicate guard.
+//
+// This is a check-then-insert, so on its own two simultaneous submissions both pass it and both
+// create an order (and both reserve stock). It is only race-free when called INSIDE the order's
+// transaction, AFTER generateOrderRef() has incremented the branch counter: every order on a branch
+// writes that one counter document, so two overlapping transactions cannot both get past that write -
+// the loser is retried by runTransaction, and on the retry this read sees the winner's committed order.
+// Do not move it above generateOrderRef().
 const DUPLICATE_ORDER_WINDOW_MS = 20000;
-const assertNoDuplicateOrder = async ({ branchId, userId = null, guestId = null, total, itemCount }) => {
-  if (!userId && !guestId) return; // brand-new guest — no prior order possible
+const assertNoDuplicateOrder = async ({ branchId, userId = null, guestId = null, total, itemCount, session = null }) => {
+  if (!userId && !guestId) return; // no customer to compare against
   const query = {
     branchId,
     userId,
@@ -463,7 +466,7 @@ const assertNoDuplicateOrder = async ({ branchId, userId = null, guestId = null,
     total,
     createdAt: { $gte: new Date(Date.now() - DUPLICATE_ORDER_WINDOW_MS) }
   };
-  const recent = await Order.findOne(query).sort({ createdAt: -1 }).select('orderItems').lean();
+  const recent = await Order.findOne(query).sort({ createdAt: -1 }).select('orderItems').session(session).lean();
   if (recent && recent.orderItems.length === itemCount) {
     throw new AppError(
       'An identical order was just placed — please wait before resubmitting',
@@ -574,17 +577,18 @@ const createGuestOrder = async (orderData, branchId) => {
       await guest.save();
     }
   }
-  await assertNoDuplicateOrder({
-    branchId, guestId: guest._id, total, itemCount: items.length
-  });
-
-  const session = await mongoose.startSession();
-  session.startTransaction();
-
-  try {
+  // The order, its stock reservation, the guest link and the coupon use commit together or not at
+  // all. runTransaction re-runs this whole block if MongoDB reports a write conflict with another
+  // order on the same branch (they all write the branch's order counter) - see utils/transaction.js.
+  const order = await runTransaction(async (session) => {
+    // Counter FIRST: it is the per-branch mutex that makes the duplicate check below race-free
+    // (see assertNoDuplicateOrder). Do not reorder.
     const orderRef = await generateOrderRef(branchId, session);
+    await assertNoDuplicateOrder({
+      branchId, guestId: guest._id, total, itemCount: items.length, session
+    });
 
-    let [order] = await Order.create([{
+    const [created] = await Order.create([{
       orderRef,
       branchId,
       guestId: guest._id,
@@ -622,33 +626,28 @@ const createGuestOrder = async (orderData, branchId) => {
       }]
     }], { session });
 
-    await reserveOrderStock(order, guest._id, 'guest', session);
-    await Guest.findByIdAndUpdate(guest._id, { $push: { orders: order._id } }, { session });
+    await reserveOrderStock(created, guest._id, 'guest', session);
+    await Guest.findByIdAndUpdate(guest._id, { $push: { orders: created._id } }, { session });
     if (couponCode) await couponService.incrementUsage(couponCode, branchId, session);
-    await session.commitTransaction();
+    return created;
+  });
 
-    await activityLogService.log({
-      actorId: guest._id,
-      actorRole: 'guest',
-      action: LOG_ACTIONS.ORDER_CREATED,
-      branchId,
-      targetId: order._id,
-      targetType: 'Order',
-      detail: {
-        orderRef, total: order.total, itemCount: items.length, stockReserved: true,
-        ...(couponCode && { couponCode, couponDiscount })
-      }
-    });
+  await activityLogService.log({
+    actorId: guest._id,
+    actorRole: 'guest',
+    action: LOG_ACTIONS.ORDER_CREATED,
+    branchId,
+    targetId: order._id,
+    targetType: 'Order',
+    detail: {
+      orderRef: order.orderRef, total: order.total, itemCount: items.length, stockReserved: true,
+      ...(couponCode && { couponCode, couponDiscount })
+    }
+  });
 
-    appEvents.emit(ORDER_EVENTS.PLACED, { order, branchId });
+  appEvents.emit(ORDER_EVENTS.PLACED, { order, branchId });
 
-    return order;
-  } catch (err) {
-    await safeAbort(session);
-    throw err;
-  } finally {
-    session.endSession();
-  }
+  return order;
 };
 
 // ── CREATE CUSTOMER ORDER ─────────────────────────────────────────────────────
@@ -704,14 +703,12 @@ const createCustomerOrder = async (orderData, userId, branchId) => {
   const preferredDriverId = await resolvePreferredDriver(orderData.preferredDriverId, branchId);
   const total = round2(Math.max(0, subtotal + deliveryFee + vatAmount - couponDiscount));
 
-  await assertNoDuplicateOrder({ branchId, userId, total, itemCount: items.length });
-
-  const session = await mongoose.startSession();
-  session.startTransaction();
-
-  try {
+  // Same shape as createGuestOrder: one retried transaction, counter first, duplicate check second.
+  const order = await runTransaction(async (session) => {
     const orderRef = await generateOrderRef(branchId, session);
-    let [order] = await Order.create([{
+    await assertNoDuplicateOrder({ branchId, userId, total, itemCount: items.length, session });
+
+    const [created] = await Order.create([{
       orderRef,
       branchId,
       userId,
@@ -747,33 +744,28 @@ const createCustomerOrder = async (orderData, userId, branchId) => {
       }]
     }], { session });
 
-    await reserveOrderStock(order, userId, 'customer', session);
-    await User.findByIdAndUpdate(userId, { $push: { orderHistory: order._id } }, { session });
+    await reserveOrderStock(created, userId, 'customer', session);
+    await User.findByIdAndUpdate(userId, { $push: { orderHistory: created._id } }, { session });
     if (couponCode) await couponService.incrementUsage(couponCode, branchId, session);
-    await session.commitTransaction();
+    return created;
+  });
 
-    await activityLogService.log({
-      actorId: userId,
-      actorRole: 'customer',
-      action: LOG_ACTIONS.ORDER_CREATED,
-      branchId,
-      targetId: order._id,
-      targetType: 'Order',
-      detail: {
-        orderRef, total: order.total, itemCount: items.length, stockReserved: true,
-        ...(couponCode && { couponCode, couponDiscount })
-      }
-    });
+  await activityLogService.log({
+    actorId: userId,
+    actorRole: 'customer',
+    action: LOG_ACTIONS.ORDER_CREATED,
+    branchId,
+    targetId: order._id,
+    targetType: 'Order',
+    detail: {
+      orderRef: order.orderRef, total: order.total, itemCount: items.length, stockReserved: true,
+      ...(couponCode && { couponCode, couponDiscount })
+    }
+  });
 
-    appEvents.emit(ORDER_EVENTS.PLACED, { order, branchId });
+  appEvents.emit(ORDER_EVENTS.PLACED, { order, branchId });
 
-    return order;
-  } catch (err) {
-    await safeAbort(session);
-    throw err;
-  } finally {
-    session.endSession();
-  }
+  return order;
 };
 
 // ── GET SINGLE ORDER ──────────────────────────────────────────────────────────
@@ -944,10 +936,7 @@ const validateTransition = (currentStatus, newStatus) => {
 const approve = async (orderId, adminId, branchId, actorRole = 'supervisor') => {
   // Auto-cancel is handled by autoCancel.job.js — no per-request call needed
 
-  const session = await mongoose.startSession();
-  session.startTransaction();
-
-  try {
+  const order = await runTransaction(async (session) => {
     const query = { _id: orderId };
     if (branchId) query.branchId = branchId;
     const order = await Order.findOne(query).session(session);
@@ -996,28 +985,22 @@ const approve = async (orderId, adminId, branchId, actorRole = 'supervisor') => 
     });
 
     await order.save({ session });
-    await session.commitTransaction();
-
-    await activityLogService.log({
-      actorId: adminId,
-      actorRole,
-      action: LOG_ACTIONS.ORDER_APPROVED,
-      branchId: order.branchId,
-      targetId: order._id,
-      targetType: 'Order',
-      detail: { orderRef: order.orderRef }
-    });
-
-    appEvents.emit(ORDER_EVENTS.APPROVED, { order, branchId: order.branchId });
-
     return order;
+  });
 
-  } catch (err) {
-    await safeAbort(session);
-    throw err;
-  } finally {
-    session.endSession();
-  }
+  await activityLogService.log({
+    actorId: adminId,
+    actorRole,
+    action: LOG_ACTIONS.ORDER_APPROVED,
+    branchId: order.branchId,
+    targetId: order._id,
+    targetType: 'Order',
+    detail: { orderRef: order.orderRef }
+  });
+
+  appEvents.emit(ORDER_EVENTS.APPROVED, { order, branchId: order.branchId });
+
+  return order;
 };
 
 // ── REJECT ORDER ──────────────────────────────────────────────────────────────
@@ -1027,10 +1010,7 @@ const reject = async (orderId, adminId, reason, branchId, actorRole = 'superviso
 
   validateReason(reason, 'A rejection reason');
 
-  const session = await mongoose.startSession();
-  session.startTransaction();
-
-  try {
+  const { order, restocked, refunded } = await runTransaction(async (session) => {
     const query = { _id: orderId };
     if (branchId) query.branchId = branchId;
     const order = await Order.findOne(query).session(session);
@@ -1051,32 +1031,28 @@ const reject = async (orderId, adminId, reason, branchId, actorRole = 'superviso
     if (order.couponCode) await couponService.releaseUsage(order.couponCode, order.branchId, session);
     const refunded = await refundPaymentIfPaid(order, reason, session);
     await order.save({ session });
-    await session.commitTransaction();
-    emitRestockEvents(restocked);
-    if (refunded) await logRefund(order, adminId, actorRole, reason);
+    return { order, restocked, refunded };
+  });
 
-    await activityLogService.log({
-      actorId: adminId,
-      actorRole,
-      action: LOG_ACTIONS.ORDER_REJECTED,
-      branchId: order.branchId,
-      targetId: order._id,
-      targetType: 'Order',
-      detail: {
-        orderRef: order.orderRef, reason, stockReleased: true,
-        ...(order.couponCode && { couponCode: order.couponCode, couponUsageReleased: true })
-      }
-    });
+  emitRestockEvents(restocked);
+  if (refunded) await logRefund(order, adminId, actorRole, reason);
 
-    appEvents.emit(ORDER_EVENTS.REJECTED, { order, branchId: order.branchId });
+  await activityLogService.log({
+    actorId: adminId,
+    actorRole,
+    action: LOG_ACTIONS.ORDER_REJECTED,
+    branchId: order.branchId,
+    targetId: order._id,
+    targetType: 'Order',
+    detail: {
+      orderRef: order.orderRef, reason, stockReleased: true,
+      ...(order.couponCode && { couponCode: order.couponCode, couponUsageReleased: true })
+    }
+  });
 
-    return order;
-  } catch (err) {
-    await safeAbort(session);
-    throw err;
-  } finally {
-    session.endSession();
-  }
+  appEvents.emit(ORDER_EVENTS.REJECTED, { order, branchId: order.branchId });
+
+  return order;
 };
 
 // ── REFUND HELPER ──────────────────────────────────────────────────────────────
@@ -1120,10 +1096,7 @@ const logRefund = (order, actorId, actorRole, reason) => activityLogService.log(
 // SRS 5.2 - staff+ moves order through the pipeline
 const updateStatus = async (orderId, newStatus, adminId, note = null, branchId, actorRole = 'staff') => {
   // Auto-cancel is handled by autoCancel.job.js — no per-request call needed
-  const session = await mongoose.startSession();
-  session.startTransaction();
-
-  try {
+  const { order, restocked, refunded } = await runTransaction(async (session) => {
     const query = { _id: orderId };
     if (branchId) query.branchId = branchId;
     const order = await Order.findOne(query).session(session);
@@ -1172,71 +1145,64 @@ const updateStatus = async (orderId, newStatus, adminId, note = null, branchId, 
     }
 
     await order.save({ session });
-    await session.commitTransaction();
-    emitRestockEvents(restocked);
+    return { order, restocked, refunded };
+  });
 
-    if (refunded) await logRefund(order, adminId, actorRole, note || 'Cancelled by staff');
-    if (newStatus === ORDER_STATUSES.CANCELLED) {
-      appEvents.emit(ORDER_EVENTS.CANCELLED, { order, branchId: order.branchId, refundOwed: refunded, reason: note });
-    }
-    if (newStatus === ORDER_STATUSES.COMPLETED) {
-      appEvents.emit(ORDER_EVENTS.COMPLETED, { order, branchId: order.branchId });
-    }
+  emitRestockEvents(restocked);
 
-    await activityLogService.log({
-      actorId: adminId,
-      actorRole,
-      action: LOG_ACTIONS.ORDER_STATUS_CHANGED,
-      branchId: order.branchId,
-      targetId: order._id,
-      targetType: 'Order',
-      detail: {
-        orderRef: order.orderRef,
-        newStatus,
-        note,
-        stockReleased: newStatus === ORDER_STATUSES.CANCELLED,
-        ...(newStatus === ORDER_STATUSES.CANCELLED && order.couponCode && {
-          couponCode: order.couponCode, couponUsageReleased: true
-        })
-      }
-    });
-
-    if (newStatus === ORDER_STATUSES.OUT_FOR_DELIVERY) {
-      appEvents.emit(ORDER_EVENTS.DISPATCHED, { order, branchId: order.branchId });
-    }
-
-    // eTIMS: fiscalise COD and pickup orders at the moment of completion — but
-    // only if the money has actually been confirmed. A COD order can now
-    // complete unpaid (see the gate above); those are fiscalised later by
-    // manualConfirmPayment when the supervisor confirms the cash.
-    // M-Pesa orders are already fiscalised when the payment callback arrives.
-    if (
-      newStatus === ORDER_STATUSES.COMPLETED &&
-      order.paymentMethod !== 'mpesa' &&
-      order.paymentStatus === PAYMENT_STATUSES.PAID
-    ) {
-      etimsService.submitInvoice(order._id).catch(err =>
-        logger.error('[eTIMS] Invoice submission failed on order completion', { orderId: order._id, err: err.message })
-      );
-    }
-
-    return order;
-  } catch (err) {
-    await safeAbort(session);
-    throw err;
-  } finally {
-    session.endSession();
+  if (refunded) await logRefund(order, adminId, actorRole, note || 'Cancelled by staff');
+  if (newStatus === ORDER_STATUSES.CANCELLED) {
+    appEvents.emit(ORDER_EVENTS.CANCELLED, { order, branchId: order.branchId, refundOwed: refunded, reason: note });
   }
+  if (newStatus === ORDER_STATUSES.COMPLETED) {
+    appEvents.emit(ORDER_EVENTS.COMPLETED, { order, branchId: order.branchId });
+  }
+
+  await activityLogService.log({
+    actorId: adminId,
+    actorRole,
+    action: LOG_ACTIONS.ORDER_STATUS_CHANGED,
+    branchId: order.branchId,
+    targetId: order._id,
+    targetType: 'Order',
+    detail: {
+      orderRef: order.orderRef,
+      newStatus,
+      note,
+      stockReleased: newStatus === ORDER_STATUSES.CANCELLED,
+      ...(newStatus === ORDER_STATUSES.CANCELLED && order.couponCode && {
+        couponCode: order.couponCode, couponUsageReleased: true
+      })
+    }
+  });
+
+  if (newStatus === ORDER_STATUSES.OUT_FOR_DELIVERY) {
+    appEvents.emit(ORDER_EVENTS.DISPATCHED, { order, branchId: order.branchId });
+  }
+
+  // eTIMS: fiscalise COD and pickup orders at the moment of completion — but
+  // only if the money has actually been confirmed. A COD order can now
+  // complete unpaid (see the gate above); those are fiscalised later by
+  // manualConfirmPayment when the supervisor confirms the cash.
+  // M-Pesa orders are already fiscalised when the payment callback arrives.
+  if (
+    newStatus === ORDER_STATUSES.COMPLETED &&
+    order.paymentMethod !== 'mpesa' &&
+    order.paymentStatus === PAYMENT_STATUSES.PAID
+  ) {
+    etimsService.submitInvoice(order._id).catch(err =>
+      logger.error('[eTIMS] Invoice submission failed on order completion', { orderId: order._id, err: err.message })
+    );
+  }
+
+  return order;
 };
 
 // ── CANCEL ORDER ──────────────────────────────────────────────────────────────
 // SRS 5.2 - customer can cancel only if still pending
 const cancel = async (orderId, userId) => {
   // Auto-cancel is handled by autoCancel.job.js — no per-request call needed
-  const session = await mongoose.startSession();
-  session.startTransaction();
-
-  try {
+  const { order, restocked, refunded } = await runTransaction(async (session) => {
     const order = await Order.findById(orderId).session(session);
     // Same 404 for "doesn't exist" and "isn't yours" — a distinct 403 would let a
     // logged-in customer enumerate which order IDs exist by reading the status code.
@@ -1267,32 +1233,28 @@ const cancel = async (orderId, userId) => {
     if (order.couponCode) await couponService.releaseUsage(order.couponCode, order.branchId, session);
     const refunded = await refundPaymentIfPaid(order, 'Cancelled by customer', session);
     await order.save({ session });
-    await session.commitTransaction();
-    emitRestockEvents(restocked);
+    return { order, restocked, refunded };
+  });
 
-    if (refunded) await logRefund(order, userId, 'customer', 'Cancelled by customer');
-    appEvents.emit(ORDER_EVENTS.CANCELLED, { order, branchId: order.branchId, refundOwed: refunded, byCustomer: true });
+  emitRestockEvents(restocked);
 
-    await activityLogService.log({
-      actorId: userId,
-      actorRole: 'customer',
-      action: LOG_ACTIONS.ORDER_CANCELLED,
-      branchId: order.branchId,
-      targetId: order._id,
-      targetType: 'Order',
-      detail: {
-        orderRef: order.orderRef, stockReleased: true,
-        ...(order.couponCode && { couponCode: order.couponCode, couponUsageReleased: true })
-      }
-    });
+  if (refunded) await logRefund(order, userId, 'customer', 'Cancelled by customer');
+  appEvents.emit(ORDER_EVENTS.CANCELLED, { order, branchId: order.branchId, refundOwed: refunded, byCustomer: true });
 
-    return order;
-  } catch (err) {
-    await safeAbort(session);
-    throw err;
-  } finally {
-    session.endSession();
-  }
+  await activityLogService.log({
+    actorId: userId,
+    actorRole: 'customer',
+    action: LOG_ACTIONS.ORDER_CANCELLED,
+    branchId: order.branchId,
+    targetId: order._id,
+    targetType: 'Order',
+    detail: {
+      orderRef: order.orderRef, stockReleased: true,
+      ...(order.couponCode && { couponCode: order.couponCode, couponUsageReleased: true })
+    }
+  });
+
+  return order;
 };
 
 // ── BULK APPROVE ──────────────────────────────────────────────────────────────
@@ -1369,18 +1331,11 @@ const getPackingSlip = async (orderId, branchId) => {
 // Admin assigns a driver when order is preparing or out_for_delivery.
 // Automatically transitions preparing → out_for_delivery on first assignment.
 const assignDriver = async (orderId, driverId, adminId, branchId, actorRole = 'admin') => {
-  const session = await mongoose.startSession();
-  session.startTransaction();
-
-  // Declared out here (not inside the try) because it's read after the
-  // try/catch/finally — a const inside the try block is invisible at the
-  // emit site below and threw a ReferenceError AFTER the transaction had
-  // already committed, failing every assignment response.
-  let order, driver;
-  let dispatchedNow = false;
-  let previousDriverId = null;
-  try {
-    order = await Order.findOne({ _id: orderId, branchId }).session(session);
+  // Everything the code after the commit needs (activity log, dispatch/reassign events) is
+  // returned from the transaction - it must not be read from variables assigned inside a
+  // callback that may run more than once.
+  const { order, driver, dispatchedNow, previousDriverId } = await runTransaction(async (session) => {
+    const order = await Order.findOne({ _id: orderId, branchId }).session(session);
     if (!order) throw new AppError('Order not found', 404, 'ORDER_NOT_FOUND');
 
     if (order.deliveryMethod !== 'delivery') {
@@ -1392,7 +1347,7 @@ const assignDriver = async (orderId, driverId, adminId, branchId, actorRole = 'a
       throw new AppError(`Driver can only be assigned when order is preparing or out for delivery`, 400, 'INVALID_ORDER_STATUS');
     }
 
-    driver = await User.findOne({ _id: driverId, role: ROLES.DRIVER, branchId }).session(session);
+    const driver = await User.findOne({ _id: driverId, role: ROLES.DRIVER, branchId }).session(session);
     if (!driver) throw new AppError('Driver not found in this branch', 404, 'DRIVER_NOT_FOUND');
     // A locked driver can't log in to see or complete the delivery — assigning
     // them strands the order. (isAvailableForDelivery stays a soft preference;
@@ -1404,11 +1359,11 @@ const assignDriver = async (orderId, driverId, adminId, branchId, actorRole = 'a
     // Captured BEFORE the overwrite so a reassignment can be detected afterwards
     // and the driver being replaced can be told to stand down (see the emit at
     // the end of this function).
-    previousDriverId = order.driverId ? String(order.driverId) : null;
+    const previousDriverId = order.driverId ? String(order.driverId) : null;
     order.driverId = driverId;
 
     // Auto-advance: preparing → out_for_delivery when driver is first assigned
-    dispatchedNow = order.status === ORDER_STATUSES.PREPARING;
+    const dispatchedNow = order.status === ORDER_STATUSES.PREPARING;
     if (order.status === ORDER_STATUSES.PREPARING) {
       validateTransition(order.status, ORDER_STATUSES.OUT_FOR_DELIVERY);
       order.status = ORDER_STATUSES.OUT_FOR_DELIVERY;
@@ -1421,13 +1376,8 @@ const assignDriver = async (orderId, driverId, adminId, branchId, actorRole = 'a
     }
 
     await order.save({ session });
-    await session.commitTransaction();
-  } catch (err) {
-    await safeAbort(session);
-    throw err;
-  } finally {
-    session.endSession();
-  }
+    return { order, driver, dispatchedNow, previousDriverId };
+  });
 
   await activityLogService.log({
     actorId: adminId,

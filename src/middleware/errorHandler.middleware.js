@@ -18,6 +18,7 @@ const errorHandler = (err, req, res, next) => {
     err.name === 'ValidationError' ||
     err.name === 'JsonWebTokenError' ||
     err.name === 'TokenExpiredError' ||
+    err.name === 'MulterError' ||
     err.code === 11000 ||
     (err.statusCode && err.statusCode < 500);
 
@@ -39,6 +40,35 @@ const errorHandler = (err, req, res, next) => {
       success: false,
       error: 'INVALID_ID',
       message: 'Invalid identifier format'
+    });
+  }
+
+  // Request-body failures from body-parser. Without these the caller got the library's wording
+  // ("request entity too large") under a generic SERVER_ERROR code.
+  if (err.type === 'entity.too.large') {
+    return res.status(413).json({
+      success: false,
+      error: 'PAYLOAD_TOO_LARGE',
+      message: 'That request is too large to process.'
+    });
+  }
+  if (err.type === 'entity.parse.failed') {
+    return res.status(400).json({
+      success: false,
+      error: 'INVALID_JSON',
+      message: 'The request body is not valid JSON.'
+    });
+  }
+
+  // Upload failures from multer (file too big, too many files, unexpected field). These used to fall
+  // through to the 500 branch below - an admin picking a 6MB image got "An unexpected error occurred"
+  // and a server-error alert.
+  if (err.name === 'MulterError') {
+    const tooLarge = err.code === 'LIMIT_FILE_SIZE';
+    return res.status(tooLarge ? 413 : 400).json({
+      success: false,
+      error: tooLarge ? 'FILE_TOO_LARGE' : 'UPLOAD_ERROR',
+      message: tooLarge ? 'That file is too large. Please choose a smaller one.' : 'The upload could not be processed.'
     });
   }
 

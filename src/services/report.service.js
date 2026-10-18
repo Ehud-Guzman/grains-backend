@@ -6,6 +6,7 @@ const StockLog = require('../models/StockLog');
 const User = require('../models/User');
 const { NAIROBI_TZ, startOfDayEAT, endOfDayEAT, startOfMonthEAT } = require('../utils/businessTime');
 const { withGuestFallbackList } = require('../utils/orderGuestFallback');
+const { AppError } = require('../middleware/errorHandler.middleware');
 
 // ── HELPERS ───────────────────────────────────────────────────────────────────
 // Day/month boundaries follow the Nairobi clock (see utils/businessTime.js) —
@@ -279,6 +280,8 @@ const getSalesReport = async (period, from, to, branchId) => {
 // UX B5 - products ranked by units sold and revenue
 const getBestSellers = async (period, from, to, limit = 10, branchId) => {
   const { start, end } = getDateRange(period, from, to);
+  // ?limit=abc (or 0, or 1e9) used to reach $limit unchecked and Mongo rejected it with a 500.
+  const rowLimit = Math.min(100, Math.max(1, Number.parseInt(limit, 10) || 10));
   const branchFilter = branchId ? { branchId: new mongoose.Types.ObjectId(String(branchId)) } : {};
 
   const results = await Order.aggregate([
@@ -314,7 +317,7 @@ const getBestSellers = async (period, from, to, limit = 10, branchId) => {
       }
     },
     { $sort: { unitsSold: -1 } },
-    { $limit: Number(limit) },
+    { $limit: rowLimit },
     {
       $project: {
         productId: '$_id.productId',
@@ -335,8 +338,9 @@ const getBestSellers = async (period, from, to, limit = 10, branchId) => {
 // ── SLOW MOVERS ───────────────────────────────────────────────────────────────
 // UX B5 - products with zero or low order frequency in last 30 days
 const getSlowMovers = async (days = 30, branchId) => {
+  const windowDays = Math.min(730, Math.max(1, Number.parseInt(days, 10) || 30));
   const cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - days);
+  cutoff.setDate(cutoff.getDate() - windowDays);
   const branchFilter = branchId ? { branchId: new mongoose.Types.ObjectId(String(branchId)) } : {};
 
   // Get all active products
@@ -360,10 +364,10 @@ const getSlowMovers = async (days = 30, branchId) => {
       name: p.name,
       category: p.category,
       varietyCount: p.varieties.length,
-      daysWithoutSale: days
+      daysWithoutSale: windowDays
     }));
 
-  return { days, slowMovers, count: slowMovers.length };
+  return { days: windowDays, slowMovers, count: slowMovers.length };
 };
 
 // ── STOCK VALUATION ───────────────────────────────────────────────────────────
@@ -856,7 +860,7 @@ const exportReport = async (type, params, branchId) => {
     }
 
     default:
-      throw new Error('Unknown report type');
+      throw new AppError('Unknown report type', 400, 'UNKNOWN_REPORT_TYPE');
   }
 };
 

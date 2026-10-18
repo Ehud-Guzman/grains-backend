@@ -37,10 +37,27 @@ const generatePassword = (shortcode, passkey, timestamp) => {
   return Buffer.from(`${shortcode}${passkey}${timestamp}`).toString('base64');
 };
 
+// Safaricom occasionally adds callback addresses. Rather than waiting for a code change, the owner
+// can append them (comma-separated) in MPESA_CALLBACK_EXTRA_IPS on Render.
+const allowedCallbackIps = () => [
+  ...SAFARICOM_IPS,
+  ...String(process.env.MPESA_CALLBACK_EXTRA_IPS || '').split(',').map((s) => s.trim()).filter(Boolean),
+];
+
+// What the server knows about who is calling - logged and emailed whenever a callback is turned
+// away, so a wrong guess about Render's proxy chain is visible in minutes instead of silently
+// swallowing every real payment confirmation.
+const describeCallbackSource = (req) => ({
+  'Resolved IP (req.ip)': req.ip || 'none',
+  'X-Forwarded-For': req.headers?.['x-forwarded-for'] || 'none',
+  'Socket address': req.socket?.remoteAddress || 'none',
+  'Trusted proxy hops': String(req.app?.get?.('trust proxy') ?? 'unknown'),
+});
+
 // Validate that a callback is coming from Safaricom's IPs.
-// Uses only req.ip — trust proxy is set to 1, so Express resolves the correct
-// client IP from X-Forwarded-For via Render's load balancer. Reading the raw
-// header as a fallback would allow an attacker to spoof it.
+// Uses only req.ip — Express resolves the client IP from X-Forwarded-For using the `trust proxy`
+// hop count (TRUST_PROXY_HOPS, default 1). Reading the raw header as a fallback would allow an
+// attacker to spoof it.
 // In development/sandbox — allow all IPs.
 const validateSafaricomIP = (req) => {
   if (process.env.MPESA_ENV !== 'production') return true;
@@ -51,15 +68,21 @@ const validateSafaricomIP = (req) => {
   // since that's how some proxy/runtime configs report an IPv4 client.
   const rawIp = req.ip || '';
   const ip = rawIp.startsWith('::ffff:') ? rawIp.slice(7) : rawIp;
-  const isValid = !!ip && SAFARICOM_IPS.includes(ip);
-
-  if (!isValid) {
-    const logger = require('./logger');
-    logger.warn('[M-PESA] Callback from unrecognized IP', { ip: rawIp });
-  }
-
-  return isValid;
+  return !!ip && allowedCallbackIps().includes(ip);
 };
+
+// Daraja caps the STK push AccountReference at 12 alphanumeric characters (and the TransactionDesc
+// at 13). Our order references are longer than 12 once the hyphens are counted - 'NAI-2026-0153'
+// is 13 - and Daraja answers an over-long reference with "Bad Request - Invalid AccountReference",
+// so every payment would fail at the first live push. The reference is informational only (payments
+// are matched by CheckoutRequestID), so a compact form is enough: NAI-2026-0153 -> NAI20260153.
+const toAccountReference = (orderRef) => {
+  const compact = String(orderRef || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (!compact) return 'ORDER';
+  return compact.length <= 12 ? compact : compact.slice(-12); // keep the year + sequence tail
+};
+
+const STK_TRANSACTION_DESC = 'Order payment'; // exactly 13 characters
 
 // Parse M-Pesa callback result items into a flat object
 const parseCallbackMetadata = (items = []) => {
@@ -96,5 +119,8 @@ module.exports = {
   generateTimestamp,
   generatePassword,
   validateSafaricomIP,
+  describeCallbackSource,
+  toAccountReference,
+  STK_TRANSACTION_DESC,
   parseCallbackMetadata
 };

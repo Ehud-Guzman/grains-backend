@@ -11,6 +11,7 @@ const { validate } = require('../../middleware/validate.middleware');
 const { createPromotionValidator, updatePromotionValidator } = require('../../validators/promotion.validator');
 const { isValidImageBuffer } = require('../../utils/validateImageBuffer');
 const { isValidVideoBuffer } = require('../../utils/validateVideoBuffer');
+const { AppError } = require('../../middleware/errorHandler.middleware');
 
 router.use(verifyToken, adminLimiter, checkPlatformLock);
 
@@ -20,7 +21,7 @@ const upload = multer({
   limits: { fileSize: 5 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     const ok = ['image/jpeg', 'image/png', 'image/webp', 'image/jpg'].includes(file.mimetype);
-    ok ? cb(null, true) : cb(new Error('Only JPEG, PNG or WebP images are allowed'));
+    ok ? cb(null, true) : cb(new AppError('Only JPEG, PNG or WebP images are allowed', 400, 'INVALID_FILE_TYPE'));
   },
 });
 
@@ -32,7 +33,7 @@ const uploadVideo = multer({
   limits: { fileSize: 25 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     const ok = ['video/mp4', 'video/webm', 'video/quicktime'].includes(file.mimetype);
-    ok ? cb(null, true) : cb(new Error('Only MP4, WebM or MOV videos are allowed'));
+    ok ? cb(null, true) : cb(new AppError('Only MP4, WebM or MOV videos are allowed', 400, 'INVALID_FILE_TYPE'));
   },
 });
 

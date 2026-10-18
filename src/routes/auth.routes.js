@@ -10,6 +10,7 @@ const { verifyToken, optionalAuth } = require('../middleware/auth.middleware');
 const { authLimiter, refreshLimiter } = require('../middleware/rateLimit.middleware');
 const multer = require('multer');
 const { UPLOAD_LIMITS } = require('../utils/constants');
+const { AppError } = require('../middleware/errorHandler.middleware');
 
 // Multer for avatar uploads
 const avatarUpload = multer({
@@ -19,7 +20,7 @@ const avatarUpload = multer({
     const allowed = ['image/jpeg', 'image/png', 'image/webp', 'image/jpg'];
     allowed.includes(file.mimetype)
       ? cb(null, true)
-      : cb(new Error('Only JPEG, PNG, or WebP images are allowed'));
+      : cb(new AppError('Only JPEG, PNG, or WebP images are allowed', 400, 'INVALID_FILE_TYPE'));
   }
 });
 

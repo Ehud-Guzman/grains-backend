@@ -7,6 +7,7 @@ const { adminLimiter } = require('../middleware/rateLimit.middleware');
 const { checkPlatformLock } = require('../middleware/platformLock.middleware');
 const multer = require('multer');
 const { UPLOAD_LIMITS } = require('../utils/constants');
+const { AppError } = require('../middleware/errorHandler.middleware');
 
 // In-memory multer for the optional proof-of-delivery photo (streamed to Cloudinary)
 const proofUpload = multer({
@@ -16,7 +17,7 @@ const proofUpload = multer({
     const allowed = ['image/jpeg', 'image/png', 'image/webp', 'image/jpg'];
     allowed.includes(file.mimetype)
       ? cb(null, true)
-      : cb(new Error('Only JPEG, PNG, or WebP images are allowed'));
+      : cb(new AppError('Only JPEG, PNG, or WebP images are allowed', 400, 'INVALID_FILE_TYPE'));
   }
 });
 

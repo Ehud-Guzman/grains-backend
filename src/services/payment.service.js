@@ -18,8 +18,27 @@ const {
   formatPhone,
   generateTimestamp,
   generatePassword,
-  parseCallbackMetadata
+  parseCallbackMetadata,
+  toAccountReference,
+  STK_TRANSACTION_DESC
 } = require('../utils/mpesaHelpers');
+
+// Safaricom's TransactionDate is YYYYMMDDHHMMSS in Nairobi time. Returns null when absent/garbled.
+const parseSafaricomTimestamp = (value) => {
+  if (!value) return null;
+  const raw = String(value);
+  const parsed = new Date(
+    `${raw.slice(0,4)}-${raw.slice(4,6)}-${raw.slice(6,8)}T${raw.slice(8,10)}:${raw.slice(10,12)}:${raw.slice(12,14)}`
+  );
+  return isNaN(parsed.getTime()) ? null : parsed;
+};
+
+// How many STK prompts one phone number may be sent in a window, whoever asks. The per-IP limiter
+// stops one machine hammering the endpoint, but a prompt lands on the VICTIM's handset: a handful of
+// addresses (or a botnet) could still spam any number. A genuine customer who cancels or mistypes
+// needs two or three tries, not more than five in ten minutes.
+const STK_PHONE_WINDOW_MS = 10 * 60 * 1000;
+const STK_PHONE_MAX_PROMPTS = 5;
 
 // Tells the customer their payment landed. Fire-and-forget: a lookup or listener
 // failure must never fail a payment that has already been recorded.
@@ -57,7 +76,28 @@ const initiateStkPush = async (orderId, phone) => {
   if (!shortcode || !passkey || !callbackURL) {
     throw new AppError('M-Pesa payment is temporarily unavailable. Please try again shortly, or contact us to pay another way.', 503, 'MPESA_NOT_CONFIGURED');
   }
-  const formattedPhone = formatPhone(phone);
+  let formattedPhone;
+  try {
+    if (typeof phone !== 'string') throw new Error('phone must be text');
+    formattedPhone = formatPhone(phone);
+  } catch {
+    throw new AppError('Enter a valid Kenyan phone number', 400, 'INVALID_PHONE');
+  }
+
+  // Checked before the claim below, like the other pre-flight checks: a refusal here must leave the
+  // order exactly as it was.
+  const recentPrompts = await Payment.countDocuments({
+    method: PAYMENT_METHODS.MPESA,
+    mpesaPhone: formattedPhone,
+    createdAt: { $gte: new Date(Date.now() - STK_PHONE_WINDOW_MS) }
+  });
+  if (recentPrompts >= STK_PHONE_MAX_PROMPTS) {
+    throw new AppError(
+      'Several payment prompts have already been sent to this phone number. Please wait a few minutes before trying again.',
+      429,
+      'TOO_MANY_PROMPTS'
+    );
+  }
 
   // Atomic guard: flip paymentStatus to PENDING only if the order is not already
   // PAID or PENDING. This prevents two concurrent requests both passing the check
@@ -168,8 +208,9 @@ const initiateStkPush = async (orderId, phone) => {
     PartyB:            shortcode,
     PhoneNumber:       formattedPhone,
     CallBackURL:       callbackURL,
-    AccountReference:  order.orderRef,
-    TransactionDesc:   `Payment for ${order.orderRef}`
+    // Daraja limits these to 12 and 13 characters - see toAccountReference.
+    AccountReference:  toAccountReference(order.orderRef),
+    TransactionDesc:   STK_TRANSACTION_DESC
   };
 
   let darajaResponse;
@@ -367,6 +408,21 @@ const handleCallback = async (callbackData) => {
     return { success: false, status: 'late_success_unreconciled', mpesaTransactionId };
   }
 
+  // A payment recovered by the status-query job was confirmed without a receipt number (the query
+  // does not return one). If Safaricom's callback finally turns up, take the receipt from it -
+  // nothing else about the payment changes. Only ever fills an empty field, so a replay is harmless.
+  if (payment.status === PAYMENT_STATUSES.PAID && payment.reconciledViaQuery && !payment.mpesaTransactionId && ResultCode === 0) {
+    const late = parseCallbackMetadata(CallbackMetadata?.Item || []);
+    if (late.MpesaReceiptNumber) {
+      await Payment.updateOne(
+        { _id: payment._id, mpesaTransactionId: null },
+        { $set: { mpesaTransactionId: late.MpesaReceiptNumber, safaricomTimestamp: parseSafaricomTimestamp(late.TransactionDate) } }
+      ).catch(err => logger.error('[M-PESA] Could not record the late receipt number', { paymentId: payment._id, err: err.message }));
+      logger.info('[M-PESA] Late callback supplied the receipt for a status-query payment', { CheckoutRequestID, mpesaTransactionId: late.MpesaReceiptNumber });
+    }
+    return { success: true, message: 'Receipt recorded' };
+  }
+
   if (payment.status === PAYMENT_STATUSES.PAID || payment.status === PAYMENT_STATUSES.FAILED) {
     logger.info('[M-PESA] Duplicate callback ignored — already in terminal state', { CheckoutRequestID, status: payment.status });
     return { success: true, message: 'Already processed' };
@@ -379,14 +435,7 @@ const handleCallback = async (callbackData) => {
     const paidAmount         = metadata.Amount;
 
     // Parse Safaricom's TransactionDate (YYYYMMDDHHMMSS) into a JS Date
-    let safaricomTimestamp = null;
-    if (metadata.TransactionDate) {
-      const raw = String(metadata.TransactionDate);
-      safaricomTimestamp = new Date(
-        `${raw.slice(0,4)}-${raw.slice(4,6)}-${raw.slice(6,8)}T${raw.slice(8,10)}:${raw.slice(10,12)}:${raw.slice(12,14)}`
-      );
-      if (isNaN(safaricomTimestamp.getTime())) safaricomTimestamp = null;
-    }
+    const safaricomTimestamp = parseSafaricomTimestamp(metadata.TransactionDate);
 
     // Verify Safaricom paid the correct amount — reject underpayments
     if (!paidAmount || Math.ceil(paidAmount) < Math.ceil(payment.amount)) {
@@ -570,6 +619,159 @@ const handleCallback = async (callbackData) => {
     logger.info('[M-PESA] Payment failed', { resultCode: ResultCode, resultDesc: ResultDesc, orderId: payment.orderId });
     return { success: false, status: 'failed', resultCode: ResultCode, resultDesc: ResultDesc };
   }
+};
+
+// ── STK QUERY (ask Daraja what happened to a prompt) ──────────────────────────
+// Safaricom's callback is the normal way to learn the outcome, but it can fail to arrive (a dropped
+// request, a callback URL that was briefly unreachable, an IP the allow-list does not recognise).
+// Without a fallback the customer has paid, the order stays "unpaid", and an M-Pesa order cannot be
+// approved until it is paid - staff had to spot it in the cash-up report and confirm it by hand.
+//
+// Daraja's answer for a prompt that is still being worked on is an HTTP *error* with this code.
+const STK_STILL_PROCESSING_CODE = '500.001.1001';
+
+/**
+ * Resolves { state: 'paid' | 'failed' | 'processing' | 'unknown', resultCode?, resultDesc? }.
+ * 'paid' / 'failed' are returned ONLY for an unmistakable answer about this exact request
+ * (ResponseCode 0, matching CheckoutRequestID, a purely numeric ResultCode). Anything else is
+ * 'unknown' and changes nothing - a misread here would mark an order paid that is not.
+ * Throws on network/auth errors so the caller can leave the payment for the next run.
+ */
+const queryStkStatus = async (checkoutRequestId) => {
+  const shortcode = process.env.MPESA_SHORTCODE;
+  const passkey   = process.env.MPESA_PASSKEY;
+  if (!shortcode || !passkey) {
+    throw new AppError('M-Pesa is not configured', 503, 'MPESA_NOT_CONFIGURED');
+  }
+
+  const token = await getDarajaToken();
+  const timestamp = generateTimestamp();
+
+  let data;
+  try {
+    const response = await axios.post(getUrls().stkquery, {
+      BusinessShortCode: shortcode,
+      Password:          generatePassword(shortcode, passkey, timestamp),
+      Timestamp:         timestamp,
+      CheckoutRequestID: checkoutRequestId
+    }, {
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      timeout: 15000
+    });
+    data = response.data;
+  } catch (err) {
+    if (err.response?.data?.errorCode === STK_STILL_PROCESSING_CODE) return { state: 'processing' };
+    throw new Error(`STK query failed: ${err.response?.data?.errorMessage || err.message}`);
+  }
+
+  if (!data || String(data.ResponseCode) !== '0') return { state: 'unknown' };
+  if (data.CheckoutRequestID && data.CheckoutRequestID !== checkoutRequestId) return { state: 'unknown' };
+
+  // Never Number(): an empty string would become 0 and read as "paid".
+  const rawResult = String(data.ResultCode ?? '').trim();
+  if (!/^\d+$/.test(rawResult)) return { state: 'unknown' };
+
+  const resultCode = Number(rawResult);
+  return { state: resultCode === 0 ? 'paid' : 'failed', resultCode, resultDesc: data.ResultDesc || null };
+};
+
+// A prompt normally resolves within about a minute. Wait a little longer than that before asking, so
+// the callback gets first go, and stop asking after a few hours - past that it is a human's job (the
+// cash-up report lists anything still pending).
+const RECONCILE_MIN_AGE_MS = 3 * 60 * 1000;
+const RECONCILE_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+const RECONCILE_BATCH_SIZE = 20;
+
+/**
+ * Resolve M-Pesa payments stuck at "pending" because no callback arrived, by asking Daraja.
+ *
+ * The outcome is applied by feeding a synthetic callback through handleCallback, so a recovered
+ * payment gets exactly the same treatment as a real one (atomic claim, order flipped to paid together
+ * with the payment, cancelled-order refund bookkeeping, eTIMS, customer notification) and a real
+ * callback arriving at the same moment cannot double-apply it. The one difference: the query returns
+ * no receipt number, so a recovered payment is flagged `reconciledViaQuery` and carries none unless a
+ * late callback eventually supplies it.
+ *
+ * `query` is injectable for tests. Never throws for a single payment - one bad lookup must not stop
+ * the rest of the batch.
+ */
+const reconcilePendingPayments = async ({
+  query = queryStkStatus,
+  now = Date.now(),
+  minAgeMs = RECONCILE_MIN_AGE_MS,
+  maxAgeMs = RECONCILE_MAX_AGE_MS,
+  batchSize = RECONCILE_BATCH_SIZE
+} = {}) => {
+  const candidates = await Payment.find({
+    method: PAYMENT_METHODS.MPESA,
+    status: PAYMENT_STATUSES.PENDING,
+    checkoutRequestId: { $type: 'string' },
+    createdAt: { $lte: new Date(now - minAgeMs), $gte: new Date(now - maxAgeMs) }
+  }).sort({ createdAt: 1 }).limit(batchSize).lean();
+
+  const summary = { checked: candidates.length, recovered: 0, failed: 0, stillProcessing: 0, errors: 0 };
+  const recoveredRefs = [];
+
+  for (const payment of candidates) {
+    try {
+      const result = await query(payment.checkoutRequestId);
+
+      if (result.state !== 'paid' && result.state !== 'failed') {
+        summary.stillProcessing += 1;
+        continue;
+      }
+
+      const outcome = await handleCallback({
+        Body: {
+          stkCallback: {
+            CheckoutRequestID: payment.checkoutRequestId,
+            ResultCode: result.state === 'paid' ? 0 : result.resultCode,
+            ResultDesc: result.resultDesc || (result.state === 'paid' ? 'Confirmed by status query' : 'Failed per status query'),
+            // The amount of an STK push is fixed by the request we sent, so a successful result
+            // means exactly payment.amount moved.
+            ...(result.state === 'paid' && { CallbackMetadata: { Item: [{ Name: 'Amount', Value: payment.amount }] } })
+          }
+        }
+      });
+
+      if (result.state === 'failed') {
+        summary.failed += 1;
+        continue;
+      }
+
+      // 'Already processed' means a real callback beat us to it - nothing left to do or flag.
+      if (outcome.status !== 'paid' && outcome.status !== 'order_terminal') continue;
+
+      summary.recovered += 1;
+      await Payment.updateOne(
+        { _id: payment._id },
+        { $set: { reconciledViaQuery: true, reconciledAt: new Date() } }
+      );
+      const order = await Order.findById(payment.orderId).select('orderRef branchId').lean();
+      recoveredRefs.push(order?.orderRef || String(payment.orderId));
+      await activityLogService.log({
+        actorId:    payment.orderId,
+        actorRole:  'system',
+        action:     LOG_ACTIONS.PAYMENT_RECONCILED,
+        branchId:   order?.branchId || null,
+        targetId:   payment._id,
+        targetType: 'Payment',
+        detail:     { orderRef: order?.orderRef, amount: payment.amount, outcome: outcome.status, note: 'Confirmed by asking Daraja — no callback arrived, so no receipt code is recorded. Match it on the M-Pesa statement.' }
+      });
+    } catch (err) {
+      summary.errors += 1;
+      logger.warn('[M-PESA] Status query failed — will retry next run', { paymentId: payment._id, err: err.message });
+    }
+  }
+
+  if (recoveredRefs.length > 0) {
+    alertService.sendAlert('MPESA_RECONCILED', {
+      'Payments recovered': recoveredRefs.length,
+      'Order refs': recoveredRefs.join(', ')
+    }, 'global').catch(alertErr => logger.error('[M-PESA] Alert failed', { err: alertErr.message }));
+  }
+
+  return summary;
 };
 
 // ── CHECK PAYMENT STATUS ──────────────────────────────────────────────────────
@@ -772,6 +974,8 @@ const manualConfirmPayment = async (orderId, adminId, transactionRef, actorRole 
 module.exports = {
   initiateStkPush,
   handleCallback,
+  queryStkStatus,
+  reconcilePendingPayments,
   checkPaymentStatus,
   manualConfirmPayment,
   changePaymentMethod

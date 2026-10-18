@@ -11,6 +11,7 @@ const { checkPlatformLock } = require('../../middleware/platformLock.middleware'
 const multer = require('multer');
 const cloudinary = require('cloudinary').v2;
 const { isValidImageBuffer } = require('../../utils/validateImageBuffer');
+const { AppError } = require('../../middleware/errorHandler.middleware');
 
 // Cloudinary config — credentials from .env, never hardcoded
 cloudinary.config({
@@ -28,7 +29,7 @@ const uploadExcel = multer({
       'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       'application/vnd.ms-excel',
     ];
-    allowed.includes(file.mimetype) ? cb(null, true) : cb(new Error('Only Excel files are accepted'));
+    allowed.includes(file.mimetype) ? cb(null, true) : cb(new AppError('Only Excel files are accepted', 400, 'INVALID_FILE_TYPE'));
   }
 });
 
@@ -38,7 +39,7 @@ const uploadImages = multer({
   limits: { fileSize: 5 * 1024 * 1024 }, // 5MB per image
   fileFilter: (req, file, cb) => {
     const allowed = ['image/jpeg', 'image/png', 'image/webp', 'image/jpg'];
-    allowed.includes(file.mimetype) ? cb(null, true) : cb(new Error('Only JPEG, PNG, or WebP images are allowed'));
+    allowed.includes(file.mimetype) ? cb(null, true) : cb(new AppError('Only JPEG, PNG, or WebP images are allowed', 400, 'INVALID_FILE_TYPE'));
   }
 });
 

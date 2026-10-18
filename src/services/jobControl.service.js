@@ -45,6 +45,13 @@ const JOBS = [
     pauseEffect: 'No daily sales emails are sent.',
   },
   {
+    name: 'mpesa-reconcile',
+    label: 'M-Pesa payment check',
+    schedule: 'Every 2 minutes',
+    description: 'Asks Safaricom about M-Pesa prompts still unresolved after 3 minutes (a lost callback) and confirms or fails them.',
+    pauseEffect: 'A payment whose callback never arrives stays pending until staff confirm it by hand from the cash-up report.',
+  },
+  {
     name: 'etims-retry',
     label: 'eTIMS retry',
     schedule: 'Every 30 minutes',

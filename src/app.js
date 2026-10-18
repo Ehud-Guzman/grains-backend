@@ -167,12 +167,13 @@ app.use(requestTiming);
 // ── COOKIE PARSING ────────────────────────────────────────────────────────────
 app.use(cookieParser());
 
-// ── BODY PARSING ──────────────────────────────────────────────────────────────
-app.use(express.json({ limit: '10kb' }));
-app.use(express.urlencoded({ extended: true, limit: '10kb' }));
-
 // ── TRUST PROXY ───────────────────────────────────────────────────────────────
-app.set('trust proxy', 1);
+// How many proxy hops sit in front of the app decides what req.ip is - and req.ip feeds every rate
+// limit and the M-Pesa callback IP allow-list. Render's setup gives 1; if the first live M-Pesa
+// callback is rejected (the alert email shows the resolved IP and X-Forwarded-For), set
+// TRUST_PROXY_HOPS on Render to match instead of changing code.
+const trustProxyHops = Number.parseInt(process.env.TRUST_PROXY_HOPS, 10);
+app.set('trust proxy', Number.isInteger(trustProxyHops) && trustProxyHops >= 0 ? trustProxyHops : 1);
 
 // ── HTTPS REDIRECT ────────────────────────────────────────────────────────────
 // Render terminates TLS at the load balancer and forwards via HTTP internally.
@@ -185,24 +186,6 @@ if (process.env.NODE_ENV === 'production') {
     next();
   });
 }
-
-// ── NOSQL INJECTION PROTECTION ────────────────────────────────────────────────
-app.use(mongoSanitize({
-  replaceWith: '_',
-  onSanitize: ({ req, key }) => {
-    logger.warn('[SECURITY] Sanitized NoSQL injection attempt', { key, ip: req.ip });
-    alertService.sendAlert(
-      'NOSQL_INJECTION',
-      { IP: req.ip, Key: key, Route: `${req.method} ${req.originalUrl}`, 'User ID': req.user?.id || 'unauthenticated' },
-      req.ip
-    ).catch(() => {});
-  }
-}));
-
-// ── HTTP PARAMETER POLLUTION PROTECTION ──────────────────────────────────────
-app.use(hpp({
-  whitelist: ['category', 'status', 'packagingSize', 'period', 'type', 'from', 'to']
-}));
 
 // ── HEALTH CHECK ──────────────────────────────────────────────────────────────
 app.get('/api/health', (_req, res) => {
@@ -230,7 +213,54 @@ app.post('/api/csp-report', express.json({ type: 'application/csp-report', limit
 });
 
 // ── RATE LIMITING ─────────────────────────────────────────────────────────────
+// Before the body parsers: the limiter only needs headers and the IP, so a flood of large request
+// bodies is turned away before any of them is read and parsed.
 app.use('/api', publicLimiter);
+
+// ── BODY PARSING ──────────────────────────────────────────────────────────────
+// Small by default - a login or an STK request is a few hundred bytes. Larger only where the payload
+// is genuinely large: an admin saving a product tree (varieties x pack sizes x price tiers), a bulk
+// stock update or the delivery zones (~10kb was enough for the current catalogue but not for 5+
+// varieties of 8 pack sizes), and checkout carrying up to 100 cart lines plus addresses.
+const BODY_LIMITS = [
+  { match: /^\/api\/admin(\/|$)/, limit: '100kb' },
+  { match: /^\/api\/orders(\/|$)/, limit: '32kb' },
+];
+const DEFAULT_BODY_LIMIT = '10kb';
+const bodyParsers = BODY_LIMITS.map(({ match, limit }) => ({
+  match,
+  json: express.json({ limit }),
+  urlencoded: express.urlencoded({ extended: true, limit }),
+}));
+const defaultJson = express.json({ limit: DEFAULT_BODY_LIMIT });
+const defaultUrlencoded = express.urlencoded({ extended: true, limit: DEFAULT_BODY_LIMIT });
+
+app.use((req, res, next) => {
+  const sized = bodyParsers.find(({ match }) => match.test(req.path));
+  return (sized ? sized.json : defaultJson)(req, res, next);
+});
+app.use((req, res, next) => {
+  const sized = bodyParsers.find(({ match }) => match.test(req.path));
+  return (sized ? sized.urlencoded : defaultUrlencoded)(req, res, next);
+});
+
+// ── NOSQL INJECTION PROTECTION ────────────────────────────────────────────────
+app.use(mongoSanitize({
+  replaceWith: '_',
+  onSanitize: ({ req, key }) => {
+    logger.warn('[SECURITY] Sanitized NoSQL injection attempt', { key, ip: req.ip });
+    alertService.sendAlert(
+      'NOSQL_INJECTION',
+      { IP: req.ip, Key: key, Route: `${req.method} ${req.originalUrl}`, 'User ID': req.user?.id || 'unauthenticated' },
+      req.ip
+    ).catch(() => {});
+  }
+}));
+
+// ── HTTP PARAMETER POLLUTION PROTECTION ──────────────────────────────────────
+app.use(hpp({
+  whitelist: ['category', 'status', 'packagingSize', 'period', 'type', 'from', 'to']
+}));
 
 // ── RESTORE LOCK ──────────────────────────────────────────────────────────────
 // Block all API traffic while a backup restore is running. Checked before any

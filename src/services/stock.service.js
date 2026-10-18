@@ -605,6 +605,17 @@ const getLogs = async (productId, filters = {}, query = {}, branchId) => {
   const { page, limit, skip } = paginate(query);
   const matchStage = {};
 
+  // These come straight from the URL / query string. new ObjectId('not-an-id') and new Date('x')
+  // threw or produced an Invalid Date that Mongo then rejected - both surfaced as a 500.
+  const OBJECT_ID = /^[0-9a-fA-F]{24}$/;
+  if (productId && !OBJECT_ID.test(String(productId))) throw new AppError('Invalid product id', 400, 'INVALID_ID');
+  if (filters.performedBy && !OBJECT_ID.test(String(filters.performedBy))) throw new AppError('Invalid user id', 400, 'INVALID_ID');
+  const parseDate = (value) => {
+    const date = new Date(value);
+    if (isNaN(date.getTime())) throw new AppError('Invalid date', 400, 'INVALID_DATE');
+    return date;
+  };
+
   if (branchId) matchStage.branchId = branchId;
   if (productId) matchStage.productId = new mongoose.Types.ObjectId(productId);
   if (filters.varietyName) matchStage.varietyName = filters.varietyName;
@@ -614,8 +625,8 @@ const getLogs = async (productId, filters = {}, query = {}, branchId) => {
 
   if (filters.from || filters.to) {
     matchStage.timestamp = {};
-    if (filters.from) matchStage.timestamp.$gte = new Date(filters.from);
-    if (filters.to) matchStage.timestamp.$lte = new Date(filters.to);
+    if (filters.from) matchStage.timestamp.$gte = parseDate(filters.from);
+    if (filters.to) matchStage.timestamp.$lte = parseDate(filters.to);
   }
 
   const [total, logs] = await Promise.all([

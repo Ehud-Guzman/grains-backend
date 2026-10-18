@@ -27,6 +27,7 @@ const SavedList = require('../models/SavedList');
 const CustomerAlert = require('../models/CustomerAlert');
 const PriceLog = require('../models/PriceLog');
 const logger = require('../utils/logger');
+const { resetBranchCodeCache } = require('../utils/branchCode');
 
 const gzip = promisify(zlib.gzip);
 const gunzip = promisify(zlib.gunzip);
@@ -275,7 +276,10 @@ const getBackupById = async (backupId) => {
 
 const createBackup = async ({ actorId, actorRole }) => {
   const snapshot = await buildSnapshot();
-  const jsonBuffer = Buffer.from(EJSON.stringify(snapshot, null, 2), 'utf8');
+  // Compact, not pretty-printed: the indentation alone added ~30% to a string that already holds the
+  // whole database in memory at once (the snapshot object, then this string, then the gzip buffer).
+  // Restore parses the JSON the same either way, so older indented backups still restore.
+  const jsonBuffer = Buffer.from(EJSON.stringify(snapshot), 'utf8');
   const gzBuffer = await gzip(jsonBuffer, { level: zlib.constants.Z_BEST_COMPRESSION });
   const { buffer: storedBuffer, encrypted, iv, authTag } = encryptBuffer(gzBuffer);
   const stamp = safeIsoStamp(new Date());
@@ -470,6 +474,9 @@ const restoreCollections = async (snapshot) => {
       }
     }
   }
+
+  // Branch order-reference codes are cached in memory; the restored branches may carry different ones.
+  resetBranchCodeCache();
 
   return writeErrors;
 };

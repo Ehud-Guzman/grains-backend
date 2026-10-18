@@ -11,6 +11,11 @@ const { phoneVariants } = require('../utils/mpesaHelpers');
 // Returns { coupon, discountAmount } or throws AppError.
 // subtotal is the pre-coupon, pre-delivery order subtotal.
 const validate = async (code, branchId, userId, subtotal, guestPhone = null) => {
+  // A code that is not text (an object or array from a hostile request) is simply not a valid code.
+  // Without this, .toUpperCase() threw a TypeError and the caller got a 500.
+  if (typeof code !== 'string' || !code.trim()) {
+    throw new AppError('Coupon code is invalid or expired.', 400, 'COUPON_INVALID');
+  }
   const coupon = await Coupon.findOne({ code: code.toUpperCase().trim(), branchId }).lean();
   if (!coupon || !coupon.isActive) {
     throw new AppError('Coupon code is invalid or expired.', 400, 'COUPON_INVALID');

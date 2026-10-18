@@ -5,12 +5,14 @@ const axios = require('axios');
 
 const DARAJA_URLS = {
   sandbox: {
-    oauth:   'https://sandbox.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials',
-    stkpush: 'https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/processrequest',
+    oauth:    'https://sandbox.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials',
+    stkpush:  'https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/processrequest',
+    stkquery: 'https://sandbox.safaricom.co.ke/mpesa/stkpushquery/v1/query',
   },
   production: {
-    oauth:   'https://api.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials',
-    stkpush: 'https://api.safaricom.co.ke/mpesa/stkpush/v1/processrequest',
+    oauth:    'https://api.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials',
+    stkpush:  'https://api.safaricom.co.ke/mpesa/stkpush/v1/processrequest',
+    stkquery: 'https://api.safaricom.co.ke/mpesa/stkpushquery/v1/query',
   }
 };
 

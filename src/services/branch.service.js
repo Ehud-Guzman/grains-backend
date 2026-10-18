@@ -1,4 +1,3 @@
-const mongoose = require('mongoose');
 const Branch = require('../models/Branch');
 const User = require('../models/User');
 const { AppError } = require('../middleware/errorHandler.middleware');
@@ -9,6 +8,9 @@ const haversine = require('../utils/haversine');
 const { escapeRegex } = require('../utils/escapeRegex');
 const { LOG_ACTIONS } = require('../utils/constants');
 const { bumpTokenValidAfter } = require('../utils/tokenValidAfter');
+const { runTransaction } = require('../utils/transaction');
+const { getBranchCode } = require('../utils/branchCode');
+const logger = require('../utils/logger');
 
 // ── GET ALL BRANCHES ──────────────────────────────────────────────────────────
 const getAll = async (includeInactive = false) => {
@@ -87,10 +89,7 @@ const create = async (data, adminId) => {
   const nameTaken = await Branch.findOne({ name: new RegExp(`^${escapeRegex(data.name)}$`, 'i') });
   if (nameTaken) throw new AppError('A branch with this name already exists', 409, 'NAME_TAKEN');
 
-  const session = await mongoose.startSession();
-  session.startTransaction();
-  let branch;
-  try {
+  const branch = await runTransaction(async (session) => {
     // If this is the first branch, make it default
     const count = await Branch.countDocuments().session(session);
     const isDefault = count === 0 ? true : (data.isDefault || false);
@@ -101,13 +100,16 @@ const create = async (data, adminId) => {
       await Branch.updateMany({ isDefault: true }, { isDefault: false }, { session });
     }
 
-    [branch] = await Branch.create([{ ...data, isDefault }], { session });
-    await session.commitTransaction();
+    const [created] = await Branch.create([{ ...data, isDefault }], { session });
+    return created;
+  });
+
+  // Give the branch its order-reference code now, so it is fixed (and visible) from day one rather
+  // than assigned by the first order. Best effort: the first order assigns it if this fails.
+  try {
+    branch.code = await getBranchCode(branch._id);
   } catch (err) {
-    await session.abortTransaction();
-    throw err;
-  } finally {
-    session.endSession();
+    logger.warn('[branch] Could not assign an order-reference code yet', { branchId: String(branch._id), err: err.message });
   }
 
   await activityLogService.log({
@@ -144,36 +146,38 @@ const update = async (branchId, data, adminId) => {
     if (nameTaken) throw new AppError('A branch with this name already exists', 409, 'NAME_TAKEN');
   }
 
-  const session = await mongoose.startSession();
-  session.startTransaction();
-  try {
+  // The order-reference code is assigned by the system and never edited: references already issued
+  // carry it, and the unique index only guarantees no two branches share one.
+  const { code: _ignoredCode, ...editable } = data;
+
+  const saved = await runTransaction(async (session) => {
+    // Re-read inside the transaction: this block can run more than once, and a document modified by
+    // an aborted attempt must not be reused.
+    const current = await Branch.findById(branchId).session(session);
+    if (!current) throw new AppError('Branch not found', 404, 'BRANCH_NOT_FOUND');
+
     // If setting as default, unset any existing default — same transaction as
     // the save below so a crash mid-swap can't leave zero default branches.
-    if (data.isDefault === true) {
+    if (editable.isDefault === true) {
       await Branch.updateMany({ _id: { $ne: branchId }, isDefault: true }, { isDefault: false }, { session });
     }
 
-    Object.assign(branch, data);
-    await branch.save({ session });
-    await session.commitTransaction();
-  } catch (err) {
-    await session.abortTransaction();
-    throw err;
-  } finally {
-    session.endSession();
-  }
+    Object.assign(current, editable);
+    await current.save({ session });
+    return current;
+  });
 
   await activityLogService.log({
     actorId: adminId,
     actorRole: 'superadmin',
     action: LOG_ACTIONS.BRANCH_UPDATED,
-    targetId: branch._id,
+    targetId: saved._id,
     targetType: 'Branch',
-    detail: { name: branch.name, updatedFields: Object.keys(data) }
+    detail: { name: saved.name, updatedFields: Object.keys(data) }
   });
 
   invalidateDefaultBranchCache();
-  return branch;
+  return saved;
 };
 
 // ── DEACTIVATE BRANCH ─────────────────────────────────────────────────────────

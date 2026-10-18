@@ -13,6 +13,7 @@ const logger = require('../utils/logger');
 const { escapeRegex } = require('../utils/escapeRegex');
 const { findProductRuleViolation } = require('../utils/productRules');
 const { ORDER_STATUSES } = require('../utils/constants');
+const { runTransaction } = require('../utils/transaction');
 
 // Strip business-sensitive fields from products served to the public storefront.
 // costPriceKES is the shop's purchase cost / margin data — it must never leave
@@ -278,75 +279,86 @@ const create = async (data, adminId, branchId, actorRole = 'admin') => {
 };
 
 // ── ADMIN: UPDATE PRODUCT ─────────────────────────────────────────────────────
-const update = async (productId, data, adminId, branchId, actorRole = 'admin') => {
+const update = async (productId, rawData, adminId, branchId, actorRole = 'admin') => {
   const query = { _id: productId };
   if (branchId) query.branchId = branchId;
 
-  const product = await Product.findOne(query);
-  if (!product) throw new AppError('Product not found', 404, 'PRODUCT_NOT_FOUND');
-
-  const before = { name: product.name, category: product.category, isActive: product.isActive };
-
-  // Snapshot old prices + stock before mutation (for PriceLog, and to keep stock
-  // out of the plain document save below)
-  const oldPriceMap = {};
-  const oldStockMap = {};
-  for (const v of (product.varieties || [])) {
-    for (const pkg of (v.packaging || [])) {
-      const key = `${v.varietyName}::${pkg.size}`;
-      oldPriceMap[key] = pkg.priceKES;
-      oldStockMap[key] = pkg.stock;
-    }
-  }
-
-  // Collect all existing Cloudinary URLs before the update
-  const oldProductImages = product.imageURLs || [];
-  const oldVarietyImages = (product.varieties || []).flatMap(v => v.imageURLs || []);
-  const allOldImages = [...oldProductImages, ...oldVarietyImages];
-
+  // Everything that depends only on the payload is prepared once. The transaction below re-runs from
+  // the top if MongoDB reports a write conflict, so it must never modify `data` itself.
+  const data = { ...rawData };
   delete data.createdBy;
   delete data.branchId; // cannot change branch of an existing product
   const seasonTag = data.seasonTag || null;
   delete data.seasonTag; // not a Product field — only used to tag this update's PriceLog entries
   if (Array.isArray(data.imageURLs)) data.imageURLs = normalizeImageUrls(data.imageURLs);
 
-  // Stock for packaging that already existed must never move through this plain
-  // document save — it's a read-modify-write with no atomicity and no StockLog
-  // entry, so it can silently clobber a concurrent order's stock deduction/release.
-  // A form-submitted stock value can't be trusted to mean "the admin intends to
-  // change this" vs. "this is just whatever the form had loaded before a concurrent
-  // order moved the real number" — the two are indistinguishable from a snapshot
-  // diff alone. So this endpoint always keeps the DB's current stock for packaging
-  // that already existed, no matter what's submitted; deliberate stock corrections
-  // belong exclusively to the Stock page (delivery / manual adjustment), which
-  // captures a reason and reads the live value at the moment of the change. New
-  // packaging entries still take their initial stock from the payload — nothing
-  // to race with yet.
-  if (Array.isArray(data.varieties)) {
-    data.varieties = data.varieties.map(variety => {
-      const packaging = (variety.packaging || []).map(pkg => {
-        const key = `${variety.varietyName}::${pkg.size}`;
-        return Object.prototype.hasOwnProperty.call(oldStockMap, key)
-          ? { ...pkg, stock: oldStockMap[key] }
-          : pkg;
+  // Read the product, decide which stock figures to keep, and save - as ONE transaction.
+  //
+  // Stock for packaging that already existed must never move through this plain document save: it is
+  // a read-modify-write with no atomicity and no StockLog entry, and the save writes the whole
+  // varieties array, so whatever stock figure it carries overwrites the live one. A form-submitted
+  // stock value can't be trusted to mean "the admin intends to change this" vs. "this is just
+  // whatever the form had loaded before a concurrent order moved the real number" — the two are
+  // indistinguishable from a snapshot diff alone. So this endpoint always keeps the DB's current stock
+  // for packaging that already existed, no matter what's submitted; deliberate stock corrections
+  // belong exclusively to the Stock page (delivery / manual adjustment), which captures a reason and
+  // reads the live value at the moment of the change. New packaging entries still take their initial
+  // stock from the payload — nothing to race with yet.
+  //
+  // Doing the read and the write inside a transaction closes the window that remained: the "current"
+  // figure used to be read at the top of this function and written back some milliseconds later, so an
+  // order reserving stock in between was silently undone (stock overstated by that order's quantity —
+  // an oversell). Now the write conflicts with any concurrent change to this product, runTransaction
+  // re-runs the block, and the retry re-reads the live figure.
+  const { product, before, oldPriceMap, allOldImages } = await runTransaction(async (session) => {
+    const product = await Product.findOne(query).session(session);
+    if (!product) throw new AppError('Product not found', 404, 'PRODUCT_NOT_FOUND');
+
+    const before = { name: product.name, category: product.category, isActive: product.isActive };
+
+    // Snapshot old prices + stock before mutation (for PriceLog, and to keep stock
+    // out of the plain document save below)
+    const oldPriceMap = {};
+    const oldStockMap = {};
+    for (const v of (product.varieties || [])) {
+      for (const pkg of (v.packaging || [])) {
+        const key = `${v.varietyName}::${pkg.size}`;
+        oldPriceMap[key] = pkg.priceKES;
+        oldStockMap[key] = pkg.stock;
+      }
+    }
+
+    // Collect all existing Cloudinary URLs before the update
+    const oldProductImages = product.imageURLs || [];
+    const oldVarietyImages = (product.varieties || []).flatMap(v => v.imageURLs || []);
+    const allOldImages = [...oldProductImages, ...oldVarietyImages];
+
+    const changes = { ...data };
+    if (Array.isArray(data.varieties)) {
+      changes.varieties = data.varieties.map(variety => {
+        const packaging = (variety.packaging || []).map(pkg => {
+          const key = `${variety.varietyName}::${pkg.size}`;
+          return Object.prototype.hasOwnProperty.call(oldStockMap, key)
+            ? { ...pkg, stock: oldStockMap[key] }
+            : pkg;
+        });
+        return {
+          ...variety,
+          imageURLs: normalizeImageUrls(variety.imageURLs),
+          packaging,
+        };
       });
-      return {
-        ...variety,
-        imageURLs: normalizeImageUrls(variety.imageURLs),
-        packaging,
-      };
-    });
-  }
 
-  if (Array.isArray(data.varieties)) {
-    assertValidStructure(data.varieties);
-    await assertNoOpenOrdersOnRemovedLines(product, data.varieties);
-  }
+      assertValidStructure(changes.varieties);
+      await assertNoOpenOrdersOnRemovedLines(product, changes.varieties);
+    }
 
-  Object.assign(product, data);
-  product.markModified('imageURLs');
-  product.markModified('varieties');
-  await product.save();
+    Object.assign(product, changes);
+    product.markModified('imageURLs');
+    product.markModified('varieties');
+    await product.save({ session });
+    return { product, before, oldPriceMap, allOldImages };
+  });
 
   // Detect price changes and log them
   for (const v of (product.varieties || [])) {

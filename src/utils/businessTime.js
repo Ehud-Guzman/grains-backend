@@ -25,4 +25,10 @@ const startOfMonthEAT = (date = new Date()) => {
   return new Date(Date.UTC(shifted.getUTCFullYear(), shifted.getUTCMonth(), 1) - EAT_OFFSET_MS);
 };
 
-module.exports = { NAIROBI_TZ, startOfDayEAT, endOfDayEAT, startOfMonthEAT };
+// The calendar year on the Nairobi clock. Order and intake references embed it, so it must flip at
+// Nairobi's midnight, not the server's - on Render (UTC) the old getFullYear() kept stamping
+// 00:00-03:00 EAT on 1 January with the previous year.
+const currentYearEAT = (date = new Date()) =>
+  new Date(date.getTime() + EAT_OFFSET_MS).getUTCFullYear();
+
+module.exports = { NAIROBI_TZ, startOfDayEAT, endOfDayEAT, startOfMonthEAT, currentYearEAT };

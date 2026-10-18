@@ -45,6 +45,8 @@ const THROTTLE_MS = {
   MPESA_LATE_SUCCESS_UNRECONCILED: 0,   // always send — money received but unaccounted for
   MPESA_STK_FAILING:  10 * 60 * 1000,   // counter window (see COUNTER_ALERTS)
   MPESA_CALLBACK_UNKNOWN: 10 * 60 * 1000, // 10 min global
+  MPESA_CALLBACK_REJECTED: 10 * 60 * 1000, // 10 min global
+  MPESA_RECONCILED:   10 * 60 * 1000,   // 10 min global
 };
 
 // SERVER_ERROR is counter-based: send the alert only after this many errors
@@ -145,6 +147,16 @@ const ALERT_CONFIG = {
     severity: 'medium',
     title: 'M-Pesa Overpayment Received',
     sms: (d) => `[ALERT] M-Pesa receipt ${d['M-Pesa receipt']} was KES ${d['Surplus to return']} more than the order total. Return the surplus to the customer.`,
+  },
+  MPESA_CALLBACK_REJECTED: {
+    severity: 'high',
+    title: 'M-Pesa Callback Rejected — Unrecognised Source Address',
+    sms: (d) => `[ALERT] An M-Pesa callback was rejected from ${d['Resolved IP (req.ip)']}. If real payments are not confirming, the proxy/IP settings need fixing (see the email).`,
+  },
+  MPESA_RECONCILED: {
+    severity: 'medium',
+    title: 'M-Pesa Payment Recovered By Status Check — Callback Never Arrived',
+    sms: (d) => `[ALERT] ${d['Payments recovered']} M-Pesa payment(s) were confirmed by status check because Safaricom's callback never arrived. No receipt code is recorded for them - match them on your M-Pesa statement.`,
   },
 };
 

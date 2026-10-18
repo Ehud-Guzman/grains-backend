@@ -54,7 +54,23 @@ const orderItemsValidator = [
     .isInt({ min: 1, max: 10000 }).withMessage('Quantity must be between 1 and 10,000')
 ];
 
+// Every free-text field on an order must actually BE text. The per-field rules below accept an
+// array or an object (express-validator runs string checks on each array element, and trim() turns
+// an object into "[object Object]"), which then reached the service as a non-string and crashed it
+// with a 500 - a one-element phone array, a coupon code like {"$ne":null}, a KRA PIN object. Reject
+// them here, as a 400, before anything else looks at the value.
+const ORDER_TEXT_FIELDS = [
+  'name', 'phone', 'email', 'deliveryMethod', 'deliveryAddress', 'specialInstructions',
+  'paymentMethod', 'couponCode', 'buyerKraPin', 'preferredDriverId', 'preferredDeliveryDate', 'branchId',
+];
+const orderTextFieldsValidator =
+  body(ORDER_TEXT_FIELDS)
+    .optional({ nullable: true })
+    .isString().withMessage('Each order field must be plain text');
+
 const guestOrderValidator = [
+  orderTextFieldsValidator,
+
   body('name')
     .trim()
     .notEmpty().withMessage('Name is required')
@@ -94,6 +110,8 @@ const guestOrderValidator = [
 ];
 
 const customerOrderValidator = [
+  orderTextFieldsValidator,
+
   body('deliveryMethod')
     .isIn(['pickup', 'delivery']).withMessage('Delivery method must be pickup or delivery'),
 

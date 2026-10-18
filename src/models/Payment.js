@@ -22,7 +22,12 @@ const paymentSchema = new mongoose.Schema({
   // fields are deliberately left untouched — a second payment attempt may
   // already be in flight — so this is purely a reconciliation trail for an
   // admin, not a live payment state.
-  lateSuccessMeta: { type: mongoose.Schema.Types.Mixed, default: null }
+  lateSuccessMeta: { type: mongoose.Schema.Types.Mixed, default: null },
+  // Set when the payment was confirmed by asking Daraja (STK Query) because Safaricom's callback
+  // never arrived. Such a payment has no receipt number (the query does not return one) unless
+  // the late callback eventually turns up and fills it in; otherwise match it on the M-Pesa statement.
+  reconciledViaQuery: { type: Boolean, default: false },
+  reconciledAt: { type: Date, default: null }
 }, {
   timestamps: true
 });

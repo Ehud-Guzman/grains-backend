@@ -20,7 +20,7 @@ const createGuestOrder = async (req, res, next) => {
 const trackOrder = async (req, res, next) => {
   try {
     const { phone, ref } = req.query;
-    if (!phone || !ref) {
+    if (!phone || !ref || typeof phone !== 'string' || typeof ref !== 'string') {
       return error(res, 'phone and ref are required', 'MISSING_PARAMS');
     }
     const order = await orderService.trackByRef(phone, ref);

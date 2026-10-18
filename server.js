@@ -10,6 +10,7 @@ const { startAutoCancelJob } = require('./src/jobs/autoCancel.job');
 const { startAdminAlertsJob } = require('./src/jobs/adminAlerts.job');
 const { startDailySalesReportJob } = require('./src/jobs/dailySalesReport.job');
 const { startEtimsRetryJob } = require('./src/jobs/etimsRetry.job');
+const { startMpesaReconcileJob } = require('./src/jobs/mpesaReconcile.job');
 const { register: registerOrderListeners } = require('./src/events/listeners/order.listener');
 const { register: registerStockListeners } = require('./src/events/listeners/stock.listener');
 const { register: registerPriceListeners } = require('./src/events/listeners/price.listener');
@@ -150,6 +151,7 @@ const startServer = async () => {
     startAdminAlertsJob();
     startDailySalesReportJob();
     startEtimsRetryJob();
+    startMpesaReconcileJob();
 
     const server = app.listen(PORT, () => {
       logger.info(`
