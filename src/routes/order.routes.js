@@ -16,6 +16,7 @@ router.post('/guest', guestOrderLimiter, checkMaintenanceMode, guestOrderValidat
 // GET /api/orders/track?phone=&ref= — its own tighter, IP-only limiter (see
 // rateLimit.middleware.js) since this is an unauthenticated enumeration target.
 router.get('/track', trackLimiter, orderController.trackOrder);
+router.post('/track', trackLimiter, orderController.trackOrder);
 
 // ── CUSTOMER AUTH REQUIRED ────────────────────────────────────────────────────
 

@@ -99,19 +99,30 @@ const getDeliveryFee = async (req, res, next) => {
 // service uses — bypasses all settings toggles.
 const testEmail = async (req, res, next) => {
   try {
+    // 503, not 500: a missing mail setup is a configuration state, not a server fault (a 500 here raised
+    // a SERVER_ERROR alert email to the very person testing the mail setup).
     if (!process.env.GMAIL_USER || !process.env.GMAIL_APP_PASSWORD) {
-      throw new AppError('GMAIL_USER or GMAIL_APP_PASSWORD not set in .env', 500, 'EMAIL_NOT_CONFIGURED');
+      throw new AppError('Email is not set up on the server yet (GMAIL_USER and GMAIL_APP_PASSWORD are missing).', 503, 'EMAIL_NOT_CONFIGURED');
     }
 
     const to = req.body.to || req.user.email;
     if (!to) throw new AppError('Provide a "to" email in the request body', 400, 'EMAIL_REQUIRED');
 
     const notificationService = require('../../services/notification.service');
-    await notificationService.sendEmail({
+    const result = await notificationService.sendEmail({
       to,
       subject: 'Test Email — Grains System',
       html: '<p>This is a test email from your Grains System. If you can read this, email is configured correctly.</p>',
+      critical: true,
     });
+    if (result && result.sent === false) {
+      throw new AppError(
+        result.reason === 'daily_limit'
+          ? 'The daily email limit has been reached. Try again tomorrow, or move to a transactional email provider.'
+          : 'The email could not be sent.',
+        503, 'EMAIL_NOT_SENT'
+      );
+    }
 
     return success(res, { to }, 'Test email sent successfully');
   } catch (err) { next(err); }

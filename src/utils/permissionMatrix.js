@@ -1,4 +1,4 @@
-const { verifyToken } = require('../middleware/auth.middleware');
+const { verifyToken, verifyTokenNoDb } = require('../middleware/auth.middleware');
 
 // Who may do what, read out of the routes themselves.
 //
@@ -91,7 +91,7 @@ function collectRoutes(app) {
     for (const inner of layer.handle.stack) {
       if (!inner.route) {
         // router.use(...): applies to everything declared after it.
-        if (inner.handle === verifyToken) routerAuth = true;
+        if (inner.handle === verifyToken || inner.handle === verifyTokenNoDb) routerAuth = true;
         if (inner.handle?.allowedRoles) {
           routerRoles = intersect(routerRoles, inner.handle.allowedRoles);
           routerAuth = true;
@@ -104,7 +104,7 @@ function collectRoutes(app) {
       let auth = routerAuth;
       let grantedBy = routerGrant;
       for (const handler of inner.route.stack) {
-        if (handler.handle === verifyToken) auth = true;
+        if (handler.handle === verifyToken || handler.handle === verifyTokenNoDb) auth = true;
         if (handler.handle?.allowedRoles) {
           roles = intersect(roles, handler.handle.allowedRoles);
           auth = true;

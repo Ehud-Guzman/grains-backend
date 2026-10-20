@@ -14,6 +14,7 @@ const settingsService    = require('./settings.service');
 const { getDarajaToken, getUrls } = require('../config/mpesa.config');
 const logger = require('../utils/logger');
 const { appEvents, ORDER_EVENTS } = require('../events/appEvents');
+const { runTransaction } = require('../utils/transaction');
 const {
   formatPhone,
   generateTimestamp,
@@ -169,6 +170,7 @@ const initiateStkPush = async (orderId, phone) => {
     payment = await Payment.create({
       _id:               reservedPaymentId,
       orderId:           order._id,
+      branchId:          order.branchId,
       method:            PAYMENT_METHODS.MPESA,
       mpesaPhone:        formattedPhone,
       amount:            Math.ceil(amount),
@@ -220,7 +222,10 @@ const initiateStkPush = async (orderId, phone) => {
         Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json'
       },
-      timeout: 30000
+      // Netlify's /api proxy gives up on a response after ~26 s (the browser then sees a 504 while this keeps
+      // running, and the customer taps pay again). Token fetch (10 s cap) + this must fit under that, so
+      // give Daraja 12 s - it normally answers in 1-3 s. A slow answer is a clean 502 the customer can retry.
+      timeout: Number(process.env.MPESA_STK_TIMEOUT_MS) || 12000
     });
   } catch (err) {
     // Reset paymentStatus so the customer can retry
@@ -479,71 +484,91 @@ const handleCallback = async (callbackData) => {
       });
     }
 
-    // Guard: if the order was cancelled or rejected before the callback arrived,
-    // do not flip it to PAID. Mark payment as refunded so accounting knows
-    // money was received and a manual refund to the customer is needed.
-    const relatedOrder = await Order.findById(payment.orderId).select('status');
-    if (relatedOrder && ['cancelled', 'rejected'].includes(relatedOrder.status)) {
+    // Decide AND apply the outcome in one transaction, reading the order's status INSIDE it.
+    //
+    // 2026-10 audit (F-04): the terminal-status check used to run outside the transaction that marks the
+    // payment paid. A customer cancelling (or staff rejecting) in the gap left a cancelled order showing
+    // `paymentStatus: paid`, a paid Payment, released stock and no refund flagged - money taken for nothing,
+    // and nobody told. Both branches below write the order document, so a concurrent cancel/reject (which
+    // writes it too) conflicts with this transaction; runTransaction re-runs it and the re-read sees the
+    // new status. Whichever commits first, the other sees it: either the order is paid and the cancel
+    // refunds it, or the order is closed and the payment is recorded as refunded here.
+    const outcome = await runTransaction(async (session) => {
+      const fresh = await Payment.findById(payment._id).session(session).select('status');
+      if (!fresh || fresh.status !== payment.status) return { duplicate: true };
+
+      const order = await Order.findById(payment.orderId).session(session).select('status branchId orderRef');
+      if (order && ['cancelled', 'rejected'].includes(order.status)) {
+        const refunded = await Payment.findOneAndUpdate(
+          { _id: payment._id, status: payment.status },
+          {
+            status:             PAYMENT_STATUSES.REFUNDED,
+            mpesaTransactionId,
+            paidAt:             new Date(),
+            safaricomTimestamp,
+            refundedAt:         new Date(),
+            refundReason:       `Order was ${order.status} before payment confirmed`
+          },
+          { new: true, session }
+        );
+        if (!refunded) return { duplicate: true };
+        // Surface the refund-owed state on the order too, otherwise the admin list shows the closed
+        // order's old paymentStatus with no hint that money arrived and must be returned.
+        await Order.updateOne({ _id: payment.orderId }, { paymentStatus: PAYMENT_STATUSES.REFUNDED }, { session });
+        return { closed: true, orderStatus: order.status, branchId: order.branchId, orderRef: order.orderRef };
+      }
+
+      // Payment and Order flip to PAID together. As two independent writes a crash between them left a
+      // paid Payment on an order still showing unpaid (and the eTIMS/approval gates then never opened).
       const claimed = await Payment.findOneAndUpdate(
         { _id: payment._id, status: payment.status },
         {
-          status:             PAYMENT_STATUSES.REFUNDED,
+          status:            PAYMENT_STATUSES.PAID,
           mpesaTransactionId,
-          paidAt:             new Date(),
-          safaricomTimestamp,
-          refundedAt:         new Date(),
-          refundReason:       `Order was ${relatedOrder.status} before payment confirmed`
+          paidAt:            new Date(),
+          safaricomTimestamp
         },
-        { new: true }
+        { new: true, session }
       );
-      if (!claimed) {
-        logger.info('[M-PESA] Duplicate callback ignored (order-terminal path)', { CheckoutRequestID });
-        return { success: true, message: 'Already processed' };
-      }
-      // Surface the refund-owed state on the order too — otherwise the admin
-      // list shows the cancelled order's old paymentStatus with no hint that
-      // money arrived and must be returned.
-      await Order.findByIdAndUpdate(payment.orderId, { paymentStatus: PAYMENT_STATUSES.REFUNDED });
-      logger.warn('[M-PESA] Payment received for terminal order — marking refunded', {
-        orderId: payment.orderId,
-        orderStatus: relatedOrder.status,
-        mpesaTransactionId
-      });
-      return { success: false, status: 'order_terminal', mpesaTransactionId };
-    }
+      if (!claimed) return { duplicate: true };
+      await Order.updateOne({ _id: payment.orderId }, { paymentStatus: PAYMENT_STATUSES.PAID }, { session });
+      return { paid: true, branchId: order?.branchId || null };
+    });
 
-    // Payment and Order flip to PAID together. As two independent writes a crash
-    // between them left a paid Payment on an order still showing unpaid (and the
-    // eTIMS/approval gates then never opened).
-    let claimed = null;
-    let paidOrder = null;
-    const paySession = await mongoose.startSession();
-    try {
-      await paySession.withTransaction(async () => {
-        claimed = await Payment.findOneAndUpdate(
-          { _id: payment._id, status: payment.status },
-          {
-            status:            PAYMENT_STATUSES.PAID,
-            mpesaTransactionId,
-            paidAt:            new Date(),
-            safaricomTimestamp
-          },
-          { new: true, session: paySession }
-        );
-        if (!claimed) return;
-        paidOrder = await Order.findByIdAndUpdate(
-          payment.orderId,
-          { paymentStatus: PAYMENT_STATUSES.PAID },
-          { session: paySession }
-        ).select('branchId');
-      });
-    } finally {
-      paySession.endSession();
-    }
-    if (!claimed) {
+    if (outcome.duplicate) {
       logger.info('[M-PESA] Duplicate callback ignored (success path)', { CheckoutRequestID });
       return { success: true, message: 'Already processed' };
     }
+
+    if (outcome.closed) {
+      logger.warn('[M-PESA] Payment received for a closed order - marked refunded, money must be returned', {
+        orderId: payment.orderId,
+        orderStatus: outcome.orderStatus,
+        mpesaTransactionId
+      });
+      await activityLogService.log({
+        actorId:    payment.orderId,
+        actorRole:  'customer',
+        action:     LOG_ACTIONS.PAYMENT_CONFIRMED,
+        branchId:   outcome.branchId || null,
+        targetId:   payment._id,
+        targetType: 'Payment',
+        detail:     { mpesaTransactionId, amount: paidAmount, orderStatus: outcome.orderStatus, refundOwed: true }
+      }).catch(err => logger.error('[M-PESA] Activity log failed on closed-order payment', { err: err.message }));
+      alertService.sendAlert(
+        'MPESA_PAYMENT_FOR_CLOSED_ORDER',
+        {
+          'Order ref': outcome.orderRef || 'unknown',
+          'Order status': outcome.orderStatus,
+          'M-Pesa receipt': mpesaTransactionId || 'unknown',
+          Amount: paidAmount,
+        },
+        String(payment._id)
+      ).catch(() => {});
+      return { success: false, status: 'order_terminal', mpesaTransactionId };
+    }
+
+    const paidOrder = { branchId: outcome.branchId };
 
     // Overpayments are kept (never rejected) but must not just vanish into a log
     // line — someone has to return the surplus.
@@ -945,6 +970,7 @@ const manualConfirmPayment = async (orderId, adminId, transactionRef, actorRole 
   } else {
     payment = await Payment.create({
       orderId:  order._id,
+      branchId: order.branchId,
       method:   order.paymentMethod,
       amount:   order.total,
       currency: 'KES',

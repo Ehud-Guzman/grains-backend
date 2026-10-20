@@ -87,4 +87,24 @@ const optionalAuth = async (req, res, next) => {
   next();
 };
 
-module.exports = { verifyToken, optionalAuth };
+// Signature-and-expiry check only - NO database lookup. It exists for the one endpoint that must keep
+// answering while a restore is running (backup job progress): a restore empties the users collection for a
+// while, and the normal verifyToken would find "no such account" and answer 401, which the frontend treats
+// as an expired session and signs the superadmin out mid-restore. Pair it with requireRole and use it for
+// nothing that reads or changes data.
+const verifyTokenNoDb = (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return next(new AppError('No token provided', 401, 'NO_TOKEN'));
+  }
+  try {
+    const decoded = jwt.verify(authHeader.split(' ')[1], process.env.JWT_ACCESS_SECRET);
+    req.user = { id: decoded.id, role: decoded.role, branchId: decoded.branchId || null, customPermissions: decoded.customPermissions || [] };
+    req.branchId = decoded.branchId || null;
+    next();
+  } catch (err) {
+    next(err);
+  }
+};
+
+module.exports = { verifyToken, verifyTokenNoDb, optionalAuth };

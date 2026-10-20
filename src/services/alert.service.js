@@ -1,4 +1,4 @@
-const nodemailer = require('nodemailer');
+const mailer = require('../utils/mailer');
 const AfricasTalking = require('africastalking');
 const logger = require('../utils/logger');
 const { escapeHtml } = require('../utils/escapeHtml');
@@ -7,16 +7,7 @@ const { escapeHtml } = require('../utils/escapeHtml');
 // Standalone transporter — does NOT depend on settingsService so alerts work
 // even if the DB is unavailable or settings are misconfigured.
 
-let emailTransporter = null;
-if (process.env.GMAIL_USER && process.env.GMAIL_APP_PASSWORD) {
-  emailTransporter = nodemailer.createTransport({
-    service: 'gmail',
-    auth: {
-      user: process.env.GMAIL_USER,
-      pass: process.env.GMAIL_APP_PASSWORD,
-    },
-  });
-}
+// (Email goes through utils/mailer.js: pooled, with timeouts and a daily budget that keeps room for alerts.)
 
 let atSMS = null;
 if (process.env.AT_API_KEY && process.env.AT_USERNAME) {
@@ -47,6 +38,9 @@ const THROTTLE_MS = {
   MPESA_CALLBACK_UNKNOWN: 10 * 60 * 1000, // 10 min global
   MPESA_CALLBACK_REJECTED: 10 * 60 * 1000, // 10 min global
   MPESA_RECONCILED:   10 * 60 * 1000,   // 10 min global
+  MPESA_PAYMENT_FOR_CLOSED_ORDER: 0,    // every one is money owed back - never throttle
+  TRANSACTION_CONFLICT_STORM: 10 * 60 * 1000, // 10 min global
+  PAID_ORDER_AWAITING_APPROVAL: 6 * 60 * 60 * 1000, // 6 h per order
 };
 
 // SERVER_ERROR is counter-based: send the alert only after this many errors
@@ -152,6 +146,21 @@ const ALERT_CONFIG = {
     severity: 'high',
     title: 'M-Pesa Callback Rejected — Unrecognised Source Address',
     sms: (d) => `[ALERT] An M-Pesa callback was rejected from ${d['Resolved IP (req.ip)']}. If real payments are not confirming, the proxy/IP settings need fixing (see the email).`,
+  },
+  PAID_ORDER_AWAITING_APPROVAL: {
+    severity: 'medium',
+    title: 'A Paid Order Is Still Waiting For Approval',
+    sms: (d) => `[ALERT] ${d['Order ref']} is paid (KES ${d.Total}) but has not been approved. Approve it or contact the customer.`,
+  },
+  TRANSACTION_CONFLICT_STORM: {
+    severity: 'high',
+    title: 'Customers Are Being Refused Orders — Database Write Conflicts Are Not Clearing',
+    sms: (d) => `[ALERT] Orders are failing with database conflicts (${d.Attempts} tries over ${d['Waited (ms)']}ms). Check for a stuck process or a runaway job.`,
+  },
+  MPESA_PAYMENT_FOR_CLOSED_ORDER: {
+    severity: 'high',
+    title: 'M-Pesa Payment Received For A Cancelled/Rejected Order — Refund Owed',
+    sms: (d) => `[ALERT] M-Pesa receipt ${d['M-Pesa receipt']} (KES ${d.Amount}) arrived for ${d['Order ref']}, which was already ${d['Order status']}. Refund the customer.`,
   },
   MPESA_RECONCILED: {
     severity: 'medium',
@@ -291,14 +300,14 @@ const sendAlert = async (type, data, throttleKey = 'global') => {
   const cfg = ALERT_CONFIG[type];
 
   // ── Email ─────────────────────────────────────────────────────────────────
-  if (adminEmail && emailTransporter) {
+  if (adminEmail && mailer.isConfigured()) {
     try {
-      await emailTransporter.sendMail({
+      await mailer.sendMail({
         from: `"Vittorios Grains Security" <${process.env.EMAIL_FROM || process.env.GMAIL_USER}>`,
         to: adminEmail,
         subject: `[${cfg.severity.toUpperCase()} ALERT] ${cfg.title}`,
         html: buildEmail(type, data),
-      });
+      }, { critical: true });
     } catch (err) {
       logger.error('[alert] Email failed', { err: err.message });
     }

@@ -7,6 +7,7 @@ const { body, param } = require('express-validator');
 const paymentController = require('../controllers/payment.controller');
 const { optionalAuth } = require('../middleware/auth.middleware');
 const { validateSafaricomIP, describeCallbackSource } = require('../utils/mpesaHelpers');
+const crypto = require('crypto');
 const { callbackLimiter, stkLimiter } = require('../middleware/rateLimit.middleware');
 const { validate } = require('../middleware/validate.middleware');
 const logger = require('../utils/logger');
@@ -57,14 +58,25 @@ router.post(
   paymentController.changeMethod
 );
 
-// POST /api/payments/mpesa/callback — Safaricom calls this
-// Guards: rate limit → IP whitelist (prod) → payload structure check → controller
-router.post(
-  '/mpesa/callback',
+// A secret in the callback URL (MPESA_CALLBACK_URL=.../mpesa/callback/<MPESA_CALLBACK_TOKEN>) proves the
+// caller was given the URL by us. It works whichever proxy chain delivered the request, which the IP
+// allow-list cannot promise (2026-10 audit, F-11). Either proof is enough; with no token configured the
+// IP allow-list is the only check, as before.
+const tokenMatches = (given) => {
+  const expected = process.env.MPESA_CALLBACK_TOKEN;
+  if (!expected || typeof given !== 'string' || !given) return false;
+  const a = crypto.createHash('sha256').update(given).digest();
+  const b = crypto.createHash('sha256').update(expected).digest();
+  return crypto.timingSafeEqual(a, b);
+};
+
+// POST /api/payments/mpesa/callback[/:token] — Safaricom calls this
+// Guards: rate limit → token or IP whitelist (prod) → payload structure check → controller
+const callbackHandlers = [
   callbackLimiter,
   (req, res, next) => {
-    // Validate source IP in production
-    if (!validateSafaricomIP(req)) {
+    // Validate the caller in production: secret token in the URL, or Safaricom's source IP
+    if (!tokenMatches(req.params.token) && !validateSafaricomIP(req)) {
       const source = describeCallbackSource(req);
       logger.warn('[M-PESA] Rejected callback from unauthorized IP', source);
       // Loud on purpose: if this fires for a real Safaricom callback (the proxy chain resolves to the
@@ -94,10 +106,22 @@ router.post(
     next();
   },
   paymentController.callback
-);
+];
+// Two separate routes (not one array path) so the route listing / permission matrix shows each plainly.
+router.post('/mpesa/callback', ...callbackHandlers);
+router.post('/mpesa/callback/:token', ...callbackHandlers);
 
 // GET /api/payments/status/:orderId — customer polls after STK push
 router.get(
+  '/status/:orderId',
+  optionalAuth,
+  [param('orderId').isMongoId().withMessage('Invalid order ID')],
+  validate,
+  paymentController.getStatus
+);
+
+// POST variant: a guest's phone number goes in the body instead of the URL (this endpoint is polled every 5s)
+router.post(
   '/status/:orderId',
   optionalAuth,
   [param('orderId').isMongoId().withMessage('Invalid order ID')],

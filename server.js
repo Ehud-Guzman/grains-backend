@@ -139,6 +139,9 @@ const startServer = async () => {
     // Connect to MongoDB first — fail fast if DB is unreachable
     await connectDB();
 
+    // One-off data migrations (each remembered once done)
+    await require('./src/utils/migrations').runMigrations();
+
     // Register event listeners (before jobs, no DB dependency)
     registerOrderListeners();
     registerStockListeners();

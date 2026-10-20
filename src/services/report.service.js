@@ -7,6 +7,12 @@ const User = require('../models/User');
 const { NAIROBI_TZ, startOfDayEAT, endOfDayEAT, startOfMonthEAT } = require('../utils/businessTime');
 const { withGuestFallbackList } = require('../utils/orderGuestFallback');
 const { AppError } = require('../middleware/errorHandler.middleware');
+const { createTtlCache } = require('../utils/ttlCache');
+
+// Analytical reports scan a lot of orders and change slowly, so identical requests within a minute share one
+// result (per process). Live money views (cash-up) and the dashboard are NOT cached.
+const reportCache = createTtlCache({ ttlMs: 60 * 1000, maxEntries: 200 });
+const cached = (name, args, compute) => reportCache.wrap(`${name}:${JSON.stringify(args)}`, compute);
 
 // ── HELPERS ───────────────────────────────────────────────────────────────────
 // Day/month boundaries follow the Nairobi clock (see utils/businessTime.js) —
@@ -59,7 +65,7 @@ const getDateRange = (period, from, to) => {
 };
 
 // ── DASHBOARD KPIs ────────────────────────────────────────────────────────────
-// UX B1 - KPI cards visible immediately on login, cached 60s
+// UX B1 - KPI cards visible immediately on login. NOT cached (the page re-polls every 60 s while visible).
 // Orders today, pending orders, revenue today, revenue this month, low stock count
 const getDashboardKPIs = async (branchId) => {
   const now = new Date();
@@ -98,20 +104,17 @@ const getDashboardKPIs = async (branchId) => {
       { $group: { _id: null, total: { $sum: '$total' } } }
     ]),
 
-    // Low stock items count
-    (async () => {
-      const productFilter = branchId ? { branchId } : {};
-      const products = await Product.find(productFilter).lean();
-      let count = 0;
-      for (const p of products) {
-        for (const v of p.varieties) {
-          for (const pkg of v.packaging) {
-            if (!pkg.quoteOnly && pkg.stock <= pkg.lowStockThreshold) count++;
-          }
-        }
-      }
-      return count;
-    })(),
+    // Low stock items count - counted in the database (this used to load every product into memory)
+    Product.aggregate([
+      { $match: { ...branchFilter } },
+      { $unwind: '$varieties' },
+      { $unwind: '$varieties.packaging' },
+      { $match: {
+        'varieties.packaging.quoteOnly': { $ne: true },
+        $expr: { $lte: ['$varieties.packaging.stock', '$varieties.packaging.lowStockThreshold'] },
+      } },
+      { $count: 'n' }
+    ]).then(rows => rows[0]?.n || 0),
 
     // Recent 10 orders for dashboard panel - UX B1
     Order.find(branchFilter)
@@ -171,7 +174,12 @@ const getSalesReport = async (period, from, to, branchId) => {
           totalRevenue: { $sum: '$total' },
           totalOrders: { $sum: 1 },
           avgOrderValue: { $avg: '$total' },
-          totalItems: { $sum: { $size: '$orderItems' } }
+          totalItems: { $sum: { $size: '$orderItems' } },
+          // What the total is made of (2026-10 audit, F-15): total = goods - discounts + delivery + VAT.
+          goodsSubtotal: { $sum: { $ifNull: ['$subtotal', 0] } },
+          couponDiscounts: { $sum: { $ifNull: ['$couponDiscount', 0] } },
+          deliveryFees: { $sum: { $ifNull: ['$deliveryFee', 0] } },
+          vatCollected: { $sum: { $ifNull: ['$vatAmount', 0] } }
         }
       }
     ]),
@@ -196,11 +204,22 @@ const getSalesReport = async (period, from, to, branchId) => {
           },
         },
       },
+      // Sum per PRODUCT first, then look each product's category up once. The old shape joined every order
+      // line to the products collection (100k+ lookups for a year); this joins only the distinct products.
+      {
+        $group: {
+          _id: '$orderItems.productId',
+          revenue: { $sum: '$orderItems.netRevenue' },
+          unitsSold: { $sum: '$orderItems.quantity' },
+          orderCount: { $sum: 1 }
+        }
+      },
       {
         $lookup: {
           from: 'products',
-          localField: 'orderItems.productId',
+          localField: '_id',
           foreignField: '_id',
+          pipeline: [{ $project: { category: 1 } }],
           as: 'product'
         }
       },
@@ -208,9 +227,9 @@ const getSalesReport = async (period, from, to, branchId) => {
       {
         $group: {
           _id: '$product.category',
-          revenue: { $sum: '$orderItems.netRevenue' },
-          unitsSold: { $sum: '$orderItems.quantity' },
-          orderCount: { $sum: 1 }
+          revenue: { $sum: '$revenue' },
+          unitsSold: { $sum: '$unitsSold' },
+          orderCount: { $sum: '$orderCount' }
         }
       },
       { $sort: { revenue: -1 } }
@@ -268,7 +287,16 @@ const getSalesReport = async (period, from, to, branchId) => {
       totalRevenue: s.totalRevenue || 0,
       totalOrders: s.totalOrders || 0,
       avgOrderValue: s.avgOrderValue ? Math.round(s.avgOrderValue) : 0,
-      totalItems: s.totalItems || 0
+      totalItems: s.totalItems || 0,
+      // "Revenue" above is what customers paid: it includes delivery fees and VAT, which are not sales of
+      // goods. The category and best-seller figures are NET goods sales. This breakdown reconciles the two.
+      breakdown: {
+        goodsSubtotal: Math.round((s.goodsSubtotal || 0) * 100) / 100,
+        couponDiscounts: Math.round((s.couponDiscounts || 0) * 100) / 100,
+        netGoods: Math.round(((s.goodsSubtotal || 0) - (s.couponDiscounts || 0)) * 100) / 100,
+        deliveryFees: Math.round((s.deliveryFees || 0) * 100) / 100,
+        vatCollected: Math.round((s.vatCollected || 0) * 100) / 100,
+      }
     },
     byCategory,
     byDay,
@@ -521,11 +549,11 @@ const getStockMovementReport = async (period, from, to, branchId) => {
 
 // ── CUSTOMER REPORT ───────────────────────────────────────────────────────────
 // UX B5 - repeat buyers, high-value, inactive customers
-const getCustomerReport = async (branchId) => {
-  const thirtyDaysAgo = new Date();
-  thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+const getCustomerReport = async (branchId, { page = 1, limit = 50, all = false } = {}) => {
   const branchFilter = branchId ? { branchId: new mongoose.Types.ObjectId(String(branchId)) } : {};
 
+  // 1. Per-customer totals for EVERYONE (small rows: an id and a few numbers). The segment counts need the
+  //    whole population; only the customers shown on this page are joined to their user records below.
   const stats = await Order.aggregate([
     { $match: { ...branchFilter, status: { $in: REVENUE_STATUSES }, userId: { $ne: null } } },
     {
@@ -538,54 +566,47 @@ const getCustomerReport = async (branchId) => {
         lastOrder: { $max: '$createdAt' }
       }
     },
-    {
-      $lookup: {
-        from: 'users',
-        localField: '_id',
-        foreignField: '_id',
-        as: 'user'
-      }
-    },
-    { $unwind: '$user' },
-    {
-      $project: {
-        name: '$user.name',
-        phone: '$user.phone',
-        email: '$user.email',
-        totalOrders: 1,
-        totalSpend: 1,
-        avgOrderValue: { $round: ['$avgOrderValue', 0] },
-        firstOrder: 1,
-        lastOrder: 1,
-        daysSinceLastOrder: {
-          $divide: [
-            { $subtract: [new Date(), '$lastOrder'] },
-            1000 * 60 * 60 * 24
-          ]
-        }
-      }
-    },
     { $sort: { totalSpend: -1 } }
   ]);
 
   // Segment customers - SRS 5.5
   const sorted = [...stats].sort((a, b) => b.totalSpend - a.totalSpend);
   const top10Threshold = sorted[Math.floor(sorted.length * 0.1)]?.totalSpend || 0;
+  const now = Date.now();
 
-  const enriched = stats.map(c => ({
-    ...c,
-    isRepeat: c.totalOrders >= 3,
-    isHighValue: c.totalSpend >= top10Threshold,
-    isInactive: c.daysSinceLastOrder >= 30,
-    daysSinceLastOrder: Math.floor(c.daysSinceLastOrder)
-  }));
+  const segment = (c) => {
+    const daysSinceLastOrder = (now - new Date(c.lastOrder).getTime()) / 86400000;
+    return {
+      ...c,
+      avgOrderValue: Math.round(c.avgOrderValue),
+      isRepeat: c.totalOrders >= 3,
+      isHighValue: c.totalSpend >= top10Threshold,
+      isInactive: daysSinceLastOrder >= 30,
+      daysSinceLastOrder: Math.floor(daysSinceLastOrder)
+    };
+  };
+  const enriched = stats.map(segment);
+
+  // 2. Only the requested page gets user details.
+  const pageSize = all ? enriched.length : Math.min(Math.max(Number(limit) || 50, 1), 200);
+  const pageNo = all ? 1 : Math.max(Number(page) || 1, 1);
+  const slice = all ? enriched : enriched.slice((pageNo - 1) * pageSize, pageNo * pageSize);
+  const users = await User.find({ _id: { $in: slice.map(c => c._id) } }).select('name phone email').lean();
+  const userById = new Map(users.map(u => [String(u._id), u]));
+  const customers = slice
+    .filter(c => userById.has(String(c._id)))
+    .map(c => {
+      const u = userById.get(String(c._id));
+      return { ...c, name: u.name, phone: u.phone, email: u.email };
+    });
 
   return {
     total: enriched.length,
     repeat: enriched.filter(c => c.isRepeat).length,
     highValue: enriched.filter(c => c.isHighValue).length,
     inactive: enriched.filter(c => c.isInactive).length,
-    customers: enriched
+    customers,
+    pagination: { page: pageNo, limit: pageSize, total: enriched.length, pages: Math.max(1, Math.ceil(enriched.length / (pageSize || 1))) }
   };
 };
 
@@ -641,21 +662,38 @@ const getOrdersByStatus = async (period, from, to, branchId) => {
 // ── CSV EXPORT HELPER ─────────────────────────────────────────────────────────
 // SRS 5.7 - all reports exportable as CSV
 // Simple CSV without external dependency
+// Dates print on the Nairobi clock as "2026-10-18" (or "2026-10-18 09:45" when there is a time of
+// day) instead of String(Date): that was server-timezone text ("Sat Oct 17 2026 21:00:00 GMT+0000" for
+// the Nairobi day of 18 Oct on Render), i.e. a day off for anyone reading the sheet.
+const EAT_OFFSET_MS = 3 * 60 * 60 * 1000;
+const formatCsvDate = (date) => {
+  if (Number.isNaN(date.getTime())) return '';
+  const iso = new Date(date.getTime() + EAT_OFFSET_MS).toISOString();
+  return iso.slice(11, 16) === '00:00' ? iso.slice(0, 10) : `${iso.slice(0, 10)} ${iso.slice(11, 16)}`;
+};
+
 const toCSV = (data, columns) => {
   if (!data || data.length === 0) return columns.map(c => c.label).join(',') + '\n';
 
-  // Formula-injection guard: a cell starting with =/+/-/@ is interpreted as a
-  // formula by Excel/Sheets when the CSV is opened. Several columns here come
-  // from user-controlled text (product/customer/driver names, adjustment reason
-  // strings) — prefix with a literal-text apostrophe so it renders as data, not code.
-  const escapeCsvCell = (str) => /^[=+\-@]/.test(str) ? `'${str}` : str;
+  // Formula-injection guard: a TEXT cell starting with =/+/-/@ is interpreted as a formula by
+  // Excel/Sheets when the CSV is opened. Several columns come from user-controlled text (product,
+  // customer and driver names, adjustment reasons) — prefix those with a literal-text apostrophe so
+  // they render as data, not code. Numbers and dates are never text from a user, so they are left alone:
+  // guarding every cell turned legitimate negatives (stock-out quantities, a loss-making margin) into
+  // the text "'-7".
+  const escapeCsvCell = (val) => {
+    if (val === null || val === undefined) return '';
+    if (val instanceof Date) return formatCsvDate(val);
+    if (typeof val === 'number' || typeof val === 'boolean') return String(val);
+    const str = String(val);
+    return /^[=+\-@\t\r]/.test(str) ? `'${str}` : str;
+  };
 
   const header = columns.map(c => `"${c.label}"`).join(',');
   const rows = data.map(row =>
     columns.map(c => {
       const val = c.key.split('.').reduce((obj, k) => obj?.[k], row);
-      const str = val === null || val === undefined ? '' : escapeCsvCell(String(val));
-      return `"${str.replace(/"/g, '""')}"`;
+      return `"${escapeCsvCell(val).replace(/"/g, '""')}"`;
     }).join(',')
   );
 
@@ -787,7 +825,7 @@ const exportReport = async (type, params, branchId) => {
     }
 
     case 'customers': {
-      const data = await getCustomerReport(branchId);
+      const data = await getCustomerReport(branchId, { all: true });
       const csv = toCSV(data.customers, [
         { label: 'Name', key: 'name' },
         { label: 'Phone', key: 'phone' },
@@ -1108,9 +1146,21 @@ const getRiderReport = async (period, from, to, branchId) => {
     },
     {
       $addFields: {
+        // From the moment the order left (status out_for_delivery) when that is on record; "created to
+        // delivered" also counted the wait for approval and packing, which is not the rider's time.
+        dispatchedAt: {
+          $let: {
+            vars: { h: { $filter: { input: { $ifNull: ['$statusHistory', []] }, as: 's', cond: { $eq: ['$$s.status', 'out_for_delivery'] } } } },
+            in: { $arrayElemAt: ['$$h.changedAt', 0] },
+          },
+        },
+      },
+    },
+    {
+      $addFields: {
         deliveryMinutes: {
           $divide: [
-            { $subtract: ['$deliveredAt', '$createdAt'] },
+            { $subtract: ['$deliveredAt', { $ifNull: ['$dispatchedAt', '$createdAt'] }] },
             60000,
           ],
         },
@@ -1166,16 +1216,17 @@ const getCashUpReport = async (period, from, to, branchId) => {
   const { start, end } = getDateRange(period, from, to);
   const oid = branchId ? new mongoose.Types.ObjectId(String(branchId)) : null;
   const orderBranch = oid ? { branchId: oid } : {};
+  // Payments carry their branch (Payment.branchId), so money-in queries need no join to orders; only the short
+  // "needs attention" lists look the order up, after they are cut to 50 rows.
+  const paymentBranch = oid ? { branchId: oid } : {};
   const joinOrder = [
     { $lookup: { from: 'orders', localField: 'orderId', foreignField: '_id', as: 'order' } },
     { $unwind: '$order' },
-    ...(oid ? [{ $match: { 'order.branchId': oid } }] : []),
   ];
 
   // 1. Money in. M-Pesa with no confirmedBy came from Safaricom's callback; with one, a person typed it in.
   const paid = await Payment.aggregate([
-    { $match: { status: 'paid', paidAt: { $gte: start, $lte: end } } },
-    ...joinOrder,
+    { $match: { status: 'paid', paidAt: { $gte: start, $lte: end }, ...paymentBranch } },
     { $group: {
       _id: { method: '$method', manual: { $cond: [{ $ifNull: ['$confirmedBy', false] }, true, false] } },
       count: { $sum: 1 }, amount: { $sum: '$amount' },
@@ -1193,8 +1244,7 @@ const getCashUpReport = async (period, from, to, branchId) => {
 
   // 2. Cash confirmed, by the person who confirmed it.
   const cashByCollector = await Payment.aggregate([
-    { $match: { status: 'paid', method: { $ne: 'mpesa' }, paidAt: { $gte: start, $lte: end } } },
-    ...joinOrder,
+    { $match: { status: 'paid', method: { $ne: 'mpesa' }, paidAt: { $gte: start, $lte: end }, ...paymentBranch } },
     { $group: { _id: '$confirmedBy', count: { $sum: 1 }, amount: { $sum: '$amount' } } },
     { $lookup: { from: 'users', localField: '_id', foreignField: '_id', as: 'user' } },
     { $unwind: { path: '$user', preserveNullAndEmptyArrays: true } },
@@ -1234,10 +1284,10 @@ const getCashUpReport = async (period, from, to, branchId) => {
   //    and prompts sent more than a quarter of an hour ago that never resolved.
   const stuckBefore = new Date(Date.now() - STUCK_PENDING_MINUTES * 60 * 1000);
   const attention = (match) => Payment.aggregate([
-    { $match: match },
-    ...joinOrder,
+    { $match: { ...match, ...paymentBranch } },
     { $sort: { createdAt: -1 } },
     { $limit: 50 },
+    ...joinOrder,
     { $project: { _id: 0, paymentId: '$_id', orderRef: '$order.orderRef', amount: 1, mpesaPhone: 1, createdAt: 1, lateSuccessMeta: 1 } },
   ]);
   const lateSuccess = await attention({ lateSuccessMeta: { $ne: null }, 'lateSuccessMeta.receivedAt': { $gte: start, $lte: end } });
@@ -1280,6 +1330,12 @@ const getVatReport = async (period, from, to, branchId) => {
         },
         orders:      { $sum: 1 },
         totalExVat:  { $sum: { $subtract: ['$subtotal', { $ifNull: ['$couponDiscount', 0] }] } },
+        // Goods lines flagged taxable vs exempt (before coupon discount) - the split a VAT return needs.
+        taxableSales: { $sum: { $reduce: { input: { $ifNull: ['$orderItems', []] }, initialValue: 0,
+          in: { $add: ['$$value', { $cond: [{ $ne: ['$$this.taxable', false] }, { $ifNull: ['$$this.lineTotal', 0] }, 0] }] } } } },
+        exemptSales: { $sum: { $reduce: { input: { $ifNull: ['$orderItems', []] }, initialValue: 0,
+          in: { $add: ['$$value', { $cond: [{ $eq: ['$$this.taxable', false] }, { $ifNull: ['$$this.lineTotal', 0] }, 0] }] } } } },
+        deliveryFees: { $sum: { $ifNull: ['$deliveryFee', 0] } },
         totalVat:    { $sum: '$vatAmount' },
         totalInclVat:{ $sum: { $add: [{ $subtract: ['$subtotal', { $ifNull: ['$couponDiscount', 0] }] }, '$vatAmount'] } },
         vatRate:     { $first: '$vatRate' },
@@ -1294,6 +1350,9 @@ const getVatReport = async (period, from, to, branchId) => {
         orders:       1,
         vatRate:      1,
         totalExVat:   { $round: ['$totalExVat',   0] },
+        taxableSales: { $round: ['$taxableSales', 0] },
+        exemptSales:  { $round: ['$exemptSales',  0] },
+        deliveryFees: { $round: ['$deliveryFees', 0] },
         totalVat:     { $round: ['$totalVat',     0] },
         totalInclVat: { $round: ['$totalInclVat', 0] },
       },
@@ -1304,10 +1363,13 @@ const getVatReport = async (period, from, to, branchId) => {
     (acc, r) => ({
       totalOrders:   acc.totalOrders   + r.orders,
       totalExVat:    acc.totalExVat    + r.totalExVat,
+      taxableSales:  acc.taxableSales  + r.taxableSales,
+      exemptSales:   acc.exemptSales   + r.exemptSales,
+      deliveryFees:  acc.deliveryFees  + r.deliveryFees,
       totalVat:      acc.totalVat      + r.totalVat,
       totalInclVat:  acc.totalInclVat  + r.totalInclVat,
     }),
-    { totalOrders: 0, totalExVat: 0, totalVat: 0, totalInclVat: 0 }
+    { totalOrders: 0, totalExVat: 0, taxableSales: 0, exemptSales: 0, deliveryFees: 0, totalVat: 0, totalInclVat: 0 }
   );
 
   return { period: { start, end }, summary, rows };
@@ -1342,21 +1404,27 @@ const getCustomerStatement = async (userId, period, from, to, branchId) => {
   return { period: { start, end }, orders, summary };
 };
 
+// Public entry points for the heavy analytical reports go through the minute cache; the CSV export and the
+// live views (dashboard, cash-up) call the functions above directly and are always fresh.
+const cacheable = (name, fn) => (...args) => (args[0] === 'today' ? fn(...args) : cached(name, args, () => fn(...args)));
+
 module.exports = {
   getDashboardKPIs,
-  getSalesReport,
-  getBestSellers,
+  getSalesReport: cacheable('sales', getSalesReport),
+  getBestSellers: cacheable('best', getBestSellers),
   getSlowMovers,
   getStockValuation,
-  getStockTurnoverReport,
+  getStockTurnoverReport: cacheable('turnover', getStockTurnoverReport),
   getStockMovementReport,
-  getCustomerReport,
+  getCustomerReport: cacheable('customers', getCustomerReport),
   getOrdersByStatus,
   exportReport,
   getOnboardingAnalytics,
-  getMarginReport,
+  getMarginReport: cacheable('margin', getMarginReport),
   getRiderReport,
   getCashUpReport,
-  getVatReport,
+  getVatReport: cacheable('vat', getVatReport),
   getCustomerStatement,
+  toCSV,
+  _clearReportCache: () => reportCache.clear(),
 };

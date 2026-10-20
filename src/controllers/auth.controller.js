@@ -7,6 +7,16 @@ const { isAllowedOriginValue } = require('../utils/origins');
 // Refresh token cookie options — HttpOnly prevents JS access (XSS mitigation).
 // SameSite=None + Secure for cross-origin prod; Lax for same-origin dev.
 // path: '/api' ensures the cookie is sent to ALL /api/* requests, not just /api/auth/*
+// COOKIE_SAMESITE (lax | strict | none) overrides the choice below. The live shop reaches the API through
+// Netlify's same-origin /api proxy, where the cookie is first-party and `lax` is enough - and safer: with
+// SameSite=None a hostile page can make the browser send the refresh cookie cross-site (2026-10 audit, F-48).
+// Leave it unset until you have confirmed the shop only ever calls the API through that proxy.
+const sameSiteSetting = () => {
+  const forced = String(process.env.COOKIE_SAMESITE || '').toLowerCase();
+  if (['lax', 'strict', 'none'].includes(forced)) return forced;
+  return process.env.NODE_ENV === 'production' && !process.env.COOKIE_DOMAIN ? 'none' : 'lax';
+};
+
 const refreshCookieOptions = () => ({
   httpOnly: true,
   secure:   process.env.NODE_ENV === 'production',
@@ -14,7 +24,7 @@ const refreshCookieOptions = () => ({
   // (www. and api.). The cookie is then first-party, so Safari/iOS stops dropping it and Lax is
   // enough. Without it the shop (netlify.app) and API (onrender.com) are different sites and the
   // cookie has to be SameSite=None, which Safari and strict browsers block.
-  sameSite: process.env.NODE_ENV === 'production' && !process.env.COOKIE_DOMAIN ? 'none' : 'lax',
+  sameSite: sameSiteSetting(),
   ...(process.env.COOKIE_DOMAIN ? { domain: process.env.COOKIE_DOMAIN } : {}),
   maxAge:   AUTH_LIMITS.REFRESH_COOKIE_MAX_AGE_MS,
   path:     '/api',  // Changed from '/api/auth' to '/api' for broader coverage

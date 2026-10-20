@@ -4,6 +4,9 @@ const promotionService = require('../services/promotion.service');
 const { resolvePublicBranch } = require('../services/defaultBranch.service');
 const { publicLimiter } = require('../middleware/rateLimit.middleware');
 const { success } = require('../utils/apiResponse');
+const { publicCache } = require('../middleware/cacheControl.middleware');
+
+router.use(publicCache());
 
 // GET /api/promotions?branchId=… — public active promotions for the storefront.
 // An invalid/inactive branchId falls back to default rather than erroring —

@@ -1,7 +1,11 @@
 const fs = require('fs/promises');
+const fsSync = require('fs');
 const path = require('path');
 const zlib = require('zlib');
 const crypto = require('crypto');
+const readline = require('readline');
+const { Readable, Transform } = require('stream');
+const { pipeline } = require('stream/promises');
 const { promisify } = require('util');
 const { EJSON, ObjectId } = require('bson');
 const { AppError } = require('../middleware/errorHandler.middleware');
@@ -29,7 +33,6 @@ const PriceLog = require('../models/PriceLog');
 const logger = require('../utils/logger');
 const { resetBranchCodeCache } = require('../utils/branchCode');
 
-const gzip = promisify(zlib.gzip);
 const gunzip = promisify(zlib.gunzip);
 
 const BACKEND_ROOT = path.resolve(__dirname, '..', '..');
@@ -43,7 +46,9 @@ const BACKUP_DIR = path.resolve(
 );
 const MANIFEST_PATH = path.join(BACKUP_DIR, 'manifest.json');
 const RESTORE_MARKER = path.join(BACKUP_DIR, '.restore-in-progress');
-const BACKUP_VERSION = 3;
+// 4 = streamed NDJSON (one document per line). 1-3 were a single JSON document and are still readable.
+const BACKUP_VERSION = 4;
+const INSERT_BATCH = 500;
 const COLLECTIONS = [
   { key: 'branches',        label: 'Branch',         model: Branch },
   { key: 'users',           label: 'User',           model: User },
@@ -142,9 +147,6 @@ const ensureBackupDir = async () => {
 const safeIsoStamp = (date = new Date()) =>
   date.toISOString().replace(/[:.]/g, '-');
 
-const calculateChecksum = (buffer) =>
-  crypto.createHash('sha256').update(buffer).digest('hex');
-
 // ── AT-REST ENCRYPTION (AES-256-GCM) ──────────────────────────────────────────
 // Backups contain plaintext-within-gzip password hashes, payment records, etc.
 // Encrypted with a key from BACKUP_ENCRYPTION_KEY (32-byte hex, same storage
@@ -172,41 +174,6 @@ const getEncryptionKey = () => {
   return key;
 };
 
-// Returns the buffer to write to disk, plus the manifest fields needed to
-// decrypt it later. encrypted:false when no key is configured.
-const encryptBuffer = (buffer) => {
-  const key = getEncryptionKey();
-  if (!key) return { buffer, encrypted: false };
-
-  const iv = crypto.randomBytes(GCM_IV_BYTES);
-  const cipher = crypto.createCipheriv(ENCRYPTION_ALGO, key, iv);
-  const encrypted = Buffer.concat([cipher.update(buffer), cipher.final()]);
-  const authTag = cipher.getAuthTag();
-  return { buffer: encrypted, encrypted: true, iv: iv.toString('hex'), authTag: authTag.toString('hex') };
-};
-
-// Pre-existing (pre-encryption) backups have no `encrypted` field on their
-// manifest entry — return the buffer as-is for those, no migration needed.
-const decryptBuffer = (buffer, entry) => {
-  if (!entry.encrypted) return buffer;
-
-  const key = getEncryptionKey();
-  if (!key) {
-    throw new AppError(
-      'This backup is encrypted but BACKUP_ENCRYPTION_KEY is not configured on this server',
-      500, 'BACKUP_DECRYPT_KEY_MISSING'
-    );
-  }
-
-  try {
-    const decipher = crypto.createDecipheriv(ENCRYPTION_ALGO, key, Buffer.from(entry.iv, 'hex'));
-    decipher.setAuthTag(Buffer.from(entry.authTag, 'hex'));
-    return Buffer.concat([decipher.update(buffer), decipher.final()]);
-  } catch {
-    throw new AppError('Backup file could not be decrypted', 500, 'BACKUP_DECRYPT_FAILED');
-  }
-};
-
 const readManifest = async () => {
   await ensureBackupDir();
   try {
@@ -224,35 +191,6 @@ const writeManifest = async (entries) => {
   const tempPath = `${MANIFEST_PATH}.tmp`;
   await fs.writeFile(tempPath, JSON.stringify(entries, null, 2), 'utf8');
   await fs.rename(tempPath, MANIFEST_PATH);
-};
-
-const buildSnapshot = async () => {
-  const snapshotAt = new Date();
-  const data = {};
-  const counts = {};
-
-  for (const { key, model } of COLLECTIONS) {
-    const docs = await model.find({}).lean();
-    data[key] = docs;
-    counts[key] = docs.length;
-  }
-
-  return {
-    meta: {
-      version: BACKUP_VERSION,
-      snapshotAt: snapshotAt.toISOString(),
-      createdAt: snapshotAt.toISOString(),
-      app: 'grains-system',
-      format: 'json+gzip',
-      collections: COLLECTIONS.map(({ key, label }) => ({
-        key,
-        model: label,
-        count: counts[key] || 0,
-      })),
-      counts,
-    },
-    data,
-  };
 };
 
 const getBackupById = async (backupId) => {
@@ -274,37 +212,94 @@ const getBackupById = async (backupId) => {
   return { entry, absolutePath, manifest };
 };
 
-const createBackup = async ({ actorId, actorRole }) => {
-  const snapshot = await buildSnapshot();
-  // Compact, not pretty-printed: the indentation alone added ~30% to a string that already holds the
-  // whole database in memory at once (the snapshot object, then this string, then the gzip buffer).
-  // Restore parses the JSON the same either way, so older indented backups still restore.
-  const jsonBuffer = Buffer.from(EJSON.stringify(snapshot), 'utf8');
-  const gzBuffer = await gzip(jsonBuffer, { level: zlib.constants.Z_BEST_COMPRESSION });
-  const { buffer: storedBuffer, encrypted, iv, authTag } = encryptBuffer(gzBuffer);
+// ── STREAMED SNAPSHOT (format 4) ───────────────────────────────────────────────
+// 2026-10 audit (F-09): the old backup built the whole database as JavaScript objects, then one giant JSON
+// string, then one gzip buffer - about 16 MB of RAM per 1,000 orders and the event loop blocked for 7-20
+// seconds at 40k orders, which an OOM-prone 512 MB instance cannot survive. A snapshot is now a stream:
+//   cursor -> one JSON line per document -> gzip -> (AES-GCM) -> file
+// so memory stays flat (a few MB) however large the data is, and the event loop is never held.
+//
+// File content, one JSON (EJSON) object per line:
+//   {"t":"meta","v":4,"app":"grains-system","createdAt":"...","collections":[...]}
+//   {"t":"d","c":"orders","d":{...document...}}      <- repeated
+//   {"t":"end","counts":{"orders":123,...}}           <- a file without this line is truncated
+async function* snapshotLines(counts, onProgress) {
+  const snapshotAt = new Date().toISOString();
+  yield EJSON.stringify({
+    t: 'meta', v: BACKUP_VERSION, app: 'grains-system', snapshotAt, createdAt: snapshotAt, format: 'ndjson+gzip',
+    collections: COLLECTIONS.map(({ key, label }) => ({ key, model: label })),
+  }) + '\n';
+
+  for (const { key, model } of COLLECTIONS) {
+    let n = 0;
+    const cursor = model.collection.find({}, { batchSize: 500 });
+    try {
+      for await (const doc of cursor) {
+        n += 1;
+        yield EJSON.stringify({ t: 'd', c: key, d: doc }) + '\n';
+      }
+    } finally {
+      await cursor.close().catch(() => {});
+    }
+    counts[key] = n;
+    if (onProgress) onProgress({ phase: 'backup', collection: key, documents: n });
+  }
+  yield EJSON.stringify({ t: 'end', counts }) + '\n';
+}
+
+// Counts bytes and a SHA-256 of whatever flows through (the stored form: after encryption).
+const hashTap = () => {
+  const hash = crypto.createHash('sha256');
+  const tap = new Transform({
+    transform(chunk, _enc, cb) { tap.bytes += chunk.length; hash.update(chunk); cb(null, chunk); },
+  });
+  tap.bytes = 0;
+  tap.digest = () => hash.digest('hex');
+  return tap;
+};
+
+const createBackup = async ({ actorId, actorRole, onProgress } = {}) => {
+  await ensureBackupDir();
   const stamp = safeIsoStamp(new Date());
   const backupId = `backup_${stamp}_${crypto.randomBytes(4).toString('hex')}`;
-  const storageName = `${backupId}.json.gz`;
+  const storageName = `${backupId}.ndjson.gz`;
   const absolutePath = path.join(BACKUP_DIR, storageName);
+  const tempPath = `${absolutePath}.partial`;
 
-  await ensureBackupDir();
-  await fs.writeFile(absolutePath, storedBuffer);
+  const counts = {};
+  const key = getEncryptionKey();
+  const iv = key ? crypto.randomBytes(GCM_IV_BYTES) : null;
+  const cipher = key ? crypto.createCipheriv(ENCRYPTION_ALGO, key, iv) : null;
+  const tap = hashTap();
 
-  const checksum = calculateChecksum(storedBuffer);
+  try {
+    await pipeline(
+      Readable.from(snapshotLines(counts, onProgress), { objectMode: false }),
+      zlib.createGzip({ level: 6 }),
+      ...(cipher ? [cipher] : []),
+      tap,
+      fsSync.createWriteStream(tempPath)
+    );
+    await fs.rename(tempPath, absolutePath);
+  } catch (err) {
+    await fs.unlink(tempPath).catch(() => {});
+    throw err;
+  }
+
   const manifest = await readManifest();
   const entry = {
     id: backupId,
     storageName,
-    filename: `grains-system-backup-${stamp}.json.gz`,
+    filename: `grains-system-backup-${stamp}.ndjson.gz`,
     createdAt: new Date().toISOString(),
     createdBy: actorId,
     actorRole,
-    sizeBytes: storedBuffer.length,
-    checksum,
-    version: snapshot.meta.version,
-    counts: snapshot.meta.counts,
-    encrypted,
-    ...(encrypted && { iv, authTag }),
+    sizeBytes: tap.bytes,
+    checksum: tap.digest(),
+    version: BACKUP_VERSION,
+    counts,
+    encrypted: !!cipher,
+    ...(cipher && { iv: iv.toString('hex'), authTag: cipher.getAuthTag().toString('hex') }),
   };
 
   manifest.unshift(entry);
@@ -334,11 +329,42 @@ const listBackups = async () => {
   return existing.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 };
 
-const getBackupDownload = async (backupId) => {
+// A readable of the DECRYPTED backup bytes (gzip), without loading the file into memory. The GCM
+// authentication tag is checked when the stream ends, so a tampered file errors out instead of completing.
+const openBackupStream = (entry, absolutePath) => {
+  const file = fsSync.createReadStream(absolutePath);
+  if (!entry.encrypted) return file;
+
+  const key = getEncryptionKey();
+  if (!key) {
+    file.destroy();
+    throw new AppError(
+      'This backup is encrypted but BACKUP_ENCRYPTION_KEY is not configured on this server',
+      500, 'BACKUP_DECRYPT_KEY_MISSING'
+    );
+  }
+  const decipher = crypto.createDecipheriv(ENCRYPTION_ALGO, key, Buffer.from(entry.iv, 'hex'));
+  decipher.setAuthTag(Buffer.from(entry.authTag, 'hex'));
+  file.on('error', (err) => decipher.destroy(err));
+  decipher.on('error', () => file.destroy());
+  return file.pipe(decipher);
+};
+
+const openBackupDownload = async (backupId) => {
   const { entry, absolutePath } = await getBackupById(backupId);
-  const raw = await fs.readFile(absolutePath);
-  const buffer = decryptBuffer(raw, entry);
-  return { entry, buffer };
+  return { entry, stream: openBackupStream(entry, absolutePath) };
+};
+
+const getBackupDownload = async (backupId) => {
+  const { entry, stream } = await openBackupDownload(backupId);
+  const chunks = [];
+  try {
+    for await (const chunk of stream) chunks.push(chunk);
+  } catch (err) {
+    if (err instanceof AppError) throw err;
+    throw new AppError('Backup file could not be decrypted', 500, 'BACKUP_DECRYPT_FAILED');
+  }
+  return { entry, buffer: Buffer.concat(chunks) };
 };
 
 const deleteBackup = async (backupId) => {
@@ -437,7 +463,7 @@ const validateSnapshotShape = (snapshot) => {
 };
 
 const validateRestoreRequest = ({ file, confirmation }) => {
-  if (!file || !file.buffer) {
+  if (!file || !(file.buffer || file.path)) {
     throw new AppError('Backup file is required', 400, 'BACKUP_FILE_REQUIRED');
   }
 
@@ -446,16 +472,136 @@ const validateRestoreRequest = ({ file, confirmation }) => {
   }
 };
 
+// The uploaded file as a stream of its (gunzipped, if gzipped) bytes. Uploads arrive either in memory
+// (file.buffer) or as a temp file on disk (file.path) - the latter for anything big.
+const openUpload = (file) => {
+  const raw = file.path ? fsSync.createReadStream(file.path) : Readable.from([file.buffer]);
+  const gunzip = zlib.createGunzip();
+  const out = raw.pipe(gunzip);
+  raw.on('error', (err) => out.destroy(err));
+  return out;
+};
+
+// Peek at the start of the upload to tell the streamed format from the old single-document one.
+const isStreamedFormat = async (file) => {
+  const stream = openUpload(file);
+  let head = '';
+  try {
+    for await (const chunk of stream) {
+      head += chunk.toString('utf8');
+      if (head.length >= 512 || head.includes('\n')) break;
+    }
+  } catch {
+    head = '';
+  } finally {
+    stream.destroy();
+  }
+  return /^\{"t":"meta"/.test(head.trimStart());
+};
+
+async function* uploadLines(file) {
+  const rl = readline.createInterface({ input: openUpload(file), crlfDelay: Infinity });
+  try {
+    for await (const line of rl) {
+      if (line.trim()) yield line;
+    }
+  } finally {
+    rl.close();
+  }
+}
+
+const invalidFile = (why) => new AppError(`Backup file is not valid: ${why}`, 400, 'INVALID_BACKUP_FILE');
+
+// Read the whole upload once WITHOUT touching the database: every line must parse, every document must
+// belong to a known collection, and the closing "end" line must be there with matching counts. Only then is
+// anything deleted - a truncated or corrupt file used to be discovered after the data had been wiped.
+const validateStreamedBackup = async (file) => {
+  const known = new Set(COLLECTIONS.map(c => c.key));
+  const seen = Object.fromEntries(COLLECTIONS.map(c => [c.key, 0]));
+  let meta = null;
+  let end = null;
+  try {
+    for await (const line of uploadLines(file)) {
+      let rec;
+      try { rec = EJSON.parse(line); } catch { throw invalidFile('a line is not valid data'); }
+      if (rec.t === 'meta') meta = rec;
+      else if (rec.t === 'd') {
+        if (!known.has(rec.c)) throw invalidFile(`unknown collection "${rec.c}"`);
+        if (!rec.d || typeof rec.d !== 'object') throw invalidFile('a document is malformed');
+        seen[rec.c] += 1;
+      } else if (rec.t === 'end') end = rec;
+    }
+  } catch (err) {
+    if (err instanceof AppError) throw err;
+    throw invalidFile('the file could not be read (is it a complete .gz download?)');
+  }
+  if (!meta) throw invalidFile('it has no header');
+  if (!end) throw invalidFile('it is incomplete (no end marker) - the download or upload was cut short');
+  for (const { key } of COLLECTIONS) {
+    if ((end.counts?.[key] ?? 0) !== seen[key]) {
+      throw invalidFile(`"${key}" has ${seen[key]} documents but the file says ${end.counts?.[key] ?? 0}`);
+    }
+  }
+  return { meta, counts: seen };
+};
+
+const insertBatch = async (model, key, docs, writeErrors) => {
+  if (!docs.length) return;
+  try {
+    await model.collection.insertMany(docs, { ordered: false });
+  } catch (err) {
+    if (err.name !== 'MongoBulkWriteError') throw err;
+    // ordered:false lets individual bad documents be skipped rather than aborting the whole batch.
+    const inserted = err.result?.insertedCount ?? 0;
+    const failed = docs.length - inserted;
+    if (failed > 0) {
+      const row = writeErrors.find(w => w.collection === key) || (writeErrors.push({ collection: key, inserted: 0, failed: 0, total: 0 }), writeErrors[writeErrors.length - 1]);
+      row.inserted += inserted; row.failed += failed; row.total += docs.length;
+    }
+  }
+};
+
+const restoreStreamed = async (file, onProgress) => {
+  const modelByKey = Object.fromEntries(COLLECTIONS.map(c => [c.key, c.model]));
+  // Phase 1 - clear everything first so we never end up with a mixed state (half old data, half restored).
+  for (const { model } of COLLECTIONS) await model.deleteMany({});
+
+  // Phase 2 - stream the documents back in, a few hundred at a time.
+  const writeErrors = [];
+  let currentKey = null;
+  let batch = [];
+  let doneInCollection = 0;
+  const flush = async () => {
+    if (currentKey) await insertBatch(modelByKey[currentKey], currentKey, batch, writeErrors);
+    batch = [];
+  };
+  for await (const line of uploadLines(file)) {
+    const rec = EJSON.parse(line);
+    if (rec.t !== 'd') continue;
+    if (rec.c !== currentKey) {
+      await flush();
+      if (onProgress && currentKey) onProgress({ phase: 'restore', collection: currentKey, documents: doneInCollection });
+      currentKey = rec.c;
+      doneInCollection = 0;
+    }
+    batch.push(rec.d);
+    doneInCollection += 1;
+    if (batch.length >= INSERT_BATCH) await flush();
+  }
+  await flush();
+  if (onProgress && currentKey) onProgress({ phase: 'restore', collection: currentKey, documents: doneInCollection });
+
+  resetBranchCodeCache();
+  return writeErrors;
+};
+
+// Backups taken before format 4: one JSON document, read fully into memory (as before). Kept so an old
+// download can still be restored.
 const restoreCollections = async (snapshot) => {
-  // Phase 1 — clear everything first so we never end up with a mixed state
-  // (half old data, half restored data) if an insert later fails.
   for (const { model } of COLLECTIONS) {
     await model.deleteMany({});
   }
 
-  // Phase 2 — insert all collections.
-  // ordered:false lets individual bad documents be skipped rather than aborting
-  // the entire batch. A BulkWriteError is still thrown so we can report failures.
   const writeErrors = [];
   for (const { key, model } of COLLECTIONS) {
     const docs = snapshot.data[key];
@@ -467,9 +613,7 @@ const restoreCollections = async (snapshot) => {
         const inserted = err.result?.insertedCount ?? 0;
         const failed = docs.length - inserted;
         if (failed > 0) writeErrors.push({ collection: key, inserted, failed, total: docs.length });
-        // Partial inserts are acceptable; continue to the next collection.
       } else {
-        // Unexpected driver/network error — abort and let the caller handle it.
         throw err;
       }
     }
@@ -481,10 +625,27 @@ const restoreCollections = async (snapshot) => {
   return writeErrors;
 };
 
-const restoreBackup = async ({ file, confirmation, actorId, actorRole, ip }) => {
+const readUploadBuffer = async (file) => {
+  if (file.buffer) return file.buffer;
+  return fs.readFile(file.path);
+};
+
+const restoreBackup = async ({ file, confirmation, actorId, actorRole, ip, onProgress }) => {
   validateRestoreRequest({ file, confirmation });
 
-  const snapshot = await decodeBackupBuffer(file.buffer, file.originalname);
+  // Validate the whole file BEFORE anything is changed.
+  const streamed = await isStreamedFormat(file);
+  let snapshot = null;       // legacy only
+  let meta; let counts;
+  if (streamed) {
+    ({ meta, counts } = await validateStreamedBackup(file));
+  } else {
+    snapshot = await decodeBackupBuffer(await readUploadBuffer(file), file.originalname);
+    meta = snapshot.meta;
+    counts = Object.fromEntries(COLLECTIONS.map(({ key }) => [key, snapshot.data[key].length]));
+  }
+
+  if (onProgress) onProgress({ phase: 'safety-backup' });
   const preRestoreBackup = await createBackup({ actorId, actorRole });
 
   // Signal all other requests to back off for the duration of the restore.
@@ -494,7 +655,7 @@ const restoreBackup = async ({ file, confirmation, actorId, actorRole, ip }) => 
 
   let writeErrors = [];
   try {
-    writeErrors = await restoreCollections(snapshot);
+    writeErrors = streamed ? await restoreStreamed(file, onProgress) : await restoreCollections(snapshot);
   } catch (err) {
     // All collections were cleared in Phase 1 but a critical insert error occurred.
     // Surface the pre-restore backup ID so the admin can recover immediately.
@@ -511,8 +672,7 @@ const restoreBackup = async ({ file, confirmation, actorId, actorRole, ip }) => 
 
   // restoreCollections wrote Settings/GlobalSettings directly via the model —
   // bypassing settingsService/globalSettingsService entirely — so the in-memory
-  // caches (which have no TTL) would otherwise keep serving pre-restore values
-  // indefinitely, potentially contradicting what was just restored.
+  // caches would otherwise keep serving pre-restore values, potentially contradicting what was just restored.
   settingsService.invalidateCache();
   globalSettingsService.invalidateCache();
 
@@ -526,9 +686,7 @@ const restoreBackup = async ({ file, confirmation, actorId, actorRole, ip }) => 
   }
 
   // Financial-record loss on restore is a distinct, higher-urgency alert from the
-  // routine "a restore happened" notification below — writeErrors alone only
-  // reaches the admin who's looking at this API response/UI, not whoever monitors
-  // the alert channel.
+  // routine "a restore happened" notification below.
   if (financialWriteErrors.length > 0) {
     alertService.sendAlert(
       'BACKUP_RESTORE_DATA_LOSS',
@@ -552,12 +710,9 @@ const restoreBackup = async ({ file, confirmation, actorId, actorRole, ip }) => 
     branchId: null,
     detail: {
       restoredFromFile: file.originalname || 'uploaded-backup',
-      backupSnapshotAt: snapshot.meta.snapshotAt || null,
+      backupSnapshotAt: meta.snapshotAt || null,
       preRestoreBackupId: preRestoreBackup.id,
-      restoredCollections: COLLECTIONS.map(({ key }) => ({
-        key,
-        count: snapshot.data[key].length,
-      })),
+      restoredCollections: COLLECTIONS.map(({ key }) => ({ key, count: counts[key] || 0 })),
       ...(writeErrors.length > 0 && { writeErrors }),
     },
     ip: ip || null,
@@ -570,7 +725,7 @@ const restoreBackup = async ({ file, confirmation, actorId, actorRole, ip }) => 
       'Actor ID': String(actorId),
       'Actor role': actorRole,
       'Restored file': file.originalname || 'uploaded-backup',
-      'Snapshot date': snapshot.meta.snapshotAt || 'unknown',
+      'Snapshot date': meta.snapshotAt || 'unknown',
       'Pre-restore backup': preRestoreBackup.id,
       IP: ip || 'unknown',
     },
@@ -580,11 +735,9 @@ const restoreBackup = async ({ file, confirmation, actorId, actorRole, ip }) => 
   return {
     restoredAt: new Date().toISOString(),
     restoredFromFile: file.originalname || 'uploaded-backup',
-    backupSnapshotAt: snapshot.meta.snapshotAt || null,
+    backupSnapshotAt: meta.snapshotAt || null,
     preRestoreBackup,
-    counts: Object.fromEntries(
-      COLLECTIONS.map(({ key }) => [key, snapshot.data[key].length])
-    ),
+    counts: Object.fromEntries(COLLECTIONS.map(({ key }) => [key, counts[key] || 0])),
     ...(writeErrors.length > 0 && { writeErrors }),
   };
 };
@@ -609,6 +762,7 @@ module.exports = {
   createBackup,
   listBackups,
   getBackupDownload,
+  openBackupDownload,
   deleteBackup,
   restoreBackup,
   getBackupStorageSummary,

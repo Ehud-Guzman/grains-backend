@@ -199,15 +199,17 @@ describe('audit fixes', () => {
       const o1 = await placeGuest(branch, product, { phone: '0711000001' });
       const o2 = await placeGuest(branch, product, { phone: '0711000002' });
       await Order.collection.updateMany({ _id: { $in: [o1._id, o2._id] } }, { $set: { createdAt: new Date(Date.now() - 3 * 3600 * 1000) } });
-      await markPaid(o1); await markPaid(o2);
 
-      const orig = Payment.findByIdAndUpdate;
+      // Paid orders are no longer auto-cancelled (2026-10 audit F-19), so make the FIRST unpaid order's
+      // stock release fail instead and check the batch still gets to the second one.
+      const stockService = require('../src/services/stock.service');
+      const orig = stockService.releaseStock;
       let calls = 0;
-      Payment.findByIdAndUpdate = (...a) => { calls++; if (calls === 1) throw new Error('blip'); return orig.apply(Payment, a); };
-      try { await orderService.autoCancelExpiredPendingOrders(branch._id); } finally { Payment.findByIdAndUpdate = orig; }
+      stockService.releaseStock = (...a) => { calls++; if (calls === 1) throw new Error('blip'); return orig.apply(stockService, a); };
+      try { await orderService.autoCancelExpiredPendingOrders(branch._id); } finally { stockService.releaseStock = orig; }
 
       const statuses = (await Order.find({ _id: { $in: [o1._id, o2._id] } }).lean()).map(o => `${o.status}/${o.paymentStatus}`).sort();
-      assert.deepEqual(statuses, ['cancelled/refunded', 'pending/paid']);
+      assert.deepEqual(statuses, ['cancelled/unpaid', 'pending/unpaid']);
     });
   });
 

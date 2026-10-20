@@ -68,6 +68,12 @@ const orderTextFieldsValidator =
     .optional({ nullable: true })
     .isString().withMessage('Each order field must be plain text');
 
+// The total the customer was shown. The server compares it with the live total and refuses (409 PRICE_CHANGED)
+// if a price moved while they were checking out, instead of charging an amount they never agreed to.
+const expectedTotalValidator = body('expectedTotal')
+  .optional({ nullable: true })
+  .isFloat({ min: 0, max: 100000000 }).withMessage('Invalid expected total');
+
 const guestOrderValidator = [
   orderTextFieldsValidator,
 
@@ -106,6 +112,7 @@ const guestOrderValidator = [
 
   preferredDeliveryDateValidator,
   deliveryCoordinatesValidator,
+  expectedTotalValidator,
   ...orderItemsValidator
 ];
 
@@ -131,6 +138,7 @@ const customerOrderValidator = [
 
   preferredDeliveryDateValidator,
   deliveryCoordinatesValidator,
+  expectedTotalValidator,
   ...orderItemsValidator
 ];
 

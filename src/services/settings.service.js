@@ -2,7 +2,18 @@ const Settings = require('../models/Settings');
 const activityLogService = require('./activityLog.service');
 
 // ── IN-MEMORY CACHE (per branch) ──────────────────────────────────────────────
-const _cache = new Map(); // branchId => settings
+// Each server process caches settings so a checkout does not read them from the database on every request.
+// The cache EXPIRES (default 5 s): with two or more instances (Render scale-out, PM2 cluster) an
+// invalidateCache() only reaches the process that handled the save, and a no-expiry cache let the other
+// one keep accepting orders on a locked platform with old prices for as long as it stayed up (2026-10
+// audit, F-12). A few seconds of staleness is the price of not needing a shared cache. Set
+// SETTINGS_CACHE_TTL_MS=0 to disable caching altogether.
+const _cache = new Map(); // branchId => { value, at }
+
+const ttlMs = () => {
+  const v = Number(process.env.SETTINGS_CACHE_TTL_MS);
+  return Number.isFinite(v) && v >= 0 && process.env.SETTINGS_CACHE_TTL_MS !== undefined && process.env.SETTINGS_CACHE_TTL_MS !== '' ? v : 5000;
+};
 
 const invalidateCache = (branchId) => {
   if (branchId) {
@@ -17,18 +28,26 @@ const getSettings = async (branchId) => {
   if (!branchId) throw new Error('branchId is required to get settings');
 
   const key = String(branchId);
-  if (_cache.has(key)) return _cache.get(key);
+  const hit = _cache.get(key);
+  if (hit && Date.now() - hit.at < ttlMs()) return hit.value;
 
   const settingsId = `settings_${branchId}`;
-  let settings = await Settings.findById(settingsId).lean();
+  let settings;
+  try {
+    settings = await Settings.findById(settingsId).lean();
 
-  if (!settings) {
-    // First boot for this branch — create with defaults
-    settings = await Settings.create({ _id: settingsId, branchId });
-    settings = settings.toObject();
+    if (!settings) {
+      // First boot for this branch — create with defaults
+      settings = await Settings.create({ _id: settingsId, branchId });
+      settings = settings.toObject();
+    }
+  } catch (err) {
+    // The database hiccuped: keep serving the last known settings rather than failing every request.
+    if (hit) return hit.value;
+    throw err;
   }
 
-  _cache.set(key, settings);
+  _cache.set(key, { value: settings, at: Date.now() });
   return settings;
 };
 
@@ -37,6 +56,9 @@ const getSettings = async (branchId) => {
 const getPublicSettings = async (branchId) => {
   const s = await getSettings(branchId);
   return {
+    // Lets the storefront know which branch these settings belong to without a second request (the branch
+    // list, or a re-fetch after branch resolution, used to be needed just to learn it).
+    branchId:     String(s.branchId || branchId),
     shopName:     s.shopName,
     shopTagline:  s.shopTagline,
     shopPhone:    s.shopPhone,

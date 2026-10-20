@@ -420,7 +420,9 @@ describe('initiateStkPush', () => {
   });
 
   const seedPrompts = async (phone, count, ageMinutes = 1) => {
-    const other = await placeOrder('0799000111');
+    // A different customer each call: the helper picks a random quantity, so reusing one phone could (1 in 40)
+    // repeat an identical basket and trip the double-submit guard.
+    const other = await placeOrder(`0799${String(100000 + Math.floor(Math.random() * 899999))}`);
     for (let i = 0; i < count; i++) {
       const p = await Payment.create({ orderId: other._id, method: 'mpesa', amount: 100, status: 'failed', mpesaPhone: phone });
       await Payment.collection.updateOne({ _id: p._id }, { $set: { createdAt: new Date(Date.now() - ageMinutes * 60 * 1000) } });

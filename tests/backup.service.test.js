@@ -42,14 +42,15 @@ describe('backup.service — at-rest encryption', () => {
     );
   });
 
-  test('download decrypts and round-trips to valid gzip+EJSON', async () => {
+  test('download decrypts and round-trips to valid gzip + one JSON document per line', async () => {
     const entry = await backupService.createBackup({ actorId: objectId(), actorRole: 'superadmin' });
     const { buffer } = await backupService.getBackupDownload(entry.id);
 
-    const jsonBuffer = await gunzip(buffer); // must not throw
-    const parsed = JSON.parse(jsonBuffer.toString('utf8'));
-    assert.ok(parsed.meta);
-    assert.ok(parsed.data);
+    const lines = (await gunzip(buffer)).toString('utf8').trim().split('\n').map((l) => JSON.parse(l)); // must not throw
+    assert.equal(lines[0].t, 'meta');
+    assert.equal(lines[0].v, 4);
+    assert.equal(lines[lines.length - 1].t, 'end', 'a complete file ends with the end marker');
+    assert.ok(lines.some((l) => l.t === 'd' && l.c === 'branches'));
   });
 
   test('a pre-existing unencrypted backup (no `encrypted` field) still downloads correctly', async () => {

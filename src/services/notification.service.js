@@ -1,4 +1,4 @@
-const nodemailer = require('nodemailer');
+const mailer = require('../utils/mailer');
 const AfricasTalking = require('africastalking');
 const settingsService = require('./settings.service');
 const User = require('../models/User');
@@ -8,17 +8,7 @@ const { escapeHtml } = require('../utils/escapeHtml');
 
 // ── INITIALISE PROVIDERS ──────────────────────────────────────────────────────
 
-// Gmail SMTP transporter — created once, reused for all emails
-let emailTransporter = null;
-if (process.env.GMAIL_USER && process.env.GMAIL_APP_PASSWORD) {
-  emailTransporter = nodemailer.createTransport({
-    service: 'gmail',
-    auth: {
-      user: process.env.GMAIL_USER,
-      pass: process.env.GMAIL_APP_PASSWORD,
-    },
-  });
-}
+// Email goes through utils/mailer.js (pooled Gmail SMTP with timeouts and a daily budget).
 
 let atSMS = null;
 if (process.env.AT_API_KEY && process.env.AT_USERNAME) {
@@ -82,18 +72,19 @@ const sendBulkSMS = async (recipients, message) => {
   return { sent, failed };
 };
 
-const sendEmail = async ({ to, subject, html }) => {
-  if (!emailTransporter) {
+// `critical` mail (sign-in / password-reset codes) is allowed to use the last part of the daily email budget.
+const sendEmail = async ({ to, subject, html, critical = false }) => {
+  if (!mailer.isConfigured()) {
     logger.warn('[Email] Gmail not configured — check GMAIL_USER and GMAIL_APP_PASSWORD in .env');
     return;
   }
   if (!to) return;
-  await emailTransporter.sendMail({
+  return mailer.sendMail({
     from: `"${process.env.EMAIL_FROM_NAME || 'Vittorios Grains & Cereals'}" <${process.env.EMAIL_FROM || 'orders@grainscereals.co.ke'}>`,
     to,
     subject,
     html,
-  });
+  }, { critical });
 };
 
 // ── CONTACT RESOLVER ──────────────────────────────────────────────────────────
@@ -414,6 +405,7 @@ const dispatchPasswordResetOtp = async (user, otp) => {
     if (user.email) {
       await sendEmail({
         to: user.email,
+        critical: true,
         subject: `Password Reset Code – ${shop}`,
         html: emailShell(shop, 'Kenya', `
           <p>Hi <strong>${escapeHtml(user.name)}</strong>,</p>
@@ -443,6 +435,7 @@ const dispatchTwoFactorOtp = async (user, otp) => {
     if (user.email) {
       await sendEmail({
         to: user.email,
+        critical: true,
         subject: `Admin Login Verification Code – ${shop}`,
         html: emailShell(shop, 'Kenya', `
           <p>Hi <strong>${escapeHtml(user.name)}</strong>,</p>

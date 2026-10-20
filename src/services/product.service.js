@@ -132,6 +132,18 @@ const getById = async (productId, branchId, includeInactive = false, includeStoc
   return includeStock ? product : exposePublicStockFields(product);
 };
 
+// ── PUBLIC: SEVERAL PRODUCTS AT ONCE (cart price refresh) ─────────────────────
+// One request instead of one per distinct product in the cart. Only active products of the branch come
+// back; an id that is missing from the answer is gone (deactivated, removed, or another branch's).
+const getManyPublic = async (ids, branchId) => {
+  const unique = [...new Set((ids || []).map(String))].filter(id => /^[0-9a-f]{24}$/i.test(id)).slice(0, 50);
+  if (unique.length === 0) return [];
+  const query = { _id: { $in: unique }, isActive: true };
+  if (branchId) query.branchId = branchId;
+  const products = await Product.find(query).lean();
+  return products.map(exposePublicStockFields);
+};
+
 // ── PUBLIC: GET CATEGORIES ────────────────────────────────────────────────────
 const getCategories = async (branchId) => {
   const key = String(branchId);
@@ -540,6 +552,7 @@ const addImages = async (productId, urls, branchId) => {
 module.exports = {
   getAll,
   getById,
+  getManyPublic,
   getCategories,
   getSuggestions,
   getAllAdmin,

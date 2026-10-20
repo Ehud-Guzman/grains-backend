@@ -1,4 +1,3 @@
-const bcrypt = require('bcryptjs');
 const User = require('../models/User');
 const { AppError } = require('../middleware/errorHandler.middleware');
 const activityLogService = require('./activityLog.service');
@@ -7,6 +6,8 @@ const { paginate, buildPaginationMeta } = require('../utils/paginate');
 const { escapeRegex } = require('../utils/escapeRegex');
 const { bumpTokenValidAfter } = require('../utils/tokenValidAfter');
 const { toLocalPhone } = require('../utils/mpesaHelpers');
+const { hashPassword } = require('../utils/passwordHash');
+const { STAFF_ADMIN_FIELDS } = require('../utils/userProjections');
 
 const BCRYPT_WORK_FACTOR = AUTH_LIMITS.BCRYPT_WORK_FACTOR;
 
@@ -46,7 +47,7 @@ const getAllAdminUsers = async (filters = {}, query = {}) => {
   const [total, users] = await Promise.all([
     User.countDocuments(matchStage),
     User.find(matchStage)
-      .select('-passwordHash -failedLoginCount')
+      .select(STAFF_ADMIN_FIELDS)
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit)
@@ -92,7 +93,7 @@ const createAdminUser = async ({ name, phone, email, password, role }, superAdmi
     if (emailTaken) throw new AppError('An account with this email already exists', 409, 'EMAIL_TAKEN');
   }
 
-  const passwordHash = await bcrypt.hash(password, BCRYPT_WORK_FACTOR);
+  const passwordHash = await hashPassword(password, BCRYPT_WORK_FACTOR);
 
   const user = await User.create({
     name,
@@ -247,7 +248,7 @@ const resetPassword = async (userId, newPassword, superAdminId) => {
     );
   }
 
-  const passwordHash = await bcrypt.hash(newPassword, BCRYPT_WORK_FACTOR);
+  const passwordHash = await hashPassword(newPassword, BCRYPT_WORK_FACTOR);
 
   // A forced reset is most often a response to a compromised or offboarded
   // account — every token issued before this instant must die with the old

@@ -1,6 +1,9 @@
 const express = require('express');
 const router = express.Router();
 const branchController = require('../controllers/branch.controller');
+const { publicCache } = require('../middleware/cacheControl.middleware');
+
+router.use(publicCache());
 
 // ── PUBLIC BRANCH ROUTES (no auth — storefront branch resolution) ─────────────
 // Rate-limited by the global publicLimiter applied in app.js.

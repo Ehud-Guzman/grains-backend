@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const mongoose = require('mongoose');
 const Order = require('../models/Order');
 const Payment = require('../models/Payment');
@@ -13,6 +14,8 @@ const { appEvents, ORDER_EVENTS, STOCK_EVENTS } = require('../events/appEvents')
 const settingsService = require('./settings.service');
 const logger = require('../utils/logger');
 const generateOrderRef = require('../utils/generateOrderRef');
+const OrderDedupe = require('../models/OrderDedupe');
+const { createKeyedLimiter } = require('../utils/keyedLimiter');
 const haversine = require('../utils/haversine');
 const {
   LOG_ACTIONS,
@@ -379,17 +382,37 @@ const autoCancelExpiredPendingOrders = async (branchId) => {
   if (!settings.autoCancelHours || settings.autoCancelHours <= 0) return;
 
   const cutoff = new Date(Date.now() - (settings.autoCancelHours * 60 * 60 * 1000));
+  // Never auto-cancel an order the customer has PAID for (or whose STK prompt is still in flight): the
+  // old behaviour cancelled it and flagged "refund owed" a minute after the money arrived (2026-10
+  // audit, F-19). Those wait for staff, who are reminded below instead.
   const expiredOrders = await Order.find({
     branchId,
     status: ORDER_STATUSES.PENDING,
+    paymentStatus: { $nin: [PAYMENT_STATUSES.PAID, PAYMENT_STATUSES.PENDING] },
     createdAt: { $lte: cutoff }
   }).select('_id').lean();
+
+  const stalePaid = await Order.find({
+    branchId,
+    status: ORDER_STATUSES.PENDING,
+    paymentStatus: PAYMENT_STATUSES.PAID,
+    createdAt: { $lte: cutoff }
+  }).select('orderRef total createdAt').limit(20).lean();
+  const alertService = require('./alert.service'); // lazy: avoids a require cycle
+  for (const o of stalePaid) {
+    alertService.sendAlert(
+      'PAID_ORDER_AWAITING_APPROVAL',
+      { 'Order ref': o.orderRef, Total: o.total, Placed: o.createdAt.toISOString() },
+      String(o._id)
+    ).catch(() => {});
+  }
 
   for (const { _id } of expiredOrders) {
     try {
       const outcome = await runTransaction(async (session) => {
         const order = await Order.findById(_id).session(session);
         if (!order || order.status !== ORDER_STATUSES.PENDING) return null; // acted on since the list was read
+        if ([PAYMENT_STATUSES.PAID, PAYMENT_STATUSES.PENDING].includes(order.paymentStatus)) return null; // paid since the list was read
 
         const actorId = order.userId || order.guestId;
         const note = `Auto-cancelled after ${settings.autoCancelHours} hour(s) in pending status`;
@@ -445,33 +468,89 @@ const autoCancelExpiredPendingOrders = async (branchId) => {
 };
 
 // ── DUPLICATE ORDER GUARD ─────────────────────────────────────────────────────
-// Idempotency guard: reject an exact-duplicate submission (double-click / network
-// retry resubmitting the same checkout) landing within a short window, since order
-// creation has no client-supplied idempotency key. Mirrors stock.service.js's
-// addDelivery duplicate guard.
-//
-// This is a check-then-insert, so on its own two simultaneous submissions both pass it and both
-// create an order (and both reserve stock). It is only race-free when called INSIDE the order's
-// transaction, AFTER generateOrderRef() has incremented the branch counter: every order on a branch
-// writes that one counter document, so two overlapping transactions cannot both get past that write -
-// the loser is retried by runTransaction, and on the retry this read sees the winner's committed order.
-// Do not move it above generateOrderRef().
+// Idempotency guard: reject an exact-duplicate submission (double-click / network retry resubmitting the
+// same checkout) landing within a short window, since order creation has no client-supplied idempotency key.
+// Mirrors stock.service.js's addDelivery duplicate guard. The guard is a unique-key claim on a fingerprint of
+// the checkout (OrderDedupe) made inside the order's transaction - race-free without any shared counter.
 const DUPLICATE_ORDER_WINDOW_MS = 20000;
-const assertNoDuplicateOrder = async ({ branchId, userId = null, guestId = null, total, itemCount, session = null }) => {
-  if (!userId && !guestId) return; // no customer to compare against
-  const query = {
-    branchId,
-    userId,
-    guestId,
-    total,
-    createdAt: { $gte: new Date(Date.now() - DUPLICATE_ORDER_WINDOW_MS) }
-  };
-  const recent = await Order.findOne(query).sort({ createdAt: -1 }).select('orderItems').session(session).lean();
-  if (recent && recent.orderItems.length === itemCount) {
+const duplicateSubmission = () => new AppError(
+  'An identical order was just placed — please wait before resubmitting',
+  409,
+  'DUPLICATE_SUBMISSION'
+);
+
+// Fingerprint of a checkout: who, which exact basket, what total. The basket is part of it (2026-10 audit,
+// F-36): the old guard compared only the total and the NUMBER of lines, so a customer buying a different
+// product for the same price within 20 seconds was told they had double-clicked.
+const orderFingerprint = ({ branchId, identity, total, items }) => {
+  const lines = items
+    .map((i) => `${i.productId}:${i.variety}:${i.packaging}:${i.quantity}`)
+    .sort()
+    .join('|');
+  return crypto.createHash('sha256').update(`${branchId}#${identity}#${total}#${lines}`).digest('hex');
+};
+
+// Cheap pre-check, made before an order number is allocated so a double-click does not burn one.
+const assertNotJustPlaced = async (fingerprint) => {
+  const row = await OrderDedupe.findById(fingerprint).lean();
+  if (row && row.createdAt.getTime() > Date.now() - DUPLICATE_ORDER_WINDOW_MS) throw duplicateSubmission();
+};
+
+// The race-proof version, inside the order's transaction: claim the fingerprint, or take over one that is
+// older than the window (TTL cleanup lags). Two simultaneous submissions both reach the insert; MongoDB lets
+// one commit, the other conflicts, is retried and then finds the committed row -> 409.
+const claimFingerprint = async (fingerprint, session) => {
+  try {
+    await OrderDedupe.updateOne(
+      { _id: fingerprint, createdAt: { $lt: new Date(Date.now() - DUPLICATE_ORDER_WINDOW_MS) } },
+      { $set: { createdAt: new Date() } },
+      { upsert: true, session }
+    );
+  } catch (err) {
+    if (err.code === 11000) throw duplicateSubmission();
+    throw err;
+  }
+};
+
+// Checkouts for one branch are fed to MongoDB a few at a time (see utils/keyedLimiter.js).
+const placementQueue = createKeyedLimiter({
+  concurrency: Number(process.env.ORDER_PLACEMENT_CONCURRENCY) || 3,
+  maxWaiting: 200,
+  maxWaitMs: 10000,
+});
+const orderRetryBudgetMs = () => Number(process.env.ORDER_RETRY_BUDGET_MS) || 8000;
+
+// Allocate the order number, then create the order in one retried transaction.
+//
+// The number is taken OUTSIDE the transaction. Inside it, the branch's counter was a document every order
+// wrote, so unrelated orders (different products!) collided and a 40-order burst lost 10-75% of its
+// orders to conflicts - and one crashed transaction holding the counter froze the branch for ~80 seconds
+// (2026-10 audit, F-05/F-06). A failed order now leaves a gap in the sequence instead of giving its number
+// back; references only need to be unique and increasing, they are not fiscal invoice numbers.
+const placeOrder = async ({ branchId, identity, total, items }, build) => {
+  const fingerprint = orderFingerprint({ branchId, identity, total, items });
+  await assertNotJustPlaced(fingerprint);
+  return placementQueue(branchId, async () => {
+    const orderRef = await generateOrderRef(branchId);
+    return runTransaction(async (session) => {
+      await claimFingerprint(fingerprint, session);
+      return build(session, orderRef);
+    }, { maxAttempts: 60, budgetMs: orderRetryBudgetMs() });
+  });
+};
+
+// The customer's screen showed `expected`; if the live total differs by more than a shilling, a price moved
+// while they were checking out. Refuse with a clear message rather than charge (and prompt on M-Pesa for)
+// an amount they never saw. A missing or malformed hint is ignored: older clients do not send one.
+const assertExpectedTotal = (expected, total) => {
+  if (expected === undefined || expected === null || expected === '') return;
+  const shown = Number(expected);
+  if (!Number.isFinite(shown)) return;
+  if (Math.abs(shown - total) > 1) {
     throw new AppError(
-      'An identical order was just placed — please wait before resubmitting',
+      `Prices changed while you were checking out. The new total is KES ${total.toLocaleString('en-KE', { maximumFractionDigits: 2 })}. Please review your order and confirm again.`,
       409,
-      'DUPLICATE_SUBMISSION'
+      'PRICE_CHANGED'
     );
   }
 };
@@ -538,6 +617,7 @@ const createGuestOrder = async (orderData, branchId) => {
 
   const preferredDriverId = await resolvePreferredDriver(orderData.preferredDriverId, branchId);
   const total = round2(Math.max(0, subtotal + deliveryFee + vatAmount - couponDiscount));
+  assertExpectedTotal(orderData.expectedTotal, total);
 
   // Match against every historically-possible stored format (07.../+254.../254...)
   // so a repeat guest is recognised regardless of which format their earlier
@@ -547,8 +627,8 @@ const createGuestOrder = async (orderData, branchId) => {
   // Race-safe guest lookup (outside the transaction, before the duplicate-order
   // check): a plain findOne-or-create isn't atomic on its own — two concurrent
   // first-time submissions can both see "no guest yet" and both bypass
-  // assertNoDuplicateOrder below (which early-returns when guestId is null),
-  // creating two orders. The actual atomicity comes from Guest.phone's unique
+  // the duplicate-submission guard in placeOrder (which needs a guest id to
+  // fingerprint), creating two orders. The actual atomicity comes from Guest.phone's unique
   // index (Guest.js) — only one concurrent create() can win; the loser catches
   // the E11000 and re-reads what the winner inserted. (A bare upsert here is
   // NOT sufficient: per MongoDB's own docs, upsert:true only avoids duplicate
@@ -578,16 +658,9 @@ const createGuestOrder = async (orderData, branchId) => {
     }
   }
   // The order, its stock reservation, the guest link and the coupon use commit together or not at
-  // all. runTransaction re-runs this whole block if MongoDB reports a write conflict with another
-  // order on the same branch (they all write the branch's order counter) - see utils/transaction.js.
-  const order = await runTransaction(async (session) => {
-    // Counter FIRST: it is the per-branch mutex that makes the duplicate check below race-free
-    // (see assertNoDuplicateOrder). Do not reorder.
-    const orderRef = await generateOrderRef(branchId, session);
-    await assertNoDuplicateOrder({
-      branchId, guestId: guest._id, total, itemCount: items.length, session
-    });
-
+  // all. placeOrder re-runs this whole block if MongoDB reports a write conflict with another order
+  // (typically one reserving the same product) - see utils/transaction.js.
+  const order = await placeOrder({ branchId, identity: `guest:${guest._id}`, total, items }, async (session, orderRef) => {
     const [created] = await Order.create([{
       orderRef,
       branchId,
@@ -628,7 +701,7 @@ const createGuestOrder = async (orderData, branchId) => {
 
     await reserveOrderStock(created, guest._id, 'guest', session);
     await Guest.findByIdAndUpdate(guest._id, { $push: { orders: created._id } }, { session });
-    if (couponCode) await couponService.incrementUsage(couponCode, branchId, session);
+    if (couponCode) await couponService.incrementUsage(couponCode, branchId, session, { guestId: guest._id, excludeOrderId: created._id });
     return created;
   });
 
@@ -702,12 +775,10 @@ const createCustomerOrder = async (orderData, userId, branchId) => {
 
   const preferredDriverId = await resolvePreferredDriver(orderData.preferredDriverId, branchId);
   const total = round2(Math.max(0, subtotal + deliveryFee + vatAmount - couponDiscount));
+  assertExpectedTotal(orderData.expectedTotal, total);
 
-  // Same shape as createGuestOrder: one retried transaction, counter first, duplicate check second.
-  const order = await runTransaction(async (session) => {
-    const orderRef = await generateOrderRef(branchId, session);
-    await assertNoDuplicateOrder({ branchId, userId, total, itemCount: items.length, session });
-
+  // Same shape as createGuestOrder: one queued, retried transaction.
+  const order = await placeOrder({ branchId, identity: `user:${userId}`, total, items }, async (session, orderRef) => {
     const [created] = await Order.create([{
       orderRef,
       branchId,
@@ -745,8 +816,8 @@ const createCustomerOrder = async (orderData, userId, branchId) => {
     }], { session });
 
     await reserveOrderStock(created, userId, 'customer', session);
-    await User.findByIdAndUpdate(userId, { $push: { orderHistory: created._id } }, { session });
-    if (couponCode) await couponService.incrementUsage(couponCode, branchId, session);
+    await User.findByIdAndUpdate(userId, { $push: { orderHistory: created._id }, $addToSet: { orderedBranchIds: branchId } }, { session });
+    if (couponCode) await couponService.incrementUsage(couponCode, branchId, session, { userId, excludeOrderId: created._id });
     return created;
   });
 
@@ -823,8 +894,13 @@ const getAll = async (filters = {}, query = {}, branchId) => {
   // guestPhone snapshot existed won't match on those two fields.)
   if (filters.search) {
     const searchRe = { $regex: escapeRegex(filters.search), $options: 'i' };
-    const matchingUsers = await User.find({ $or: [{ name: searchRe }, { phone: searchRe }] })
-      .select('_id').lean();
+    // Only customers who have ordered at THIS branch can own one of its orders, so the user scan is limited to
+    // them (and capped) instead of regex-matching every account on the platform (2026-10 audit, F-22).
+    const matchingUsers = await User.find({
+      role: 'customer',
+      ...(branchId && { orderedBranchIds: branchId }),
+      $or: [{ name: searchRe }, { phone: searchRe }]
+    }).select('_id').limit(200).lean();
     matchStage.$or = [
       { orderRef: searchRe },
       { guestName: searchRe },
@@ -834,21 +910,30 @@ const getAll = async (filters = {}, query = {}, branchId) => {
   }
 
   const [total, orders] = await Promise.all([
-    Order.countDocuments(matchStage),
+    Order.countDocuments(matchStage).maxTimeMS(10000),
     Order.find(matchStage)
       .populate('userId', 'name phone email')
       .populate('guestId', 'name phone')
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit)
+      .maxTimeMS(10000)
       .lean()
   ]);
 
   return { orders: withGuestFallbackList(orders), pagination: buildPaginationMeta(page, limit, total) };
 };
 
+// ── CUSTOMER VIEW OF AN ORDER'S HISTORY ───────────────────────────────────────
+// The timeline a customer sees is the status, when it happened and - only if staff wrote one for them - a
+// public note. The internal `note` ("no location shared, check distance before approving", cancel reasons)
+// and `changedBy` (staff user ids) stay on the server (2026-10 audit, F-20).
+const toCustomerHistory = (history = []) =>
+  history.map((h) => ({ status: h.status, changedAt: h.changedAt, note: h.publicNote || null }));
+const toCustomerOrder = (order) => (order ? { ...order, statusHistory: toCustomerHistory(order.statusHistory) } : order);
+
 // ── GET MY ORDERS (CUSTOMER) ──────────────────────────────────────────────────
-const CUSTOMER_ORDER_FIELDS = 'orderRef orderItems subtotal deliveryFee couponCode couponDiscount vatEnabled vatRate vatAmount total deliveryMethod deliveryAddress paymentMethod paymentStatus status rejectionReason specialInstructions buyerKraPin branchId createdAt updatedAt statusHistory driverId preferredDriverId deliveredAt';
+const CUSTOMER_ORDER_FIELDS = 'orderRef orderItems subtotal deliveryFee couponCode couponDiscount vatEnabled vatRate vatAmount total deliveryMethod deliveryAddress paymentMethod paymentStatus status rejectionReason specialInstructions buyerKraPin branchId createdAt updatedAt statusHistory.status statusHistory.changedAt statusHistory.publicNote driverId preferredDriverId deliveredAt';
 
 const getMyOrders = async (userId, query = {}, branchId) => {
   // Auto-cancel is handled by autoCancel.job.js — no per-request call needed
@@ -875,7 +960,7 @@ const getMyOrders = async (userId, query = {}, branchId) => {
       .lean()
   ]);
 
-  return { orders, pagination: buildPaginationMeta(page, limit, total) };
+  return { orders: orders.map(toCustomerOrder), pagination: buildPaginationMeta(page, limit, total) };
 };
 
 // ── GET SINGLE ORDER (CUSTOMER) ───────────────────────────────────────────────
@@ -892,7 +977,7 @@ const getMyOrderById = async (userId, orderId) => {
     .lean();
 
   if (!order) throw new AppError('Order not found', 404, 'NOT_FOUND');
-  return order;
+  return toCustomerOrder(order);
 };
 
 // ── TRACK BY REF (GUEST) ──────────────────────────────────────────────────────
@@ -900,7 +985,7 @@ const getMyOrderById = async (userId, orderId) => {
 // Field list mirrors CUSTOMER_ORDER_FIELDS — this is an unauthenticated lookup
 // (phone + ref only), so GPS coordinates, buyerKraPin, and statusHistory actor
 // IDs must never be exposed here even though they're safe on the authed routes.
-const TRACK_ORDER_FIELDS = 'orderRef orderItems subtotal deliveryFee couponCode couponDiscount vatEnabled vatRate vatAmount total deliveryMethod paymentMethod paymentStatus status rejectionReason createdAt statusHistory.status statusHistory.changedAt statusHistory.note';
+const TRACK_ORDER_FIELDS = 'orderRef orderItems subtotal deliveryFee couponCode couponDiscount vatEnabled vatRate vatAmount total deliveryMethod paymentMethod paymentStatus status rejectionReason createdAt statusHistory.status statusHistory.changedAt statusHistory.publicNote';
 
 const trackByRef = async (phone, orderRef) => {
   // Auto-cancel is handled by autoCancel.job.js — no per-request call needed
@@ -915,7 +1000,7 @@ const trackByRef = async (phone, orderRef) => {
 
   if (!order) throw new AppError('Order not found', 404, 'ORDER_NOT_FOUND');
 
-  return order;
+  return toCustomerOrder(order);
 };
 
 // ── VALIDATE STATUS TRANSITION ────────────────────────────────────────────────

@@ -16,10 +16,11 @@ const createGuestOrder = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-// GET /api/orders/track?phone=&ref=
+// POST /api/orders/track { phone, ref }   (GET ?phone=&ref= still answered for old clients, but the phone
+// number then travels in the URL - the frontend uses POST so it stays out of logs and proxies)
 const trackOrder = async (req, res, next) => {
   try {
-    const { phone, ref } = req.query;
+    const { phone, ref } = req.method === 'POST' ? (req.body || {}) : req.query;
     if (!phone || !ref || typeof phone !== 'string' || typeof ref !== 'string') {
       return error(res, 'phone and ref are required', 'MISSING_PARAMS');
     }

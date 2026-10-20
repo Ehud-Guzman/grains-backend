@@ -1,4 +1,4 @@
-const bcrypt = require('bcryptjs');
+const { comparePassword } = require('./passwordHash');
 const User = require('../models/User');
 const { AppError } = require('../middleware/errorHandler.middleware');
 
@@ -13,7 +13,7 @@ const confirmPassword = async (userId, password) => {
     throw new AppError('Enter your password to confirm this action.', 403, 'PASSWORD_REQUIRED');
   }
   const user = await User.findById(userId).select('passwordHash').lean();
-  const ok = user && await bcrypt.compare(password, user.passwordHash);
+  const ok = user && await comparePassword(password, user.passwordHash);
   if (!ok) {
     throw new AppError('That password is not correct.', 403, 'PASSWORD_INCORRECT');
   }

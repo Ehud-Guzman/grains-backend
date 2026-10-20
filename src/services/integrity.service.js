@@ -13,6 +13,7 @@ const Order = require('../models/Order');
 const Payment = require('../models/Payment');
 const Product = require('../models/Product');
 const Settings = require('../models/Settings');
+const Coupon = require('../models/Coupon');
 const { ROLES } = require('../utils/constants');
 
 const EXAMPLES = 15;
@@ -62,15 +63,19 @@ const CHECKS = [
     id: 'paid-without-payment',
     title: 'Orders marked paid with no successful payment record',
     severity: 'high',
-    hint: 'The order says it was paid but there is no payment behind it. Check the M-Pesa statement before releasing goods.',
+    hint: 'The order says it was paid but there is no payment behind it. Check the M-Pesa statement before releasing goods. (Looks at the last 30 days.)',
     run: async () => {
-      // Last 90 days only: older history is settled and the $lookup is the expensive part.
-      const since = new Date(Date.now() - 90 * DAY_MS);
+      // Last 30 days only: older history is settled and the $lookup is the expensive part (a year of paid
+      // orders took ~3 s; a month is well under half a second).
+      const since = new Date(Date.now() - 30 * DAY_MS);
       const rows = await Order.aggregate([
         { $match: { paymentStatus: 'paid', createdAt: { $gte: since } } },
-        { $lookup: { from: 'payments', let: { oid: '$_id' }, pipeline: [
-          { $match: { $expr: { $and: [{ $eq: ['$orderId', '$$oid'] }, { $eq: ['$status', 'paid'] }] } } },
+        // localField/foreignField form: MongoDB walks the payments.orderId index for each order instead of
+        // evaluating an $expr per candidate (3.4 s -> well under a second at 40k orders).
+        { $lookup: { from: 'payments', localField: '_id', foreignField: 'orderId', pipeline: [
+          { $match: { status: 'paid' } },
           { $limit: 1 },
+          { $project: { _id: 1 } },
         ], as: 'paid' } },
         { $match: { paid: { $size: 0 } } },
         { $sort: { createdAt: -1 } },
@@ -85,7 +90,9 @@ const CHECKS = [
     severity: 'high',
     hint: 'Safaricom confirmed a payment the system had given up on. The customer paid; reconcile it against their order (or refund them).',
     run: async () => {
-      const filter = { lateSuccessMeta: { $ne: null } };
+      // receivedAt is always set with lateSuccessMeta; asking for it lets the partial index answer (a `$ne: null`
+      // test on the whole object scanned every payment).
+      const filter = { 'lateSuccessMeta.receivedAt': { $exists: true } };
       const [count, rows] = await Promise.all([
         Payment.countDocuments(filter),
         Payment.find(filter).sort({ updatedAt: -1 }).limit(EXAMPLES).populate('orderId', 'orderRef').lean(),
@@ -121,6 +128,104 @@ const CHECKS = [
           link: p.orderId?._id ? `/admin/orders/${p.orderId._id}` : null,
         })),
       };
+    },
+  },
+  {
+    id: 'closed-order-paid',
+    title: 'Cancelled or rejected orders still marked as paid',
+    severity: 'high',
+    hint: 'Money was taken for an order that is now closed, and nothing flags a refund. Return the customer\'s money and mark the payment refunded (this is exactly what a payment arriving during a cancellation used to leave behind).',
+    run: async () => {
+      const filter = { status: { $in: ['cancelled', 'rejected'] }, paymentStatus: 'paid' };
+      const [count, rows] = await Promise.all([
+        Order.countDocuments(filter),
+        Order.find(filter).sort({ createdAt: -1 }).limit(EXAMPLES).select('orderRef status paymentStatus total').lean(),
+      ]);
+      return { count, examples: rows.map(orderExample) };
+    },
+  },
+  {
+    id: 'paid-payment-unpaid-order',
+    title: 'Successful payments whose order does not show as paid',
+    severity: 'high',
+    hint: 'A payment was recorded as paid but its order says otherwise, so approval or completion may be blocked. Check the order and confirm the payment on it. (Looks at the last 30 days.)',
+    run: async () => {
+      const since = new Date(Date.now() - 30 * DAY_MS);
+      const rows = await Payment.aggregate([
+        { $match: { status: 'paid', createdAt: { $gte: since } } },
+        { $lookup: { from: 'orders', localField: 'orderId', foreignField: '_id', as: 'order' } },
+        { $unwind: '$order' },
+        { $match: { 'order.paymentStatus': { $nin: ['paid', 'refunded'] } } },
+        { $sort: { createdAt: -1 } },
+        { $project: { amount: 1, orderRef: '$order.orderRef', orderId: '$order._id', orderPayment: '$order.paymentStatus' } },
+      ]);
+      return {
+        count: rows.length,
+        examples: rows.slice(0, EXAMPLES).map(r => ({
+          id: String(r._id), label: r.orderRef, detail: `payment paid, order ${r.orderPayment} · KES ${Math.round(r.amount || 0).toLocaleString('en-KE')}`, link: `/admin/orders/${r.orderId}`,
+        })),
+      };
+    },
+  },
+  {
+    id: 'payment-amount-mismatch',
+    title: 'M-Pesa payments whose amount differs from the order total',
+    severity: 'medium',
+    hint: 'The amount requested from the customer should be the order total rounded up to a whole shilling. A difference means the order was changed after payment was requested. (Looks at the last 30 days.)',
+    run: async () => {
+      const since = new Date(Date.now() - 30 * DAY_MS);
+      const rows = await Payment.aggregate([
+        { $match: { method: 'mpesa', status: { $in: ['paid', 'pending'] }, createdAt: { $gte: since } } },
+        { $lookup: { from: 'orders', localField: 'orderId', foreignField: '_id', as: 'order' } },
+        { $unwind: '$order' },
+        { $match: { $expr: { $ne: ['$amount', { $ceil: '$order.total' }] } } },
+        { $sort: { createdAt: -1 } },
+        { $project: { amount: 1, orderRef: '$order.orderRef', orderId: '$order._id', total: '$order.total' } },
+      ]);
+      return {
+        count: rows.length,
+        examples: rows.slice(0, EXAMPLES).map(r => ({
+          id: String(r._id), label: r.orderRef, detail: `payment KES ${r.amount} vs order KES ${r.total}`, link: `/admin/orders/${r.orderId}`,
+        })),
+      };
+    },
+  },
+  {
+    id: 'coupon-usage-drift',
+    title: 'Coupons whose "times used" does not match the orders that used them',
+    severity: 'medium',
+    hint: 'usedCount should equal the number of orders that hold the coupon (cancelled and rejected ones give it back). A mismatch can stop a coupon early or let it run past its limit.',
+    run: async () => {
+      const held = await Order.aggregate([
+        // `$type: 'string'` (not `$ne: null`) so the partial couponCode index answers this instead of a full scan.
+        { $match: { couponCode: { $type: 'string' }, status: { $nin: ['cancelled', 'rejected'] } } },
+        { $group: { _id: { branchId: '$branchId', code: '$couponCode' }, n: { $sum: 1 } } },
+      ]);
+      const heldBy = new Map(held.map(h => [`${h._id.branchId}:${h._id.code}`, h.n]));
+      const coupons = await Coupon.find().select('code branchId usedCount').lean();
+      const drift = coupons
+        .map(c => ({ c, actual: heldBy.get(`${c.branchId}:${c.code}`) || 0 }))
+        .filter(({ c, actual }) => (c.usedCount || 0) !== actual);
+      return {
+        count: drift.length,
+        examples: drift.slice(0, EXAMPLES).map(({ c, actual }) => ({
+          id: String(c._id), label: c.code, detail: `recorded ${c.usedCount || 0} uses, ${actual} orders hold it`, link: '/admin/coupons',
+        })),
+      };
+    },
+  },
+  {
+    id: 'etims-pending-stuck',
+    title: 'eTIMS invoices stuck "pending" for over an hour',
+    severity: 'medium',
+    hint: 'An invoice is claimed as pending just before it is sent to KRA. If it stays pending the process probably stopped half-way; check whether KRA has it, then resubmit from the order.',
+    run: async () => {
+      const filter = { etimsStatus: 'pending', updatedAt: { $lt: new Date(Date.now() - 60 * 60 * 1000), $gte: new Date(Date.now() - 30 * DAY_MS) } };
+      const [count, rows] = await Promise.all([
+        Order.countDocuments(filter),
+        Order.find(filter).sort({ updatedAt: -1 }).limit(EXAMPLES).select('orderRef status paymentStatus total').lean(),
+      ]);
+      return { count, examples: rows.map(orderExample) };
     },
   },
   {

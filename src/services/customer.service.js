@@ -6,16 +6,24 @@ const { AppError } = require('../middleware/errorHandler.middleware');
 const activityLogService = require('./activityLog.service');
 const { paginate, buildPaginationMeta } = require('../utils/paginate');
 const { escapeRegex } = require('../utils/escapeRegex');
+const { CUSTOMER_ADMIN_FIELDS } = require('../utils/userProjections');
+const { REVENUE_ORDER_STATUSES } = require('../utils/constants');
+
+// Customer accounts are shared across branches, so branch staff are limited to customers who have ordered at
+// their branch (User.orderedBranchIds). A superadmin (`global`) keeps the platform-wide view. Without this,
+// any branch supervisor could read - and globally lock - every customer of every other branch.
+const branchScope = (branchId, global) =>
+  branchId && !global ? { orderedBranchIds: new mongoose.Types.ObjectId(String(branchId)) } : {};
 
 // ── GET ALL CUSTOMERS ─────────────────────────────────────────────────────────
 // SRS 5.5 - unified view of registered accounts + guest records.
 // Customers are shared across branches, but their ORDER data is branch-scoped:
 // when branchId is present, stats/history only reflect the viewing admin's
 // branch (superadmin without a branch keeps the global view).
-const getAll = async (filters = {}, query = {}, branchId = null) => {
+const getAll = async (filters = {}, query = {}, branchId = null, { global = false } = {}) => {
   const { page, limit, skip } = paginate(query);
 
-  const matchStage = { role: 'customer' };
+  const matchStage = { role: 'customer', ...branchScope(branchId, global) };
 
   if (filters.search) {
     const regex = { $regex: escapeRegex(filters.search), $options: 'i' };
@@ -29,7 +37,7 @@ const getAll = async (filters = {}, query = {}, branchId = null) => {
   const [total, users] = await Promise.all([
     User.countDocuments(matchStage),
     User.find(matchStage)
-      .select('name phone email createdAt lastLoginAt orderHistory isLocked')
+      .select('name phone email createdAt lastLoginAt isLocked isB2B')
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit)
@@ -39,7 +47,7 @@ const getAll = async (filters = {}, query = {}, branchId = null) => {
   // Enrich with order stats via one grouped aggregation across this page's users,
   // instead of one aggregate query per user (was 1+N round trips per page load).
   const userIds = users.map(u => u._id);
-  const orderMatch = { userId: { $in: userIds }, status: 'completed' };
+  const orderMatch = { userId: { $in: userIds }, status: { $in: REVENUE_ORDER_STATUSES } };
   if (branchId) orderMatch.branchId = new mongoose.Types.ObjectId(branchId);
 
   const statsRows = userIds.length > 0 ? await Order.aggregate([
@@ -91,7 +99,7 @@ const formatOrderStats = (s = {}) => {
 
 // ── GET ORDER STATS FOR A USER ────────────────────────────────────────────────
 const getOrderStats = async (userId, branchId = null) => {
-  const match = { userId: new mongoose.Types.ObjectId(userId), status: 'completed' };
+  const match = { userId: new mongoose.Types.ObjectId(userId), status: { $in: REVENUE_ORDER_STATUSES } };
   if (branchId) match.branchId = new mongoose.Types.ObjectId(branchId);
 
   const stats = await Order.aggregate([
@@ -114,9 +122,9 @@ const getOrderStats = async (userId, branchId = null) => {
 
 // ── GET CUSTOMER PROFILE ──────────────────────────────────────────────────────
 // SRS 5.5 - full profile with order history + lifetime stats
-const getProfile = async (userId, branchId = null) => {
-  const user = await User.findOne({ _id: userId, role: 'customer' })
-    .select('-passwordHash -failedLoginCount')
+const getProfile = async (userId, branchId = null, { global = false } = {}) => {
+  const user = await User.findOne({ _id: userId, role: 'customer', ...branchScope(branchId, global) })
+    .select(CUSTOMER_ADMIN_FIELDS)
     .lean();
 
   if (!user) throw new AppError('Customer not found', 404, 'USER_NOT_FOUND');
@@ -138,16 +146,37 @@ const getProfile = async (userId, branchId = null) => {
 
 // ── ADD INTERNAL NOTE ─────────────────────────────────────────────────────────
 // SRS 5.5 - admin-only notes on customer profile, append-only
-const addNote = async (userId, note, adminId, adminRole) => {
-  const user = await User.findOne({ _id: userId, role: 'customer' });
-  if (!user) throw new AppError('Customer not found', 404, 'USER_NOT_FOUND');
+const MAX_NOTES_LENGTH = 20000;
 
-  // Append to existing notes with timestamp and author
-  const timestamp = new Date().toISOString();
-  const noteEntry = `[${timestamp}] ${note}`;
-  user.notes = user.notes ? `${user.notes}\n${noteEntry}` : noteEntry;
+const addNote = async (userId, note, adminId, adminRole, branchId = null, { global = false } = {}) => {
+  const author = await User.findById(adminId).select('name').lean();
+  const noteEntry = `[${new Date().toISOString()}] ${author?.name || adminRole}: ${note}`;
 
-  await user.save();
+  // One atomic append. The old read-modify-save lost a note when two staff added one at the same moment,
+  // had no author, and grew without limit. The length guard keeps the field bounded.
+  const user = await User.findOneAndUpdate(
+    {
+      _id: userId, role: 'customer', ...branchScope(branchId, global),
+      $expr: { $lt: [{ $strLenCP: { $ifNull: ['$notes', ''] } }, MAX_NOTES_LENGTH] }
+    },
+    [{
+      $set: {
+        notes: {
+          $cond: [
+            { $gt: [{ $strLenCP: { $ifNull: ['$notes', ''] } }, 0] },
+            { $concat: ['$notes', '\n', noteEntry] },
+            noteEntry
+          ]
+        }
+      }
+    }],
+    { new: true }
+  ).select('notes');
+  if (!user) {
+    const exists = await User.exists({ _id: userId, role: 'customer', ...branchScope(branchId, global) });
+    if (!exists) throw new AppError('Customer not found', 404, 'USER_NOT_FOUND');
+    throw new AppError("This customer's notes are full. Archive them before adding more.", 409, 'NOTES_FULL');
+  }
 
   await activityLogService.log({
     actorId: adminId,
@@ -166,7 +195,7 @@ const addNote = async (userId, note, adminId, adminRole) => {
 const getSegments = async (branchId = null) => {
   const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
 
-  const match = { status: 'completed', userId: { $ne: null } };
+  const match = { status: { $in: REVENUE_ORDER_STATUSES }, userId: { $ne: null } };
   if (branchId) match.branchId = new mongoose.Types.ObjectId(branchId);
 
   const stats = await Order.aggregate([
@@ -204,8 +233,8 @@ const getSegments = async (branchId = null) => {
 };
 
 // ── LOCK / UNLOCK CUSTOMER ────────────────────────────────────────────────────
-const lockCustomer = async (userId, adminId, adminRole) => {
-  const user = await User.findOne({ _id: userId, role: 'customer' });
+const lockCustomer = async (userId, adminId, adminRole, branchId = null, { global = false } = {}) => {
+  const user = await User.findOne({ _id: userId, role: 'customer', ...branchScope(branchId, global) });
   if (!user) throw new AppError('Customer not found', 404, 'USER_NOT_FOUND');
   if (user.isLocked) throw new AppError('Account is already locked', 400, 'ALREADY_LOCKED');
 
@@ -224,9 +253,9 @@ const lockCustomer = async (userId, adminId, adminRole) => {
   return { id: user._id, name: user.name, isLocked: true };
 };
 
-const unlockCustomer = async (userId, adminId, adminRole) => {
+const unlockCustomer = async (userId, adminId, adminRole, branchId = null, { global = false } = {}) => {
   const user = await User.findOneAndUpdate(
-    { _id: userId, role: 'customer' },
+    { _id: userId, role: 'customer', ...branchScope(branchId, global) },
     { isLocked: false, failedLoginCount: 0, loginLockedUntil: null },
     { new: true }
   );
@@ -244,4 +273,21 @@ const unlockCustomer = async (userId, adminId, adminRole) => {
   return { id: user._id, name: user.name, isLocked: false };
 };
 
-module.exports = { getAll, getProfile, addNote, getSegments, getOrderStats, lockCustomer, unlockCustomer };
+// B2B flag toggle (was inline in the controller, and unscoped).
+const toggleB2B = async (userId, adminId, adminRole, branchId = null, { global = false } = {}) => {
+  const customer = await User.findOneAndUpdate(
+    { _id: userId, role: 'customer', ...branchScope(branchId, global) },
+    [{ $set: { isB2B: { $not: '$isB2B' } } }],
+    { new: true }
+  ).select('isB2B name');
+  if (!customer) throw new AppError('Customer not found', 404, 'NOT_FOUND');
+  await activityLogService.log({
+    actorId: adminId, actorRole: adminRole,
+    action: 'CUSTOMER_UPDATED',
+    branchId, targetId: customer._id, targetType: 'User',
+    detail: { isB2B: customer.isB2B },
+  });
+  return { isB2B: customer.isB2B };
+};
+
+module.exports = { getAll, getProfile, addNote, getSegments, getOrderStats, lockCustomer, unlockCustomer, toggleB2B };

@@ -50,6 +50,13 @@ const startKeepAlive = () => {
   // Skip entirely outside production
   if (process.env.NODE_ENV !== 'production') return;
 
+  // A paid Render plan never spins down, so the pinger is just noise (and a wasted request every 10 min).
+  // Set KEEP_ALIVE_ENABLED=false once the plan is upgraded.
+  if (process.env.KEEP_ALIVE_ENABLED === 'false') {
+    console.log('[KEEP-ALIVE] Disabled (KEEP_ALIVE_ENABLED=false)');
+    return;
+  }
+
   const base = process.env.RENDER_EXTERNAL_URL || process.env.SELF_URL;
   if (!base) {
     console.warn('[KEEP-ALIVE] RENDER_EXTERNAL_URL not set — keep-alive pinger disabled.');

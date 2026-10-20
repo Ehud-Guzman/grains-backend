@@ -5,13 +5,14 @@ const { AppError } = require('../middleware/errorHandler.middleware');
 const { ROLES, ORDER_STATUSES } = require('../utils/constants');
 const { withGuestFallback } = require('../utils/orderGuestFallback');
 const { isValidImageBuffer } = require('../utils/validateImageBuffer');
+const { DRIVER_SELF_FIELDS } = require('../utils/userProjections');
 
 // GET /api/driver/me — profile + stats
 const getMe = async (req, res, next) => {
   try {
     const User = require('../models/User');
     const driver = await User.findById(req.user.id)
-      .select('-passwordHash -failedLoginCount -onboarding -orderHistory -addresses')
+      .select(DRIVER_SELF_FIELDS)
       .lean();
     if (!driver) return next(new AppError('Not found', 404, 'NOT_FOUND'));
     const stats = await driverService.getMyStats(req.user.id);

@@ -26,7 +26,10 @@ const globalSettingsSchema = new mongoose.Schema({
   // Background jobs the superadmin has paused from the Control Center
   // (names from services/jobControl.service.js). Read straight from the DB by
   // the jobs themselves, so a pause holds across PM2 workers and restarts.
-  pausedJobs: { type: [String], default: [] }
+  pausedJobs: { type: [String], default: [] },
+
+  // Completed one-off data migrations: { <name>: Date } (utils/migrations.js)
+  migrations: { type: mongoose.Schema.Types.Mixed, default: {} }
 }, {
   timestamps: true,
   _id: false   // suppress auto ObjectId — we use the string 'global'

@@ -52,7 +52,7 @@ describe('auth.service — admin 2FA', () => {
     assert.equal(result.accessToken, undefined);
     assert.equal(result.requiresBranchSelection, undefined);
 
-    const refreshed = await User.findById(admin._id);
+    const refreshed = await User.findById(admin._id).select('+twoFactorOtpHash +twoFactorExpires +twoFactorAttempts');
     assert.ok(refreshed.twoFactorOtpHash, 'OTP hash should be stored');
     assert.ok(refreshed.twoFactorExpires);
   });
@@ -72,7 +72,7 @@ describe('auth.service — admin 2FA', () => {
     assert.equal(verified.requiresBranchSelection, true);
     assert.ok(verified.preAuthToken);
 
-    const refreshed = await User.findById(admin._id);
+    const refreshed = await User.findById(admin._id).select('+twoFactorOtpHash +twoFactorExpires +twoFactorAttempts');
     assert.equal(refreshed.twoFactorOtpHash, null, 'OTP state should be cleared after success');
   });
 
@@ -140,7 +140,7 @@ describe('auth.service — login tracking', () => {
     await withFixedOtp(() =>
       authService.login({ phone: admin.phone, password: PASSWORD }, '9.9.9.9', 'agent-A')
     );
-    const refreshed = await User.findById(admin._id);
+    const refreshed = await User.findById(admin._id).select('+lastLoginIp +lastLoginUserAgent');
     assert.equal(refreshed.lastLoginIp, '9.9.9.9');
     assert.equal(refreshed.lastLoginUserAgent, 'agent-A');
   });

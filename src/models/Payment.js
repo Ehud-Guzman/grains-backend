@@ -3,6 +3,10 @@ const { PAYMENT_METHODS, PAYMENT_STATUSES } = require('../utils/constants');
 
 const paymentSchema = new mongoose.Schema({
   orderId: { type: mongoose.Schema.Types.ObjectId, ref: 'Order', required: true },
+  // Denormalised from the order so payment reports can filter by branch without joining every payment to its
+  // order (2026-10 audit, F-10). Filled automatically on save (see the hook below) and backfilled for older
+  // payments by utils/migrations.js.
+  branchId: { type: mongoose.Schema.Types.ObjectId, ref: 'Branch', default: null },
   method: { type: String, enum: Object.values(PAYMENT_METHODS), required: true },
   mpesaTransactionId: { type: String, default: null },
   mpesaPhone: { type: String, default: null },
@@ -38,7 +42,18 @@ paymentSchema.index({ orderId: 1 });
 // explicit null values — partial filter skips them cleanly.
 paymentSchema.index({ checkoutRequestId: 1 },   { unique: true, partialFilterExpression: { checkoutRequestId:   { $type: 'string' } } });
 paymentSchema.index({ mpesaTransactionId: 1 },  { unique: true, partialFilterExpression: { mpesaTransactionId:  { $type: 'string' } } });
-paymentSchema.index({ status: 1 });
-paymentSchema.index({ status: 1, createdAt: -1 }); // date-ranged payment reports and reconciliation
+paymentSchema.index({ status: 1, createdAt: -1 }); // date-ranged payment reports and reconciliation (also serves status-only queries)
+paymentSchema.index({ status: 1, paidAt: -1 }); // cash-up: money in over a period
+paymentSchema.index({ branchId: 1, status: 1, paidAt: -1 }); // ...for one branch
+paymentSchema.index({ mpesaPhone: 1, createdAt: -1 }); // per-phone STK prompt cap
+// Late-success reconciliation only ever looks at the (few) payments that have it.
+paymentSchema.index({ 'lateSuccessMeta.receivedAt': 1 }, { partialFilterExpression: { 'lateSuccessMeta.receivedAt': { $exists: true } } });
+
+// Keep the denormalised branch in step with the order for every payment saved through the model.
+paymentSchema.pre('validate', async function setBranchFromOrder() {
+  if (this.branchId || !this.orderId) return;
+  const order = await mongoose.model('Order').findById(this.orderId).select('branchId').lean();
+  if (order?.branchId) this.branchId = order.branchId;
+});
 
 module.exports = mongoose.model('Payment', paymentSchema);

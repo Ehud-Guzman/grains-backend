@@ -13,6 +13,7 @@ const Order                = require('../models/Order');
 const globalSettingsService = require('./globalSettings.service');
 const logger               = require('../utils/logger');
 const { PAYMENT_METHODS, PAYMENT_STATUSES, ORDER_STATUSES } = require('../utils/constants');
+const { EAT_OFFSET_MS } = require('../utils/businessTime');
 
 // ── CONSTANTS ─────────────────────────────────────────────────────────────────
 const PAYMENT_TYPE_CODES = {
@@ -40,9 +41,11 @@ const buildPayload = (order, tin, bhfId) => {
   const deliveryFee     = Number(order.deliveryFee) || 0;
   const vatAmount       = Number(order.vatAmount) || 0;
 
-  const now    = new Date();
-  const cfmDt  = now.toISOString().replace(/[-:T.Z]/g, '').slice(0, 14); // YYYYMMDDHHmmss
-  const salesDt = new Date(order.createdAt).toISOString().slice(0, 10).replace(/-/g, ''); // YYYYMMDD
+  // Dates are on the Nairobi clock, like the VAT report's month buckets. In UTC an order placed 00:00-03:00 EAT
+  // was filed under the previous day (and, on the 1st, the previous month) - 2026-10 audit, F-16.
+  const inEAT = (date) => new Date(new Date(date).getTime() + EAT_OFFSET_MS).toISOString();
+  const cfmDt  = inEAT(new Date()).replace(/[-:T.Z]/g, '').slice(0, 14); // YYYYMMDDHHmmss
+  const salesDt = inEAT(order.createdAt).slice(0, 10).replace(/-/g, ''); // YYYYMMDD
 
   // Allocate couponDiscount and vatAmount across items to the cent using the
   // largest-remainder (Hamilton) method: floor each item's proportional share,
@@ -275,4 +278,4 @@ const submitInvoice = async (orderId) => {
   }
 };
 
-module.exports = { submitInvoice };
+module.exports = { submitInvoice, buildPayload };

@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { runTransaction } = require('../utils/transaction');
 const Product = require('../models/Product');
 const Order = require('../models/Order');
 const StockLog = require('../models/StockLog');
@@ -240,7 +241,7 @@ const addDelivery = async (productId, varietyName, packagingSize, quantity, reas
   // order transactions for exactly this reason; addDelivery did not take a
   // session at all.
   //
-  // withTransaction() (rather than a hand-rolled start/commit/abort) because
+  // runTransaction() (rather than a hand-rolled start/commit/abort) because
   // MongoDB aborts one of two concurrent transactions that touch the same product
   // document with a WriteConflict, and the documented handling is to retry the
   // whole transaction. Without that retry:
@@ -249,11 +250,9 @@ const addDelivery = async (productId, varietyName, packagingSize, quantity, reas
   //     unique-index check; and
   //   • a concurrent *different* delivery to the same product failed outright with
   //     an opaque error instead of simply applying.
-  const session = await mongoose.startSession();
-
   let product, balanceAfter;
   try {
-    await session.withTransaction(async () => {
+    await runTransaction(async (session) => {
       product = await Product.findOneAndUpdate(
         {
           _id: productId,
@@ -321,8 +320,6 @@ const addDelivery = async (productId, varietyName, packagingSize, quantity, reas
       );
     }
     throw err;
-  } finally {
-    session.endSession();
   }
 
   await activityLogService.log({
@@ -360,14 +357,12 @@ const manualAdjustment = async (productId, varietyName, packagingSize, newQuanti
   // StockLog row commit together or not at all. Without this, a crash between
   // the two left stock changed with no audit row — and a manual adjustment is
   // precisely the write most likely to be questioned later.
-  const session = await mongoose.startSession();
-
   let before, currentStock, quantityChange, product;
-  try {
-    // withTransaction() for the same reason as addDelivery — it retries on the
-    // WriteConflict MongoDB raises when two transactions touch the same product
-    // document concurrently, rather than failing the second one outright.
-    await session.withTransaction(async () => {
+  {
+    // runTransaction() for the same reason as addDelivery - it retries on the WriteConflict MongoDB
+    // raises when two transactions touch the same product document concurrently, and answers 503
+    // TRANSACTION_CONFLICT (not a raw driver error) if the conflict does not clear.
+    await runTransaction(async (session) => {
       before = await Product.findOneAndUpdate(
         {
           _id: productId,
@@ -421,8 +416,6 @@ const manualAdjustment = async (productId, varietyName, packagingSize, newQuanti
         performedBy
       }, session);
     });
-  } finally {
-    session.endSession();
   }
 
   await activityLogService.log({

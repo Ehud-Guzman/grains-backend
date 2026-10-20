@@ -176,6 +176,10 @@ const AUTH_LIMITS = {
   OTP_RESEND_COOLDOWN_MS: 60 * 1000
 };
 
+// Orders that count as real business for customer spend and similar figures: placed, approved and not
+// since cancelled or rejected. Matches the Reports module so the two screens agree (2026-10 audit, F-31).
+const REVENUE_ORDER_STATUSES = ['approved', 'preparing', 'out_for_delivery', 'completed'];
+
 const MPESA_RECEIPT_REGEX = /^[A-Z0-9]{10}$/;
 
 const DB_RETRY = {
@@ -197,6 +201,8 @@ const RATE_LIMITS = {
   CALLBACK_MAX: 30,
   STK_MAX: 5,
   TRACK_MAX: 20,
+  // Coupon code checks: each answer tells a guesser something about a code, so cap them per IP.
+  COUPON_MAX: 15,
   // Guest checkout is unauthenticated and reserves real stock at placement —
   // tighter than publicLimiter to blunt a bot varying items/phone to lock up
   // inventory (the 20s exact-duplicate guard alone doesn't stop that).
@@ -228,5 +234,6 @@ module.exports = {
   RATE_LIMITS,
   REQUEST_TIMING,
   UPLOAD_LIMITS,
+  REVENUE_ORDER_STATUSES,
   MPESA_RECEIPT_REGEX
 };

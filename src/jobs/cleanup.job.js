@@ -7,13 +7,13 @@ const ActivityLog = require('../models/ActivityLog');
 const Settings    = require('../models/Settings');
 const Guest       = require('../models/Guest');
 const logger      = require('../utils/logger');
-const { runGuarded } = require('../services/jobControl.service');
+const { runDaily } = require('../services/jobControl.service');
 
 const MS_PER_DAY             = 24 * 60 * 60 * 1000;
 const DEFAULT_RETENTION_DAYS = 90;
 const GUEST_RETENTION_DAYS   = 90;
-const RUN_INTERVAL_MS        = MS_PER_DAY;
-// Delay first run by 2 minutes so startup I/O settles before cleanup hits the DB
+const POLL_MS                = 15 * 60 * 1000;   // checked often; runs once a day from 03:00 Nairobi (jobControl.runDaily)
+// Delay first check by 2 minutes so startup I/O settles before cleanup hits the DB
 const INITIAL_DELAY_MS       = 2 * 60 * 1000;
 
 // ── ACTIVITY LOG CLEANUP ──────────────────────────────────────────────────────
@@ -88,17 +88,17 @@ const runGuestCleanup = async () => {
 const startCleanupJobs = () => {
   // Both tasks swallow their own errors, so one failing can't stop the other;
   // runGuarded adds the Control Center's pause switch and last-run record.
-  const runCleanup = () => runGuarded('cleanup', async () => {
+  const runCleanup = () => runDaily('cleanup', 3, async () => {
     await runActivityLogCleanup();
     await runGuestCleanup();
   });
 
   setTimeout(() => {
     runCleanup();
-    setInterval(runCleanup, RUN_INTERVAL_MS);
-  }, INITIAL_DELAY_MS);
+    setInterval(runCleanup, POLL_MS).unref();
+  }, INITIAL_DELAY_MS).unref();
 
-  logger.info('[CLEANUP] Cleanup jobs scheduled (daily, first run in 2 min)');
+  logger.info('[CLEANUP] Cleanup jobs scheduled (daily from 03:00 Nairobi, checked every 15 min)');
 };
 
 module.exports = { startCleanupJobs };

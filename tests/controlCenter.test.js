@@ -310,6 +310,9 @@ describe('Control Center — jobs', () => {
     assert.equal(paused.lastRun.outcome, 'skipped');
 
     await jobControl.setPaused('cleanup', false);
+    // The first run took the job's lease (it keeps two instances from both running it); let it lapse, as it
+    // would by the next scheduled tick.
+    await require('../src/models/JobState').updateOne({ _id: 'cleanup' }, { leaseUntil: new Date(0) });
     await jobControl.runGuarded('cleanup', async () => { runs += 1; });
     assert.equal(runs, 2);
   });

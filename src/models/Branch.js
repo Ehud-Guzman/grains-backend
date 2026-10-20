@@ -18,7 +18,6 @@ const branchSchema = new mongoose.Schema({
   timestamps: true
 });
 
-branchSchema.index({ slug: 1 }, { unique: true });
 branchSchema.index({ code: 1 }, { unique: true, partialFilterExpression: { code: { $type: 'string' } } });
 branchSchema.index({ isActive: 1 });
 branchSchema.index({ isDefault: 1 });

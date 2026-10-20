@@ -40,12 +40,16 @@ const onboardingSchema = new mongoose.Schema({
   }
 }, { _id: false });
 
+// Credential and auth-state fields are `select: false`: a query only returns them when it asks with
+// `.select('+field')`. They used to be hidden by per-query deny-lists, and every endpoint that forgot one
+// (customer profile, drivers, /auth/me, the staff list) returned OTP hashes - a 6-digit code hashed with
+// bcrypt is crackable offline in minutes (2026-10 audit, F-08).
 const userSchema = new mongoose.Schema({
   name: { type: String, required: true, trim: true },
   email:     { type: String, trim: true, lowercase: true, default: null },
   avatarURL: { type: String, default: null },
   phone: { type: String, required: true, trim: true },
-  passwordHash: { type: String, required: true },
+  passwordHash: { type: String, required: true, select: false },
   role: {
     type: String,
     enum: Object.values(ROLES).filter(r => r !== 'guest'),
@@ -78,16 +82,16 @@ const userSchema = new mongoose.Schema({
   // isLocked, which is a deliberate admin lock and never expires on its own.
   loginLockedUntil: { type: Date, default: null },
   lastLoginAt: { type: Date, default: null },
-  passwordResetOtpHash: { type: String, default: null },
-  passwordResetExpires: { type: Date, default: null },
-  passwordResetAttempts: { type: Number, default: 0 },
+  passwordResetOtpHash: { type: String, default: null, select: false },
+  passwordResetExpires: { type: Date, default: null, select: false },
+  passwordResetAttempts: { type: Number, default: 0, select: false },
   // Admin/superadmin login 2FA (see auth.service.js TWO_FACTOR_ROLES)
-  twoFactorOtpHash: { type: String, default: null },
-  twoFactorExpires: { type: Date, default: null },
-  twoFactorAttempts: { type: Number, default: 0 },
+  twoFactorOtpHash: { type: String, default: null, select: false },
+  twoFactorExpires: { type: Date, default: null, select: false },
+  twoFactorAttempts: { type: Number, default: 0, select: false },
   // Used to detect new-device/location admin logins (alert.service.js NEW_DEVICE_ADMIN_LOGIN)
-  lastLoginIp: { type: String, default: null },
-  lastLoginUserAgent: { type: String, default: null },
+  lastLoginIp: { type: String, default: null, select: false },
+  lastLoginUserAgent: { type: String, default: null, select: false },
   branchId: { type: mongoose.Schema.Types.ObjectId, ref: 'Branch', default: null }, // null = superadmin (no branch)
   // Extra capabilities granted by superadmin (additive — never restricts role permissions)
   customPermissions: {
@@ -102,6 +106,10 @@ const userSchema = new mongoose.Schema({
   isB2B: { type: Boolean, default: false }, // true = business customer with KRA PIN
   kraPin: { type: String, trim: true, uppercase: true, default: null }, // buyer KRA PIN, reused to prefill checkout
   orderHistory: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Order' }],
+  // Branches this customer has placed an order at. Customer ACCOUNTS are shared across branches, but branch
+  // staff may only see and act on customers who have actually dealt with their branch (2026-10 audit, F-13).
+  // Maintained by order placement; backfilled for older orders by utils/migrations.js.
+  orderedBranchIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Branch' }],
   onboarding: {
     type: onboardingSchema,
     default: () => ({})
@@ -110,11 +118,24 @@ const userSchema = new mongoose.Schema({
   timestamps: true
 });
 
+// Belt and braces: even a document that was loaded WITH these fields never serialises them.
+const SECRET_FIELDS = [
+  'passwordHash', 'passwordResetOtpHash', 'passwordResetExpires', 'passwordResetAttempts',
+  'twoFactorOtpHash', 'twoFactorExpires', 'twoFactorAttempts'
+];
+userSchema.set('toJSON', {
+  transform: (_doc, ret) => {
+    for (const f of SECRET_FIELDS) delete ret[f];
+    return ret;
+  }
+});
+
 // Indexes
 userSchema.index({ phone: 1 }, { unique: true });
 userSchema.index({ email: 1 }, { unique: true, partialFilterExpression: { email: { $type: 'string' } } });
 userSchema.index({ role: 1, createdAt: -1 }); // covers role-only queries too (prefix), plus role+sort admin/customer lists
 userSchema.index({ branchId: 1 });
 userSchema.index({ branchId: 1, createdAt: -1 }); // branch-scoped new-user reports
+userSchema.index({ role: 1, orderedBranchIds: 1, createdAt: -1 }); // a branch's customer list
 
 module.exports = mongoose.model('User', userSchema);

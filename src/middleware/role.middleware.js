@@ -1,6 +1,7 @@
 const { AppError } = require('./errorHandler.middleware');
 const { ROLES } = require('../utils/constants');
 const alertService = require('../services/alert.service');
+const { redactUrl } = require('../utils/redactUrl');
 
 // Roles that should never be anywhere near admin routes
 const LOW_PRIVILEGE_ROLES = [ROLES.CUSTOMER, ROLES.GUEST];
@@ -58,7 +59,7 @@ const requireMinRole = (minRole) => {
           {
             'User ID': String(req.user.id),
             Role: req.user.role,
-            Route: `${req.method} ${req.originalUrl}`,
+            Route: `${req.method} ${redactUrl(req.originalUrl)}`,
             'Required min role': minRole,
             IP: req.ip || 'unknown',
           },

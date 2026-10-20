@@ -1,4 +1,3 @@
-const bcrypt = require('bcryptjs');
 const User = require('../models/User');
 const Order = require('../models/Order');
 const { AppError } = require('../middleware/errorHandler.middleware');
@@ -10,6 +9,8 @@ const { withGuestFallbackList } = require('../utils/orderGuestFallback');
 const { escapeRegex } = require('../utils/escapeRegex');
 const { bumpTokenValidAfter } = require('../utils/tokenValidAfter');
 const { toLocalPhone } = require('../utils/mpesaHelpers');
+const { hashPassword } = require('../utils/passwordHash');
+const { DRIVER_ADMIN_FIELDS } = require('../utils/userProjections');
 
 const BCRYPT_WORK_FACTOR = AUTH_LIMITS.BCRYPT_WORK_FACTOR;
 
@@ -30,7 +31,7 @@ const getAllDrivers = async (filters = {}, query = {}, branchId) => {
   const [total, drivers] = await Promise.all([
     User.countDocuments(match),
     User.find(match)
-      .select('-passwordHash -failedLoginCount -onboarding -orderHistory -addresses')
+      .select(DRIVER_ADMIN_FIELDS)
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit)
@@ -43,7 +44,7 @@ const getAllDrivers = async (filters = {}, query = {}, branchId) => {
 // ── GET SINGLE DRIVER ─────────────────────────────────────────────────────────
 const getDriverById = async (driverId, branchId) => {
   const driver = await User.findOne({ _id: driverId, role: ROLES.DRIVER, branchId })
-    .select('-passwordHash -failedLoginCount -onboarding -orderHistory -addresses')
+    .select(DRIVER_ADMIN_FIELDS)
     .lean();
   if (!driver) throw new AppError('Driver not found', 404, 'DRIVER_NOT_FOUND');
   return driver;
@@ -62,7 +63,7 @@ const createDriver = async ({ name, phone, email, password, vehicleType, vehicle
     if (emailTaken) throw new AppError('An account with this email already exists', 409, 'EMAIL_TAKEN');
   }
 
-  const passwordHash = await bcrypt.hash(password, BCRYPT_WORK_FACTOR);
+  const passwordHash = await hashPassword(password, BCRYPT_WORK_FACTOR);
 
   const driver = await User.create({
     name,
@@ -132,13 +133,16 @@ const getDriverStats = async (driverId, branchId) => {
   const driver = await User.findOne({ _id: driverId, role: ROLES.DRIVER, branchId }).lean();
   if (!driver) throw new AppError('Driver not found', 404, 'DRIVER_NOT_FOUND');
 
-  const [total, completed, active] = await Promise.all([
+  const [total, completed, active, cancelled] = await Promise.all([
     Order.countDocuments({ driverId, branchId }),
     Order.countDocuments({ driverId, branchId, status: ORDER_STATUSES.COMPLETED }),
-    Order.countDocuments({ driverId, branchId, status: ORDER_STATUSES.OUT_FOR_DELIVERY })
+    Order.countDocuments({ driverId, branchId, status: ORDER_STATUSES.OUT_FOR_DELIVERY }),
+    Order.countDocuments({ driverId, branchId, status: { $in: [ORDER_STATUSES.CANCELLED, ORDER_STATUSES.REJECTED] } })
   ]);
 
-  return { total, completed, active, pending: total - completed - active };
+  // `pending` is work still to do. It used to be total - completed - active, which counted cancelled and
+  // rejected orders as pending (2026-10 audit, F-43).
+  return { total, completed, active, cancelled, pending: Math.max(0, total - completed - active - cancelled) };
 };
 
 // ── LOCK / UNLOCK ─────────────────────────────────────────────────────────────
@@ -199,7 +203,7 @@ const resetDriverPassword = async (driverId, newPassword, adminId, branchId, act
   if (!newPassword) throw new AppError('Password is required', 400, 'INVALID_PASSWORD');
   validatePasswordStrength(newPassword);
 
-  const passwordHash = await bcrypt.hash(newPassword, BCRYPT_WORK_FACTOR);
+  const passwordHash = await hashPassword(newPassword, BCRYPT_WORK_FACTOR);
   // Kill any session issued under the old password — a forced reset usually
   // means a lost phone or offboarding (see auth.middleware tokenValidAfter check).
   const driver = await User.findOneAndUpdate(
@@ -225,7 +229,7 @@ const updateVehicleInfo = async (driverId, { vehicleType, vehiclePlate }, branch
     { _id: driverId, role: ROLES.DRIVER, branchId },
     { vehicleInfo: { type: vehicleType || null, plate: vehiclePlate || null } },
     { new: true }
-  ).select('-passwordHash -failedLoginCount');
+  ).select(DRIVER_ADMIN_FIELDS);
 
   if (!driver) throw new AppError('Driver not found', 404, 'DRIVER_NOT_FOUND');
   return driver;
@@ -292,17 +296,23 @@ const getMyStats = async (driverId) => {
 };
 
 // ── PUBLIC: AVAILABLE RIDERS (for checkout selection) ─────────────────────────
-// Minimal fields only — never expose phone or other contact info publicly.
+// Minimal fields only: first name and vehicle TYPE. No phone, no surname, and no number plate - this is an
+// unauthenticated endpoint and a plate plus a name identifies a person to anyone who asks (2026-10 audit).
 const getAvailablePublic = async (branchId) => {
-  return User.find({
+  const riders = await User.find({
     role: ROLES.DRIVER,
     branchId,
     isLocked: false,
     isAvailableForDelivery: true,
   })
-    .select('name vehicleInfo')
+    .select('name vehicleInfo.type')
     .sort({ name: 1 })
     .lean();
+  return riders.map((r) => ({
+    _id: r._id,
+    name: String(r.name || '').trim().split(/\s+/)[0] || 'Rider',
+    vehicleInfo: { type: r.vehicleInfo?.type || null },
+  }));
 };
 
 module.exports = {

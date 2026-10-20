@@ -1,4 +1,3 @@
-const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
@@ -12,6 +11,8 @@ const notificationService = require('./notification.service');
 const logger = require('../utils/logger');
 const { bumpTokenValidAfter } = require('../utils/tokenValidAfter');
 const { phoneVariants, toLocalPhone } = require('../utils/mpesaHelpers');
+const { hashPassword, comparePassword, hashOtp, verifyOtp } = require('../utils/passwordHash');
+const { SELF_PROFILE_FIELDS } = require('../utils/userProjections');
 
 const MAX_FAILED_LOGINS = AUTH_LIMITS.MAX_FAILED_LOGINS;
 const BCRYPT_WORK_FACTOR = AUTH_LIMITS.BCRYPT_WORK_FACTOR;
@@ -34,10 +35,13 @@ const generateOtp = () => String(crypto.randomInt(100000, 1000000));
 // registered with whatever they typed. Every lookup therefore matches all variants —
 // a plain { phone } equality made login depend on typing the number exactly as at
 // signup, and let one number register twice.
-const findUserByPhone = (phone) => {
+// Credential fields are select:false on the model, so a caller that needs one asks for it by name
+// (e.g. '+passwordHash'); everyone else (duplicate-phone checks) gets none of them.
+const findUserByPhone = (phone, select = '') => {
   let variants;
   try { variants = phoneVariants(phone); } catch { variants = [phone]; }
-  return User.findOne({ phone: { $in: variants } });
+  const query = User.findOne({ phone: { $in: variants } });
+  return select ? query.select(select) : query;
 };
 
 // ── GENERATE TOKENS ───────────────────────────────────────────────────────────
@@ -142,7 +146,7 @@ const register = async ({ name, phone, email, password, marketingConsent = false
     }
   }
 
-  const passwordHash = await bcrypt.hash(password, BCRYPT_WORK_FACTOR);
+  const passwordHash = await hashPassword(password, BCRYPT_WORK_FACTOR);
 
   const user = await User.create({
     name,
@@ -176,7 +180,7 @@ const register = async ({ name, phone, email, password, marketingConsent = false
 // Customers get tokens immediately.
 // Staff/Admin/Superadmin get a preAuthToken + branch list for step-2 branch selection.
 const login = async ({ phone, password }, ip, userAgent = 'unknown') => {
-  const user = await findUserByPhone(phone);
+  const user = await findUserByPhone(phone, '+passwordHash +lastLoginIp +lastLoginUserAgent +twoFactorExpires');
 
   if (!user) {
     throw new AppError('Invalid phone number or password', 401, 'INVALID_CREDENTIALS');
@@ -203,7 +207,7 @@ const login = async ({ phone, password }, ip, userAgent = 'unknown') => {
     throw new AppError('Invalid phone number or password', 401, 'INVALID_CREDENTIALS');
   }
 
-  const isMatch = await bcrypt.compare(password, user.passwordHash);
+  const isMatch = await comparePassword(password, user.passwordHash);
 
   if (!isMatch) {
     await incrementFailedLogin(user._id, ip);
@@ -284,7 +288,7 @@ const login = async ({ phone, password }, ip, userAgent = 'unknown') => {
 
     if (!withinCooldown) {
       const otp = generateOtp();
-      const twoFactorOtpHash = await bcrypt.hash(otp, BCRYPT_WORK_FACTOR);
+      const twoFactorOtpHash = hashOtp(`2fa:${user._id}`, otp);
 
       await User.findByIdAndUpdate(user._id, {
         twoFactorOtpHash,
@@ -391,7 +395,7 @@ const verifyTwoFactor = async (twoFactorToken, otp, ip = null) => {
     throw new AppError('Session already used. Please log in again.', 401, 'INVALID_2FA_TOKEN');
   }
 
-  const user = await User.findById(decoded.userId);
+  const user = await User.findById(decoded.userId).select('+twoFactorOtpHash +twoFactorExpires +twoFactorAttempts');
   if (!user || user.isLocked) {
     throw new AppError('User not found or account locked', 401, 'UNAUTHORIZED');
   }
@@ -414,7 +418,7 @@ const verifyTwoFactor = async (twoFactorToken, otp, ip = null) => {
     throw new AppError(GENERIC_RESET_ERROR, 400, 'INVALID_2FA_CODE');
   }
 
-  const isMatch = await bcrypt.compare(otp, user.twoFactorOtpHash);
+  const isMatch = await verifyOtp(`2fa:${user._id}`, otp, user.twoFactorOtpHash);
   if (!isMatch) {
     await User.findByIdAndUpdate(user._id, { $inc: { twoFactorAttempts: 1 } });
     throw new AppError(GENERIC_RESET_ERROR, 400, 'INVALID_2FA_CODE');
@@ -728,10 +732,10 @@ const validatePasswordStrength = (password) => {
 // JWT) — reused so the reissued token keeps the same branch context rather than
 // silently dropping an admin back to "no branch selected".
 const changePassword = async (userId, currentPassword, newPassword, ip = null, currentBranchId = null) => {
-  const user = await User.findById(userId);
+  const user = await User.findById(userId).select('+passwordHash');
   if (!user) throw new AppError('User not found', 404, 'USER_NOT_FOUND');
 
-  const isMatch = await bcrypt.compare(currentPassword, user.passwordHash);
+  const isMatch = await comparePassword(currentPassword, user.passwordHash);
   if (!isMatch) throw new AppError('Current password is incorrect', 400, 'WRONG_PASSWORD');
 
   validatePasswordStrength(newPassword);
@@ -739,7 +743,7 @@ const changePassword = async (userId, currentPassword, newPassword, ip = null, c
   if (currentPassword === newPassword)
     throw new AppError('New password must be different from current password', 400, 'SAME_PASSWORD');
 
-  const passwordHash = await bcrypt.hash(newPassword, BCRYPT_WORK_FACTOR);
+  const passwordHash = await hashPassword(newPassword, BCRYPT_WORK_FACTOR);
   // Any access/refresh token issued before this instant must stop working —
   // otherwise a stolen token survives the very password change meant to kill it.
   // The caller's own current session is reissued fresh tokens right after this
@@ -766,7 +770,7 @@ const changePassword = async (userId, currentPassword, newPassword, ip = null, c
 // Always returns the same generic result regardless of whether the phone is
 // registered, so the response can't be used to enumerate accounts.
 const forgotPassword = async (phone, ip = null) => {
-  const user = await findUserByPhone(phone);
+  const user = await findUserByPhone(phone, '+passwordResetExpires');
 
   // Locked accounts can still request a code — proving phone/email ownership
   // via OTP is exactly how a legitimately locked-out customer recovers, and
@@ -787,7 +791,7 @@ const forgotPassword = async (phone, ip = null) => {
     }
 
     const otp = generateOtp();
-    const passwordResetOtpHash = await bcrypt.hash(otp, BCRYPT_WORK_FACTOR);
+    const passwordResetOtpHash = hashOtp(`reset:${user._id}`, otp);
 
     await User.findByIdAndUpdate(user._id, {
       passwordResetOtpHash,
@@ -813,7 +817,7 @@ const forgotPassword = async (phone, ip = null) => {
 
 // ── RESET PASSWORD (via OTP) ──────────────────────────────────────────────────
 const resetPassword = async (phone, otp, newPassword, ip = null) => {
-  const user = await findUserByPhone(phone);
+  const user = await findUserByPhone(phone, '+passwordResetOtpHash +passwordResetExpires +passwordResetAttempts');
 
   if (!user || !user.passwordResetOtpHash || !user.passwordResetExpires) {
     throw new AppError(GENERIC_RESET_ERROR, 400, 'INVALID_RESET_CODE');
@@ -833,7 +837,7 @@ const resetPassword = async (phone, otp, newPassword, ip = null) => {
     throw new AppError(GENERIC_RESET_ERROR, 400, 'INVALID_RESET_CODE');
   }
 
-  const isMatch = await bcrypt.compare(otp, user.passwordResetOtpHash);
+  const isMatch = await verifyOtp(`reset:${user._id}`, otp, user.passwordResetOtpHash);
   if (!isMatch) {
     await User.findByIdAndUpdate(user._id, { $inc: { passwordResetAttempts: 1 } });
     throw new AppError(GENERIC_RESET_ERROR, 400, 'INVALID_RESET_CODE');
@@ -841,7 +845,7 @@ const resetPassword = async (phone, otp, newPassword, ip = null) => {
 
   validatePasswordStrength(newPassword);
 
-  const passwordHash = await bcrypt.hash(newPassword, BCRYPT_WORK_FACTOR);
+  const passwordHash = await hashPassword(newPassword, BCRYPT_WORK_FACTOR);
   // Kill any tokens issued before this reset — a password reset is often a
   // direct response to a compromised account, so a stolen token must not
   // survive it. Unlike changePassword, this flow is unauthenticated (OTP-based)
@@ -871,7 +875,7 @@ const resetPassword = async (phone, otp, newPassword, ip = null) => {
 
 // ── GET PROFILE ───────────────────────────────────────────────────────────────
 const getProfile = async (userId) => {
-  const user = await User.findById(userId).select('-passwordHash -failedLoginCount').lean();
+  const user = await User.findById(userId).select(SELF_PROFILE_FIELDS).lean();
   if (!user) throw new AppError('User not found', 404, 'USER_NOT_FOUND');
   user.onboarding = normalizeOnboarding(user.onboarding);
   return user;
@@ -897,7 +901,7 @@ const updateProfile = async (userId, { name, email, addresses, kraPin, marketing
       }),
     },
     { new: true, runValidators: true }
-  ).select('-passwordHash -failedLoginCount');
+  ).select(SELF_PROFILE_FIELDS);
 
   if (!user) throw new AppError('User not found', 404, 'USER_NOT_FOUND');
 

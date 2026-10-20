@@ -70,6 +70,9 @@ const remove = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+const { AppError } = require('../../middleware/errorHandler.middleware');
+const UNIFORM_COUPON_ERRORS = ['COUPON_INVALID', 'COUPON_EXPIRED', 'COUPON_EXHAUSTED', 'COUPON_NOT_YOURS'];
+
 // Public-facing validate (called at checkout to preview discount)
 const validatePublic = async (req, res, next) => {
   try {
@@ -86,7 +89,15 @@ const validatePublic = async (req, res, next) => {
       discountValue: coupon.discountValue,
       discountAmount,
     }, 'Coupon applied');
-  } catch (err) { next(err); }
+  } catch (err) {
+    // A dead code (unknown, inactive, expired, used up, or someone else's) must all look the same to an
+    // anonymous caller, otherwise the endpoint tells a guesser which codes exist. Answers that need a code
+    // that IS valid for this person (minimum order, own usage limit) keep their specific message.
+    if (UNIFORM_COUPON_ERRORS.includes(err.errorCode)) {
+      return next(new AppError('Coupon code is invalid or expired.', 400, 'COUPON_INVALID'));
+    }
+    next(err);
+  }
 };
 
 module.exports = { getAll, getPerformance, getById, getRedemptions, create, update, remove, validatePublic };

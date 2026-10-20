@@ -1,4 +1,5 @@
 const { REQUEST_TIMING } = require('../utils/constants');
+const { redactUrl } = require('../utils/redactUrl');
 
 const requestTiming = (req, res, next) => {
   const startedAt = process.hrtime.bigint();
@@ -11,7 +12,7 @@ const requestTiming = (req, res, next) => {
 
     if (durationMs >= threshold) {
       console.warn(
-        `[SLOW REQUEST] ${req.method} ${req.originalUrl} ${res.statusCode} - ${rounded}ms`
+        `[SLOW REQUEST] ${req.method} ${redactUrl(req.originalUrl)} ${res.statusCode} - ${rounded}ms`
       );
     }
   });

@@ -49,3 +49,32 @@ describe('auth.controller#refresh — CSRF Origin/Referer check', () => {
     assert.equal(res.body.error, 'MISSING_TOKEN');
   });
 });
+
+describe('refresh cookie SameSite (2026-10 audit F-48)', () => {
+  const saved = { env: process.env.NODE_ENV, same: process.env.COOKIE_SAMESITE, domain: process.env.COOKIE_DOMAIN };
+  const restore = () => {
+    process.env.NODE_ENV = saved.env;
+    for (const [k, v] of [['COOKIE_SAMESITE', saved.same], ['COOKIE_DOMAIN', saved.domain]]) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+  };
+
+  test('production default is unchanged (None, because the old setup was cross-site), and Lax once on one domain', () => {
+    process.env.NODE_ENV = 'production'; delete process.env.COOKIE_SAMESITE; delete process.env.COOKIE_DOMAIN;
+    try {
+      assert.equal(authController.refreshCookieOptions().sameSite, 'none');
+      process.env.COOKIE_DOMAIN = '.example.co.ke';
+      assert.equal(authController.refreshCookieOptions().sameSite, 'lax');
+    } finally { restore(); }
+  });
+
+  test('COOKIE_SAMESITE=lax forces Lax even in production without a cookie domain; junk values are ignored', () => {
+    process.env.NODE_ENV = 'production'; delete process.env.COOKIE_DOMAIN;
+    try {
+      process.env.COOKIE_SAMESITE = 'LAX';
+      assert.equal(authController.refreshCookieOptions().sameSite, 'lax');
+      process.env.COOKIE_SAMESITE = 'bogus';
+      assert.equal(authController.refreshCookieOptions().sameSite, 'none');
+    } finally { restore(); }
+  });
+});

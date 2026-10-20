@@ -35,6 +35,17 @@ const getById = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+// ── GET SEVERAL PRODUCTS (public) ─────────────────────────────────────────────
+// GET /api/products/batch?ids=a,b,c - the cart's price refresh in one request.
+const getBatch = async (req, res, next) => {
+  try {
+    const ids = String(req.query.ids || '').split(',').map(s => s.trim()).filter(Boolean);
+    const branch = await resolvePublicBranch(req.query.branchId);
+    const products = await productService.getManyPublic(ids, branch?._id);
+    return success(res, products);
+  } catch (err) { next(err); }
+};
+
 // ── GET CATEGORIES (public) ───────────────────────────────────────────────────
 const getCategories = async (req, res, next) => {
   try {
@@ -153,6 +164,7 @@ const getBestTimeBadge = async (req, res, next) => {
 module.exports = {
   getAll,
   getById,
+  getBatch,
   getCategories,
   getSuggestions,
   getAllAdmin,

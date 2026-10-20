@@ -55,8 +55,9 @@ const backoffMs = (attempt) => {
  * Resolves with whatever `work` returned on the attempt that committed. Errors that are not
  * transient (AppError, validation, ...) are thrown unchanged on the first attempt.
  */
-const runTransaction = async (work, { maxAttempts = MAX_ATTEMPTS, ...transactionOptions } = {}) => {
+const runTransaction = async (work, { maxAttempts = MAX_ATTEMPTS, budgetMs = null, ...transactionOptions } = {}) => {
   const session = await mongoose.startSession();
+  const startedAt = Date.now();
   let attempt = 0;
   let result;
 
@@ -68,11 +69,21 @@ const runTransaction = async (work, { maxAttempts = MAX_ATTEMPTS, ...transaction
       try {
         result = await work(session, attempt);
       } catch (err) {
-        if (attempt >= maxAttempts && isTransientTransactionError(err)) {
+        // `budgetMs` bounds the retrying by elapsed time instead of by a fixed count (a burst needs patience,
+        // a stuck transaction needs a clear answer): give up once the budget is spent, after at least two tries.
+        const outOfTime = budgetMs != null && attempt >= 2 && Date.now() - startedAt >= budgetMs;
+        if ((attempt >= maxAttempts || outOfTime) && isTransientTransactionError(err)) {
           // The driver only retries a MongoError that carries the transient label, so converting
           // it to an AppError both stops the retry loop (otherwise it would keep going for up to
           // two minutes) and gives the caller something the API can answer with.
-          logger.warn('[transaction] giving up after repeated write conflicts', { attempts: attempt, err: err.message });
+          logger.warn('[transaction] giving up after repeated write conflicts', { attempts: attempt, elapsedMs: Date.now() - startedAt, err: err.message });
+          try {
+            require('../services/alert.service').sendAlert(
+              'TRANSACTION_CONFLICT_STORM',
+              { Attempts: attempt, 'Waited (ms)': Date.now() - startedAt, Error: err.message },
+              'global'
+            ).catch(() => {});
+          } catch { /* alerting must never mask the real answer */ }
           throw new AppError(
             'We are handling a lot of requests right now. Please try again in a moment.',
             503,

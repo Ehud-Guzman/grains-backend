@@ -22,7 +22,10 @@ const statusHistorySchema = new mongoose.Schema({
   status: { type: String, required: true },
   changedAt: { type: Date, default: Date.now },
   changedBy: { type: mongoose.Schema.Types.ObjectId, required: true },
-  note: { type: String, default: null }
+  // INTERNAL: staff remarks ("no location shared - check distance", cancel/reject reasons). Never sent to customers.
+  note: { type: String, default: null },
+  // Customer-visible text for this step, if any. Customer and tracking payloads show only this.
+  publicNote: { type: String, default: null }
 }, { _id: false });
 
 const orderSchema = new mongoose.Schema({
@@ -83,7 +86,6 @@ const orderSchema = new mongoose.Schema({
     capturedAt: { type: Date, default: null }
   },
   preferredDriverId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null }, // customer's requested rider at checkout — admin still confirms actual assignment
-  deliveryTrackingUrl: { type: String, default: null },
   // Customer's GPS coordinates at checkout — stored for driver reference & analytics
   deliveryCoordinates: {
     lat: { type: Number, default: null },
@@ -107,15 +109,18 @@ const orderSchema = new mongoose.Schema({
 });
 
 // Indexes
-orderSchema.index({ branchId: 1 });
-orderSchema.index({ branchId: 1, status: 1 });
+orderSchema.index({ branchId: 1, status: 1, createdAt: -1 }); // admin lists filtered by status, newest first (prefix-covers branch and branch+status)
 orderSchema.index({ branchId: 1, status: 1, stockReservationStatus: 1, createdAt: -1 });
 orderSchema.index({ branchId: 1, createdAt: -1 });
 orderSchema.index({ userId: 1 });
 orderSchema.index({ guestId: 1 });
 orderSchema.index({ status: 1 });
+orderSchema.index({ couponCode: 1 }, { partialFilterExpression: { couponCode: { $type: 'string' } } }); // coupon usage checks only look at orders that used one
+orderSchema.index({ status: 1, deliveredAt: 1 }); // cash-up / rider reports over a delivery window
+// eTIMS retry + the 'stuck pending' integrity check only look at the few invoices not yet accepted.
+orderSchema.index({ etimsStatus: 1, updatedAt: 1 }, { partialFilterExpression: { etimsStatus: { $in: ['pending', 'failed'] } } });
 orderSchema.index({ createdAt: -1 });
-orderSchema.index({ orderRef: 1 }, { unique: true });
+// (orderRef's unique index is declared on the field above - declaring it twice only produced a warning)
 orderSchema.index({ branchId: 1, paymentStatus: 1 }); // payment reconciliation queries
 orderSchema.index({ driverId: 1, status: 1 }); // driver "my orders"/"my stats" + admin rider report
 

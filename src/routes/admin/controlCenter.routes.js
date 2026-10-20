@@ -18,6 +18,9 @@ const idParam = param('id').isMongoId().withMessage('Invalid id');
 // --- the first screen ---------------------------------------------------------
 router.get('/overview', controller.overview);
 
+// --- what the server sees of the caller's network (verify rate limits / M-Pesa IP handling) ---
+router.get('/network', controller.network);
+
 // --- accounts and sessions ----------------------------------------------------
 router.get('/accounts', controller.listAccounts);
 router.post('/accounts/sign-out-all',

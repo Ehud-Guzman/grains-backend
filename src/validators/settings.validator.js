@@ -6,6 +6,40 @@ const isTimeString = (val) => {
   return /^\d{2}:\d{2}$/.test(val);
 };
 
+// Distance bands (see calculateDeliveryFee) must be a clean sequence of rings around the shop: each band starts
+// where the previous one ends. An overlap makes the price depend on array order, a gap silently charges the
+// flat fee for those distances, and a delivery radius inside the last band leaves that band unreachable (the
+// exact mistake that shipped in both presets once). 2026-10 audit, F-47. Legacy zones that only have a name
+// and a fee (no distances) are left alone.
+const validateDeliveryZones = (zones, { req }) => {
+  if (!Array.isArray(zones)) return true;
+  const bands = zones.filter(z => z && (z.minKm != null || z.maxKm != null));
+  if (bands.length === 0) return true;
+
+  for (const z of bands) {
+    const min = Number(z.minKm ?? 0);
+    const max = Number(z.maxKm);
+    if (!Number.isFinite(min) || min < 0) throw new Error(`"${z.name || 'A zone'}": start distance must be 0 or more`);
+    if (!Number.isFinite(max) || max <= min) throw new Error(`"${z.name || 'A zone'}": end distance must be greater than its start (${min} km)`);
+  }
+  const sorted = [...bands].sort((a, b) => Number(a.minKm ?? 0) - Number(b.minKm ?? 0));
+  if (Number(sorted[0].minKm ?? 0) !== 0) throw new Error('The first zone must start at 0 km');
+  for (let i = 1; i < sorted.length; i += 1) {
+    const prevEnd = Number(sorted[i - 1].maxKm);
+    const start = Number(sorted[i].minKm ?? 0);
+    if (start < prevEnd) throw new Error(`Zones overlap: "${sorted[i - 1].name}" ends at ${prevEnd} km but "${sorted[i].name}" starts at ${start} km`);
+    if (start > prevEnd) throw new Error(`There is a gap between ${prevEnd} km and ${start} km - customers there would silently pay the flat fee`);
+  }
+  const radius = req.body?.maxDeliveryKm;
+  if (radius !== undefined && radius !== null && radius !== '') {
+    const lastStart = Number(sorted[sorted.length - 1].minKm ?? 0);
+    if (Number(radius) <= lastStart) {
+      throw new Error(`The delivery radius (${radius} km) is inside the last zone, which starts at ${lastStart} km - that zone could never be used`);
+    }
+  }
+  return true;
+};
+
 const updateSettingsValidator = [
   // Shop info
   body('shopName').optional().trim().isLength({ max: 100 }).withMessage('Shop name cannot exceed 100 characters'),
@@ -39,7 +73,7 @@ const updateSettingsValidator = [
 
   // Delivery zones
   body('useDeliveryZones').optional().isBoolean().withMessage('useDeliveryZones must be a boolean'),
-  body('deliveryZones').optional().isArray().withMessage('deliveryZones must be an array'),
+  body('deliveryZones').optional().isArray().withMessage('deliveryZones must be an array').bail().custom(validateDeliveryZones),
   body('deliveryZones.*.name').optional().trim().notEmpty().withMessage('Zone name is required'),
   body('deliveryZones.*.fee').optional().isFloat({ min: 0 }).withMessage('Zone fee must be 0 or greater'),
 
@@ -86,4 +120,4 @@ const updateSettingsValidator = [
   body('logRetentionDays').optional().isInt({ min: 0 }).withMessage('logRetentionDays must be 0 or greater'),
 ];
 
-module.exports = { updateSettingsValidator };
+module.exports = { updateSettingsValidator, validateDeliveryZones };

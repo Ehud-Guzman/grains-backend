@@ -3,6 +3,8 @@ const jwt = require('jsonwebtoken');
 const logger = require('../utils/logger');
 const alertService = require('../services/alert.service');
 const { RATE_LIMITS } = require('../utils/constants');
+const { redactUrl } = require('../utils/redactUrl');
+const { storeOption } = require('../utils/mongoRateLimitStore');
 
 // Key by branchId + IP so branches don't throttle each other.
 //
@@ -39,6 +41,7 @@ const tooManyRequests = {
 
 // Anonymous traffic - per branch+IP
 const anonymousLimiter = rateLimit({
+  ...storeOption('anonymousLimiter'),
   windowMs: RATE_LIMITS.WINDOW_MS,
   max: RATE_LIMITS.PUBLIC_MAX,
   keyGenerator: keyByBranchAndIp,
@@ -49,6 +52,7 @@ const anonymousLimiter = rateLimit({
 
 // Signed-in traffic - per user
 const signedInLimiter = rateLimit({
+  ...storeOption('signedInLimiter'),
   windowMs: RATE_LIMITS.WINDOW_MS,
   max: RATE_LIMITS.USER_MAX,
   keyGenerator: (req) => `user:${verifiedUserId(req)}`,
@@ -62,6 +66,7 @@ const publicLimiter = (req, res, next) =>
 
 // Auth routes (login/register) - stricter, 10 req/min per branch+IP
 const authLimiter = rateLimit({
+  ...storeOption('authLimiter'),
   windowMs: RATE_LIMITS.WINDOW_MS,
   max: RATE_LIMITS.AUTH_MAX,
   keyGenerator: keyByBranchAndIp,
@@ -70,7 +75,7 @@ const authLimiter = rateLimit({
   handler: (req, res, _next, options) => {
     alertService.sendAlert(
       'AUTH_RATE_LIMIT',
-      { IP: req.ip, Route: `${req.method} ${req.originalUrl}`, Attempts: `>${options.max} in 1 min`, 'User agent': req.headers['user-agent'] || 'unknown' },
+      { IP: req.ip, Route: `${req.method} ${redactUrl(req.originalUrl)}`, Attempts: `>${options.max} in 1 min`, 'User agent': req.headers['user-agent'] || 'unknown' },
       req.ip
     ).catch(() => {});
     res.status(options.statusCode).json({
@@ -83,6 +88,7 @@ const authLimiter = rateLimit({
 
 // Session refresh - separate from login so page reloads never lock people out of their session
 const refreshLimiter = rateLimit({
+  ...storeOption('refreshLimiter'),
   windowMs: RATE_LIMITS.WINDOW_MS,
   max: RATE_LIMITS.REFRESH_MAX,
   keyGenerator: keyByBranchAndIp,
@@ -97,6 +103,7 @@ const refreshLimiter = rateLimit({
 
 // Authenticated admin routes - 300 req/min per branch+IP
 const adminLimiter = rateLimit({
+  ...storeOption('adminLimiter'),
   windowMs: RATE_LIMITS.WINDOW_MS,
   max: RATE_LIMITS.ADMIN_MAX,
   keyGenerator: keyByBranchAndIp,
@@ -112,6 +119,7 @@ const adminLimiter = rateLimit({
 // M-Pesa callback endpoint — tight limit; legitimate Safaricom retries are max 3/callback
 // In production the IP whitelist is the primary guard; this is a second layer
 const callbackLimiter = rateLimit({
+  ...storeOption('callbackLimiter'),
   windowMs: RATE_LIMITS.WINDOW_MS,
   max: RATE_LIMITS.CALLBACK_MAX,
   standardHeaders: true,
@@ -126,6 +134,7 @@ const callbackLimiter = rateLimit({
 // STK Push initiation — tighter than publicLimiter to prevent drain attacks
 // (attacker triggering repeated STK pushes on a victim's phone number)
 const stkLimiter = rateLimit({
+  ...storeOption('stkLimiter'),
   windowMs: RATE_LIMITS.WINDOW_MS,
   max: RATE_LIMITS.STK_MAX,
   keyGenerator: keyByBranchAndIp,
@@ -144,6 +153,7 @@ const stkLimiter = rateLimit({
 // for autoCancelHours; the exact-duplicate guard alone only blocks resubmissions
 // of the identical cart.
 const guestOrderLimiter = rateLimit({
+  ...storeOption('guestOrderLimiter'),
   windowMs: RATE_LIMITS.WINDOW_MS,
   max: RATE_LIMITS.GUEST_ORDER_MAX,
   keyGenerator: keyByBranchAndIp,
@@ -160,6 +170,7 @@ const guestOrderLimiter = rateLimit({
 // enumeration target (sequential, guessable order refs), so it gets its own
 // tighter cap keyed by IP alone rather than the shared, branch-keyed publicLimiter.
 const trackLimiter = rateLimit({
+  ...storeOption('trackLimiter'),
   windowMs: RATE_LIMITS.WINDOW_MS,
   max: RATE_LIMITS.TRACK_MAX,
   keyGenerator: (req) => req.ip,
@@ -172,4 +183,20 @@ const trackLimiter = rateLimit({
   }
 });
 
-module.exports = { publicLimiter, authLimiter, refreshLimiter, adminLimiter, callbackLimiter, stkLimiter, trackLimiter, guestOrderLimiter };
+// Coupon code preview - unauthenticated, and each answer ("valid", "needs a bigger order") confirms a guess,
+// so it gets a tight per-IP cap instead of the shared public bucket (2026-10 audit, F-32).
+const couponLimiter = rateLimit({
+  ...storeOption('couponLimiter'),
+  windowMs: RATE_LIMITS.WINDOW_MS,
+  max: RATE_LIMITS.COUPON_MAX,
+  keyGenerator: (req) => req.ip,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    error: 'RATE_LIMIT_EXCEEDED',
+    message: 'Too many coupon checks, please try again in a minute'
+  }
+});
+
+module.exports = { publicLimiter, authLimiter, refreshLimiter, adminLimiter, callbackLimiter, stkLimiter, trackLimiter, guestOrderLimiter, couponLimiter };

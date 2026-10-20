@@ -11,6 +11,7 @@ const Sentry = require('@sentry/node');
 
 const { errorHandler } = require('./middleware/errorHandler.middleware');
 const { publicLimiter } = require('./middleware/rateLimit.middleware');
+const { noStoreByDefault } = require('./middleware/cacheControl.middleware');
 const { isAllowedOriginValue } = require('./utils/origins');
 const { requestTiming } = require('./middleware/requestTiming.middleware');
 const { isRestoreInProgress } = require('./services/backup.service');
@@ -71,6 +72,8 @@ const adminAlertRoutes           = require('./routes/admin/alert.routes');
 const adminBroadcastRoutes       = require('./routes/admin/broadcast.routes');
 const adminControlCenterRoutes   = require('./routes/admin/controlCenter.routes');
 
+const { redactUrl, redactQuery } = require('./utils/redactUrl');
+
 const app = express();
 
 // ── SENTRY ────────────────────────────────────────────────────────────────────
@@ -83,6 +86,8 @@ if (process.env.NODE_ENV === 'production' && process.env.SENTRY_DSN) {
     sendDefaultPii: false,
     beforeSend(event) {
       if (event.request) {
+        if (event.request.url) event.request.url = redactUrl(event.request.url);
+        if (typeof event.request.query_string === 'string') event.request.query_string = redactQuery(event.request.query_string);
         delete event.request.cookies;
         delete event.request.data;
         if (event.request.headers) {
@@ -151,7 +156,7 @@ app.use((req, res, next) => {
       logger.info('HTTP', {
         requestId: req.requestId,
         method:    req.method,
-        url:       req.originalUrl,
+        url:       redactUrl(req.originalUrl),
         status:    res.statusCode,
         branchId:  req.branchId  || req.query?.branchId || null,
         userId:    req.user?.id  || null,
@@ -174,6 +179,8 @@ app.use(cookieParser());
 // TRUST_PROXY_HOPS on Render to match instead of changing code.
 const trustProxyHops = Number.parseInt(process.env.TRUST_PROXY_HOPS, 10);
 app.set('trust proxy', Number.isInteger(trustProxyHops) && trustProxyHops >= 0 ? trustProxyHops : 1);
+// Optional: take the client address from an edge-supplied header (CLIENT_IP_HEADER) - see utils/clientIp.js.
+app.use(require('./utils/clientIp').applyClientIp);
 
 // ── HTTPS REDIRECT ────────────────────────────────────────────────────────────
 // Render terminates TLS at the load balancer and forwards via HTTP internally.
@@ -186,6 +193,9 @@ if (process.env.NODE_ENV === 'production') {
     next();
   });
 }
+
+// Everything under /api is private to the caller unless a route opts in with publicCache() (cacheControl.middleware.js).
+app.use('/api', noStoreByDefault);
 
 // ── HEALTH CHECK ──────────────────────────────────────────────────────────────
 app.get('/api/health', (_req, res) => {

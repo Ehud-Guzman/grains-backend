@@ -1,0 +1,31 @@
+# Runs on every push and pull request to this repo. Render deploys on push, so turn on
+# "Auto-Deploy: After CI Checks Pass" in the Render service settings - otherwise this
+# only reports a failure, it does not stop the deploy (see GO-LIVE-CHECKLIST.md).
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: Lint, test, audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      # The tests start an in-memory MongoDB replica set (mongodb-memory-server) and download the mongod
+      # binary on first use; keep it between runs.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/mongodb-binaries
+          key: mongodb-binaries-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+      # Production dependencies only: dev-tool advisories do not reach the running server.
+      - run: npm audit --omit=dev --audit-level=high

@@ -1,14 +1,12 @@
 const Sentry = require('@sentry/node');
 const logger = require('../utils/logger');
 const alertService = require('../services/alert.service');
+const { redactUrl } = require('../utils/redactUrl');
 
 const errorHandler = (err, req, res, next) => {
   const requestId = req.requestId || 'unknown';
   const branchId  = req.branchId || req.user?.branchId || null;
   const userId    = req.user?.id || null;
-
-  // Always log full stack server-side — never exposed to client
-  logger.error(err.message, { requestId, branchId, userId, err });
 
   // Expected client-side failures (bad input, auth misses, app-level 4xx) are
   // not bugs — only genuine server faults go to Sentry, mirroring the
@@ -21,6 +19,14 @@ const errorHandler = (err, req, res, next) => {
     err.name === 'MulterError' ||
     err.code === 11000 ||
     (err.statusCode && err.statusCode < 500);
+
+  // A 403/404/409 is ordinary traffic, not an error: logging every one at ERROR level buried the real
+  // faults (a 2,400-request sweep produced ~1,800 "error" lines). Full stack only for server faults.
+  if (isClientError) {
+    logger.warn(err.message, { requestId, branchId, userId, status: err.statusCode, code: err.errorCode || err.code || err.name });
+  } else {
+    logger.error(err.message, { requestId, branchId, userId, err });
+  }
 
   // Also send to Sentry in production
   if (process.env.NODE_ENV === 'production' && process.env.SENTRY_DSN && !isClientError) {
@@ -118,7 +124,7 @@ const errorHandler = (err, req, res, next) => {
     alertService.sendAlert(
       'SERVER_ERROR',
       {
-        Route: `${req.method} ${req.originalUrl}`,
+        Route: `${req.method} ${redactUrl(req.originalUrl)}`,
         'Error code': errorCode,
         Message: err.message || 'No message',
         'Error count': `>=${3} in 5 min window`,

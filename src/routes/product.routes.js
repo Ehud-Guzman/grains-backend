@@ -1,6 +1,10 @@
 const express = require('express');
 const router = express.Router();
 const productController = require('../controllers/product.controller');
+const { publicCache } = require('../middleware/cacheControl.middleware');
+
+// The catalogue is the same for every visitor of a branch: let shared caches keep it briefly.
+router.use(publicCache());
 
 // GET /api/products
 router.get('/', productController.getAll);
@@ -13,6 +17,9 @@ router.get('/suggestions', productController.getSuggestions);
 
 // GET /api/products/price-changes?ids=id1,id2,id3
 router.get('/price-changes', productController.getPriceChanges);
+
+// GET /api/products/batch?ids=a,b,c  (declared before /:id)
+router.get('/batch', productController.getBatch);
 
 // GET /api/products/:id
 router.get('/:id', productController.getById);

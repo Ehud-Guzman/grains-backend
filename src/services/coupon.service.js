@@ -89,11 +89,11 @@ const validate = async (code, branchId, userId, subtotal, guestPhone = null) => 
 // Uses a conditional $inc so that if two concurrent orders both pass the usage
 // check above, only the one that atomically finds usedCount still under the
 // limit will succeed — the other will get a matched count of 0 and throw.
-const incrementUsage = async (code, branchId, session) => {
+const incrementUsage = async (code, branchId, session, identity = null) => {
   const opts = session ? { session } : {};
   const upper = code.toUpperCase().trim();
 
-  const coupon = await Coupon.findOne({ code: upper, branchId }, 'usageLimit isActive expiresAt', opts).lean();
+  const coupon = await Coupon.findOne({ code: upper, branchId }, 'usageLimit isActive expiresAt perCustomerLimit', opts).lean();
   if (!coupon) throw new AppError('Coupon not found during increment', 404, 'COUPON_NOT_FOUND');
 
   // Re-check activation/expiry, not just the usage limit — a coupon deactivated
@@ -114,6 +114,26 @@ const incrementUsage = async (code, branchId, session) => {
 
   if (result.matchedCount === 0) {
     throw new AppError('This coupon has reached its usage limit.', 400, 'COUPON_EXHAUSTED');
+  }
+
+  // The per-customer cap is re-checked HERE, after the write above. That write takes the coupon document, so
+  // two orders redeeming the same coupon cannot both get this far at once - the second is retried and
+  // its count then includes the first. Checking only in validate() (before the transaction) let two
+  // simultaneous checkouts both pass (2026-10 audit, F-32). `identity` is { userId } or { guestId }, plus { excludeOrderId } for the order being placed.
+  if (coupon.perCustomerLimit && identity && (identity.userId || identity.guestId)) {
+    const { excludeOrderId, ...who } = identity;  // the order being placed is already inserted - do not count it
+    const used = await Order.countDocuments(
+      { branchId, couponCode: upper, ...who, ...(excludeOrderId && { _id: { $ne: excludeOrderId } }), status: { $nin: ['cancelled', 'rejected'] } },
+      opts
+    );
+    if (used >= coupon.perCustomerLimit) {
+      throw new AppError(
+        coupon.perCustomerLimit === 1
+          ? 'You have already used this coupon.'
+          : `You have already used this coupon ${coupon.perCustomerLimit} times.`,
+        400, 'COUPON_CUSTOMER_LIMIT'
+      );
+    }
   }
 };
 

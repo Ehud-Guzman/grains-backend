@@ -19,6 +19,15 @@ const actorOf = (req) => ({
 // a tap and low-blast-radius.
 const GUARDED_SWITCHES = ['platformLocked', 'maintenanceMode'];
 
+// What the API resolved for THIS request: client IP, proxy hops, and the forwarding headers. Run it from
+// two different networks - if both show the same resolvedIp, per-IP rate limits are shared by everyone
+// and CLIENT_IP_HEADER (or TRUST_PROXY_HOPS) needs setting. See utils/clientIp.js.
+const network = async (req, res, next) => {
+  try {
+    return success(res, require('../../utils/clientIp').describeNetwork(req));
+  } catch (err) { next(err); }
+};
+
 const overview = async (req, res, next) => {
   try {
     return success(res, await controlCenter.getOverview());
@@ -124,7 +133,7 @@ const permissions = async (req, res, next) => {
 };
 
 module.exports = {
-  overview, listAccounts, signOutAccount, signOutAll,
+  network, overview, listAccounts, signOutAccount, signOutAll,
   setBranchSwitches, setLockAll, setJobPaused,
   securityFeed, rawEntry, exportAudit, integrityScan, permissions,
 };

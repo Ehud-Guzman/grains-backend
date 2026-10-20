@@ -31,4 +31,4 @@ const startOfMonthEAT = (date = new Date()) => {
 const currentYearEAT = (date = new Date()) =>
   new Date(date.getTime() + EAT_OFFSET_MS).getUTCFullYear();
 
-module.exports = { NAIROBI_TZ, startOfDayEAT, endOfDayEAT, startOfMonthEAT, currentYearEAT };
+module.exports = { NAIROBI_TZ, EAT_OFFSET_MS, startOfDayEAT, endOfDayEAT, startOfMonthEAT, currentYearEAT };
