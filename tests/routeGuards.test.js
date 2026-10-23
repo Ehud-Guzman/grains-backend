@@ -17,6 +17,9 @@ const EXPECTED_PUBLIC = [
   'GET /api/products', 'GET /api/products/:id', 'GET /api/products/:id/best-time', 'GET /api/products/:id/price-history',
   'GET /api/products/batch', 'GET /api/products/categories', 'GET /api/products/price-changes', 'GET /api/products/suggestions',
   'GET /api/promotions', 'GET /api/settings', 'GET /api/settings/delivery-fee',
+  // storefront help assistant: serves fixed catalogue text only (no business data), 30 requests/min/IP,
+  // question capped at 300 chars, and what it logs is masked, counted, capped and never tied to a person
+  'GET /api/help/topics', 'POST /api/help/ask',
   // uptime monitor + browser CSP reports
   'GET /api/health', 'POST /api/csp-report',
   // accounts: nobody is signed in yet when these are called

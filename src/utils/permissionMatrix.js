@@ -47,6 +47,9 @@ const AREAS = {
   '/api/admin/backups':    { label: 'Backups',               note: 'Create, download and restore.' },
   '/api/admin/global-settings': { label: 'KRA eTIMS settings', note: 'System-wide fiscal credentials. Superadmin, or anyone granted manage_etims.' },
   '/api/admin/control-center': { label: 'Control Center',    note: 'The superadmin’s oversight and override tools.' },
+  '/api/help':             { label: 'Help assistant (shop)',   note: 'Anyone can ask how the storefront works; answers say what needs an account.' },
+  '/api/driver/assistant': { label: 'Help assistant (driver)', note: 'A driver asks how to use the driver portal.' },
+  '/api/admin/assistant':  { label: 'Help assistant',        note: 'Ask what the system can do and how; superadmin also sees the questions it could not answer.' },
 };
 
 const WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);

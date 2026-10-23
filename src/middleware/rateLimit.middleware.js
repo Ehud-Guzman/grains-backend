@@ -199,4 +199,21 @@ const couponLimiter = rateLimit({
   }
 });
 
-module.exports = { publicLimiter, authLimiter, refreshLimiter, adminLimiter, callbackLimiter, stkLimiter, trackLimiter, guestOrderLimiter, couponLimiter };
+// Help assistant questions from the storefront. Open to visitors, so capped per IP like the other
+// unauthenticated lookups: generous for a person typing questions, tight enough that a script
+// cannot use it to flood the unanswered-questions log.
+const helpLimiter = rateLimit({
+  ...storeOption('helpLimiter'),
+  windowMs: RATE_LIMITS.WINDOW_MS,
+  max: RATE_LIMITS.HELP_MAX,
+  keyGenerator: (req) => req.ip,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    error: 'RATE_LIMIT_EXCEEDED',
+    message: 'Too many questions, please try again in a minute'
+  }
+});
+
+module.exports = { helpLimiter, publicLimiter, authLimiter, refreshLimiter, adminLimiter, callbackLimiter, stkLimiter, trackLimiter, guestOrderLimiter, couponLimiter };

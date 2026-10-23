@@ -71,6 +71,9 @@ const adminGlobalSettingsRoutes  = require('./routes/admin/globalSettings.routes
 const adminAlertRoutes           = require('./routes/admin/alert.routes');
 const adminBroadcastRoutes       = require('./routes/admin/broadcast.routes');
 const adminControlCenterRoutes   = require('./routes/admin/controlCenter.routes');
+const adminAssistantRoutes       = require('./routes/admin/assistant.routes');
+const helpRoutes                 = require('./routes/help.routes');
+const driverAssistantRoutes      = require('./routes/driverAssistant.routes');
 
 const { redactUrl, redactQuery } = require('./utils/redactUrl');
 
@@ -293,12 +296,14 @@ app.use('/api/products', productRoutes);
 app.use('/api/orders',   orderRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/payments', paymentRoutes);
+app.use('/api/driver/assistant', driverAssistantRoutes);
 app.use('/api/driver',   driverRoutes);
 app.use('/api/alerts',     customerAlertRoutes);
 app.use('/api/lists',      savedListRoutes);
 app.use('/api/coupons',    couponRoutes);
 app.use('/api/promotions', promotionRoutes);
 app.use('/api/branches',   branchRoutes);
+app.use('/api/help',       helpRoutes);
 
 // ── ADMIN ROUTES ──────────────────────────────────────────────────────────────
 app.use('/api/admin/products',  adminProductRoutes);
@@ -320,6 +325,7 @@ app.use('/api/admin/global-settings',  adminGlobalSettingsRoutes);
 app.use('/api/admin/alerts',           adminAlertRoutes);
 app.use('/api/admin/broadcast',        adminBroadcastRoutes);
 app.use('/api/admin/control-center',   adminControlCenterRoutes);
+app.use('/api/admin/assistant',        adminAssistantRoutes);
 
 // ── 404 HANDLER ───────────────────────────────────────────────────────────────
 app.use((req, res) => {

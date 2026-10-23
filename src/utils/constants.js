@@ -203,6 +203,8 @@ const RATE_LIMITS = {
   TRACK_MAX: 20,
   // Coupon code checks: each answer tells a guesser something about a code, so cap them per IP.
   COUPON_MAX: 15,
+  // Storefront help assistant: open to visitors, per IP.
+  HELP_MAX: 30,
   // Guest checkout is unauthenticated and reserves real stock at placement —
   // tighter than publicLimiter to blunt a bot varying items/phone to lock up
   // inventory (the 20s exact-duplicate guard alone doesn't stop that).
