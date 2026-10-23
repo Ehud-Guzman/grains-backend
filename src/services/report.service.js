@@ -72,6 +72,12 @@ const getDashboardKPIs = async (branchId) => {
   const todayStart = startOfDay(now);
   const todayEnd = endOfDay(now);
   const monthStart = startOfMonthEAT(now);
+  // Like-for-like comparison: yesterday up to this same clock time, not the whole of yesterday
+  // (at 9am a full-day comparison would always read as a collapse). Kenya has no DST, so
+  // "24 hours earlier" is the same wall-clock time.
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const yesterdayStart = new Date(todayStart.getTime() - DAY_MS);
+  const sameTimeYesterday = new Date(now.getTime() - DAY_MS);
 
   const branchFilter = branchId ? { branchId: new mongoose.Types.ObjectId(String(branchId)) } : {};
 
@@ -84,7 +90,9 @@ const getDashboardKPIs = async (branchId) => {
     revenueThisMonth,
     lowStockCount,
     recentOrders,
-    cashFlow
+    cashFlow,
+    ordersYesterday,
+    revenueYesterday
   ] = await Promise.all([
     // Orders placed today
     Order.countDocuments({ ...branchFilter, createdAt: { $gte: todayStart, $lte: todayEnd } }),
@@ -129,6 +137,15 @@ const getDashboardKPIs = async (branchId) => {
     Order.aggregate([
       { $match: { ...branchFilter, status: { $in: ACTIVE_STATUSES }, createdAt: { $gte: monthStart } } },
       { $group: { _id: '$paymentStatus', total: { $sum: '$total' }, count: { $sum: 1 } } }
+    ]),
+
+    // Orders placed yesterday, up to this time of day
+    Order.countDocuments({ ...branchFilter, createdAt: { $gte: yesterdayStart, $lte: sameTimeYesterday } }),
+
+    // Revenue yesterday, up to this time of day (same statuses as revenueToday)
+    Order.aggregate([
+      { $match: { ...branchFilter, status: { $in: REVENUE_STATUSES }, createdAt: { $gte: yesterdayStart, $lte: sameTimeYesterday } } },
+      { $group: { _id: null, total: { $sum: '$total' } } }
     ])
   ]);
 
@@ -147,6 +164,11 @@ const getDashboardKPIs = async (branchId) => {
     revenueToday: revenueToday[0]?.total || 0,
     revenueThisMonth: revenueThisMonth[0]?.total || 0,
     lowStockCount,
+    // Yesterday up to this same time of day, for the dashboard's "vs yesterday" change.
+    comparison: {
+      ordersYesterday: ordersYesterday,
+      revenueYesterday: revenueYesterday[0]?.total || 0,
+    },
     recentOrders: withGuestFallbackList(recentOrders),
     cashFlow: {
       paidRevenue:    paidFlow.total,

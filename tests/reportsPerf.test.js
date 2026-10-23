@@ -9,6 +9,7 @@ const { createBranch, createUser, createProduct, objectId } = require('./helpers
 const Order = require('../src/models/Order');
 const Payment = require('../src/models/Payment');
 const User = require('../src/models/User');
+require('../src/models/Guest'); // getDashboardKPIs populates guestId, so the model must be registered
 const reportService = require('../src/services/report.service');
 const { buildPayload } = require('../src/services/etims.service');
 const { MIGRATIONS } = require('../src/utils/migrations');
@@ -220,5 +221,26 @@ describe('dashboard low-stock count (F-44)', () => {
     assert.equal((await reportService.getDashboardKPIs(a._id)).lowStockCount, 2);
     assert.equal((await reportService.getDashboardKPIs(b._id)).lowStockCount, 1);
     assert.equal((await reportService.getDashboardKPIs(null)).lowStockCount, 3, 'no branch = all branches');
+  });
+});
+
+describe('dashboard day-over-day comparison', () => {
+  test('counts yesterday up to this time of day, in revenue statuses only, per branch', async () => {
+    await testDb.clearDatabase();
+    const a = await createBranch({ name: 'A', slug: 'a' });
+    const b = await createBranch({ name: 'B', slug: 'b', isDefault: false });
+    const DAY = 24 * 3600 * 1000;
+    // Pinned to "now - 24h - 1h": always inside yesterday's window whatever time the suite runs.
+    const earlierYesterday = new Date(Date.now() - DAY - 3600 * 1000);
+    const laterYesterday = new Date(Date.now() - DAY + 3600 * 1000);   // after this time of day: excluded
+    await makeOrder(a, { total: 1000, createdAt: earlierYesterday });
+    await makeOrder(a, { total: 500, createdAt: earlierYesterday, status: 'pending' });        // counts as an order, not revenue
+    await makeOrder(a, { total: 700, createdAt: earlierYesterday, status: 'cancelled' });      // an order, never revenue
+    await makeOrder(a, { total: 9999, createdAt: laterYesterday });                           // later than now-24h: excluded
+    await makeOrder(b, { total: 4000, createdAt: earlierYesterday });                         // other branch
+    const kpis = await reportService.getDashboardKPIs(a._id);
+    assert.equal(kpis.comparison.ordersYesterday, 3);
+    assert.equal(kpis.comparison.revenueYesterday, 1000);
+    assert.equal((await reportService.getDashboardKPIs(null)).comparison.ordersYesterday, 4, 'no branch = all branches');
   });
 });
