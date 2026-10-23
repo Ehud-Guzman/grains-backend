@@ -57,7 +57,7 @@ const getStockMovementReport = async (req, res, next) => {
 
 const getCustomerReport = async (req, res, next) => {
   try {
-    const data = await reportService.getCustomerReport(req.branchId, { page: req.query.page, limit: req.query.limit });
+    const data = await reportService.getCustomerReport(req.branchId, { page: req.query.page, limit: req.query.limit, segment: req.query.segment });
     return success(res, data);
   } catch (err) { next(err); }
 };

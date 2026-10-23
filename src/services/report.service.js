@@ -186,7 +186,13 @@ const getSalesReport = async (period, from, to, branchId) => {
   const { start, end } = getDateRange(period, from, to);
   const branchFilter = branchId ? { branchId: new mongoose.Types.ObjectId(String(branchId)) } : {};
 
-  const [summary, byCategory, byDay, orderVolume] = await Promise.all([
+  // The window of the same length straight before this one, for "vs previous period". today -> yesterday,
+  // 7 days -> the 7 before, a calendar month -> the same number of days before its first day.
+  const spanMs = end.getTime() - start.getTime();
+  const prevEnd = new Date(start.getTime() - 1);
+  const prevStart = new Date(start.getTime() - spanMs - 1);
+
+  const [summary, byCategory, byDay, orderVolume, previousRows] = await Promise.all([
     // Overall summary
     Order.aggregate([
       { $match: { ...branchFilter, status: { $in: REVENUE_STATUSES }, createdAt: { $gte: start, $lte: end } } },
@@ -201,7 +207,11 @@ const getSalesReport = async (period, from, to, branchId) => {
           goodsSubtotal: { $sum: { $ifNull: ['$subtotal', 0] } },
           couponDiscounts: { $sum: { $ifNull: ['$couponDiscount', 0] } },
           deliveryFees: { $sum: { $ifNull: ['$deliveryFee', 0] } },
-          vatCollected: { $sum: { $ifNull: ['$vatAmount', 0] } }
+          vatCollected: { $sum: { $ifNull: ['$vatAmount', 0] } },
+          // Collected vs still owed. "Revenue" counts orders from approval on, whether or not the money has
+          // arrived (cash on delivery, pay on pickup), so the report needs to say how much of it is in hand.
+          paidRevenue: { $sum: { $cond: [{ $eq: ['$paymentStatus', 'paid'] }, '$total', 0] } },
+          paidOrders: { $sum: { $cond: [{ $eq: ['$paymentStatus', 'paid'] }, 1, 0] } }
         }
       }
     ]),
@@ -299,10 +309,25 @@ const getSalesReport = async (period, from, to, branchId) => {
           revenue: { $sum: '$total' }
         }
       }
+    ]),
+
+    // Previous period, headline figures only
+    Order.aggregate([
+      { $match: { ...branchFilter, status: { $in: REVENUE_STATUSES }, createdAt: { $gte: prevStart, $lte: prevEnd } } },
+      {
+        $group: {
+          _id: null,
+          totalRevenue: { $sum: '$total' },
+          totalOrders: { $sum: 1 },
+          avgOrderValue: { $avg: '$total' },
+          totalItems: { $sum: { $size: '$orderItems' } }
+        }
+      }
     ])
   ]);
 
   const s = summary[0] || {};
+  const prev = previousRows[0] || {};
   return {
     period: { start, end },
     summary: {
@@ -310,6 +335,12 @@ const getSalesReport = async (period, from, to, branchId) => {
       totalOrders: s.totalOrders || 0,
       avgOrderValue: s.avgOrderValue ? Math.round(s.avgOrderValue) : 0,
       totalItems: s.totalItems || 0,
+      // How much of the revenue has actually been paid. unpaid = everything else (unpaid, processing,
+      // failed, refunded), the same bucketing the dashboard's cash-flow card uses.
+      paidRevenue: Math.round((s.paidRevenue || 0) * 100) / 100,
+      paidOrders: s.paidOrders || 0,
+      unpaidRevenue: Math.round(((s.totalRevenue || 0) - (s.paidRevenue || 0)) * 100) / 100,
+      unpaidOrders: (s.totalOrders || 0) - (s.paidOrders || 0),
       // "Revenue" above is what customers paid: it includes delivery fees and VAT, which are not sales of
       // goods. The category and best-seller figures are NET goods sales. This breakdown reconciles the two.
       breakdown: {
@@ -319,6 +350,14 @@ const getSalesReport = async (period, from, to, branchId) => {
         deliveryFees: Math.round((s.deliveryFees || 0) * 100) / 100,
         vatCollected: Math.round((s.vatCollected || 0) * 100) / 100,
       }
+    },
+    previous: {
+      start: prevStart,
+      end: prevEnd,
+      totalRevenue: prev.totalRevenue || 0,
+      totalOrders: prev.totalOrders || 0,
+      avgOrderValue: prev.avgOrderValue ? Math.round(prev.avgOrderValue) : 0,
+      totalItems: prev.totalItems || 0,
     },
     byCategory,
     byDay,
@@ -389,9 +428,10 @@ const getBestSellers = async (period, from, to, limit = 10, branchId) => {
 // UX B5 - products with zero or low order frequency in last 30 days
 const getSlowMovers = async (days = 30, branchId) => {
   const windowDays = Math.min(730, Math.max(1, Number.parseInt(days, 10) || 30));
-  const cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - windowDays);
+  const now = Date.now();
+  const cutoff = new Date(now - windowDays * 86400000);
   const branchFilter = branchId ? { branchId: new mongoose.Types.ObjectId(String(branchId)) } : {};
+  const SOLD = ['approved', 'preparing', 'out_for_delivery', 'completed'];
 
   // Get all active products
   const allProducts = await Product.find({ isActive: true, ...branchFilter })
@@ -401,23 +441,58 @@ const getSlowMovers = async (days = 30, branchId) => {
   // Get products that had orders in the period (approved or beyond)
   const activeProductIds = await Order.distinct('orderItems.productId', {
     ...branchFilter,
-    status: { $in: ['approved', 'preparing', 'out_for_delivery', 'completed'] },
+    status: { $in: SOLD },
     createdAt: { $gte: cutoff }
   });
 
   const activeSet = new Set(activeProductIds.map(id => id.toString()));
+  const slow = allProducts.filter(p => !activeSet.has(p._id.toString()));
 
-  const slowMovers = allProducts
-    .filter(p => !activeSet.has(p._id.toString()))
-    .map(p => ({
+  // When each of those last sold (any time before the window), so "no sale in 30 days" can say whether
+  // that is 31 days or 400, or never.
+  const slowIds = slow.map(p => p._id);
+  const lastSold = slow.length === 0 ? [] : await Order.aggregate([
+    { $match: { ...branchFilter, status: { $in: SOLD }, 'orderItems.productId': { $in: slowIds } } },
+    { $unwind: '$orderItems' },
+    { $match: { 'orderItems.productId': { $in: slowIds } } },
+    { $group: { _id: '$orderItems.productId', last: { $max: '$createdAt' } } }
+  ]);
+  const lastById = new Map(lastSold.map(r => [String(r._id), r.last]));
+
+  const slowMovers = slow.map(p => {
+    // Money tied up: stock x cost price, falling back to the selling price where no cost is set
+    // (flagged, the same rule as the stock valuation report). Quote-only lines hold no priced stock.
+    let stockUnits = 0, stockValueKES = 0, usedRetailFallback = false;
+    for (const v of p.varieties || []) {
+      for (const pkg of v.packaging || []) {
+        if (pkg.quoteOnly || !pkg.priceKES) continue;
+        const unit = pkg.costPriceKES || pkg.priceKES;
+        if (!pkg.costPriceKES && pkg.stock > 0) usedRetailFallback = true;
+        stockUnits += pkg.stock || 0;
+        stockValueKES += (pkg.stock || 0) * unit;
+      }
+    }
+    const last = lastById.get(String(p._id)) || null;
+    return {
       productId: p._id,
       name: p.name,
       category: p.category,
-      varietyCount: p.varieties.length,
-      daysWithoutSale: windowDays
-    }));
+      varietyCount: (p.varieties || []).length,
+      stockUnits,
+      stockValueKES,
+      usedRetailFallback,
+      lastSoldAt: last,
+      neverSold: !last,
+      daysWithoutSale: last ? Math.max(windowDays, Math.floor((now - new Date(last).getTime()) / 86400000)) : null
+    };
+  }).sort((a, b) => b.stockValueKES - a.stockValueKES);
 
-  return { days: windowDays, slowMovers, count: slowMovers.length };
+  return {
+    days: windowDays,
+    slowMovers,
+    count: slowMovers.length,
+    totalValueTiedUpKES: slowMovers.reduce((n, r) => n + r.stockValueKES, 0)
+  };
 };
 
 // ── STOCK VALUATION ───────────────────────────────────────────────────────────
@@ -571,7 +646,9 @@ const getStockMovementReport = async (period, from, to, branchId) => {
 
 // ── CUSTOMER REPORT ───────────────────────────────────────────────────────────
 // UX B5 - repeat buyers, high-value, inactive customers
-const getCustomerReport = async (branchId, { page = 1, limit = 50, all = false } = {}) => {
+const CUSTOMER_SEGMENTS = ['all', 'repeat', 'highValue', 'inactive'];
+const getCustomerReport = async (branchId, { page = 1, limit = 50, all = false, segment = 'all' } = {}) => {
+  if (!CUSTOMER_SEGMENTS.includes(segment)) segment = 'all';
   const branchFilter = branchId ? { branchId: new mongoose.Types.ObjectId(String(branchId)) } : {};
 
   // 1. Per-customer totals for EVERYONE (small rows: an id and a few numbers). The segment counts need the
@@ -596,7 +673,7 @@ const getCustomerReport = async (branchId, { page = 1, limit = 50, all = false }
   const top10Threshold = sorted[Math.floor(sorted.length * 0.1)]?.totalSpend || 0;
   const now = Date.now();
 
-  const segment = (c) => {
+  const segmentOf = (c) => {
     const daysSinceLastOrder = (now - new Date(c.lastOrder).getTime()) / 86400000;
     return {
       ...c,
@@ -607,12 +684,18 @@ const getCustomerReport = async (branchId, { page = 1, limit = 50, all = false }
       daysSinceLastOrder: Math.floor(daysSinceLastOrder)
     };
   };
-  const enriched = stats.map(segment);
+  const enriched = stats.map(segmentOf);
+
+  // The list on screen can be narrowed to one segment ("who has stopped ordering?"). The counts below
+  // always describe everyone, so the segment tiles stay put while the list changes. Still sorted by
+  // spend, so the most valuable lapsed customers come first.
+  const SEGMENT_TEST = { all: () => true, repeat: c => c.isRepeat, highValue: c => c.isHighValue, inactive: c => c.isInactive };
+  const listed = enriched.filter(SEGMENT_TEST[segment]);
 
   // 2. Only the requested page gets user details.
-  const pageSize = all ? enriched.length : Math.min(Math.max(Number(limit) || 50, 1), 200);
+  const pageSize = all ? listed.length : Math.min(Math.max(Number(limit) || 50, 1), 200);
   const pageNo = all ? 1 : Math.max(Number(page) || 1, 1);
-  const slice = all ? enriched : enriched.slice((pageNo - 1) * pageSize, pageNo * pageSize);
+  const slice = all ? listed : listed.slice((pageNo - 1) * pageSize, pageNo * pageSize);
   const users = await User.find({ _id: { $in: slice.map(c => c._id) } }).select('name phone email').lean();
   const userById = new Map(users.map(u => [String(u._id), u]));
   const customers = slice
@@ -627,8 +710,9 @@ const getCustomerReport = async (branchId, { page = 1, limit = 50, all = false }
     repeat: enriched.filter(c => c.isRepeat).length,
     highValue: enriched.filter(c => c.isHighValue).length,
     inactive: enriched.filter(c => c.isInactive).length,
+    segment,
     customers,
-    pagination: { page: pageNo, limit: pageSize, total: enriched.length, pages: Math.max(1, Math.ceil(enriched.length / (pageSize || 1))) }
+    pagination: { page: pageNo, limit: pageSize, total: listed.length, pages: Math.max(1, Math.ceil(listed.length / (pageSize || 1))) }
   };
 };
 
@@ -662,8 +746,7 @@ const getOrdersByStatus = async (period, from, to, branchId) => {
           count: { $sum: 1 }
         }
       },
-      { $sort: { count: -1 } },
-      { $limit: 5 }
+      { $sort: { count: -1 } }
     ]),
 
     // Average order value
@@ -676,7 +759,10 @@ const getOrdersByStatus = async (period, from, to, branchId) => {
   return {
     period: { start, end },
     byStatus,
-    peakHours: peakHours.map(h => ({ hour: h._id, orders: h.count })),
+    // The busiest five hours (Nairobi clock), kept for older clients...
+    peakHours: peakHours.slice(0, 5).map(h => ({ hour: h._id, orders: h.count })),
+    // ...and the whole day, hour 0-23, zeros included, so the page can draw the daily rhythm.
+    byHour: Array.from({ length: 24 }, (_, hour) => ({ hour, orders: peakHours.find(h => h._id === hour)?.count || 0 })),
     avgOrderValue: avgOrderValue[0]?.avg ? Math.round(avgOrderValue[0].avg) : 0
   };
 };
