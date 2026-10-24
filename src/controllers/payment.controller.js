@@ -104,4 +104,25 @@ const manualConfirm = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-module.exports = { initiate, changeMethod, callback, getStatus, manualConfirm };
+// POST /api/admin/payments/:orderId/refund-sent — admin (business only): money has been sent back to the customer
+const refundSent = async (req, res, next) => {
+  try {
+    const { method, reference, amount, note } = req.body;
+    const result = await paymentService.recordRefundSent(
+      req.params.orderId, req.user.id, req.user.role, req.branchId || null, { method, reference, amount, note }
+    );
+    return success(res, result, 'Refund recorded as sent');
+  } catch (err) { next(err); }
+};
+
+// POST /api/admin/payments/:paymentId/resolve-exception — supervisor+ (business only)
+const resolveException = async (req, res, next) => {
+  try {
+    const result = await paymentService.resolvePaymentException(
+      req.params.paymentId, req.user.id, req.user.role, req.branchId || null, req.body.note
+    );
+    return success(res, result, 'Payment exception closed');
+  } catch (err) { next(err); }
+};
+
+module.exports = { initiate, changeMethod, callback, getStatus, manualConfirm, refundSent, resolveException };

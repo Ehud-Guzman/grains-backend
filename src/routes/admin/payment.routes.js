@@ -9,7 +9,7 @@ const { requireBusinessRole } = require('../../middleware/role.middleware');
 const { adminLimiter } = require('../../middleware/rateLimit.middleware');
 const { checkPlatformLock } = require('../../middleware/platformLock.middleware');
 const { validate } = require('../../middleware/validate.middleware');
-const { manualConfirmPaymentValidator } = require('../../validators/payment.validator');
+const { manualConfirmPaymentValidator, refundSentValidator, resolveExceptionValidator } = require('../../validators/payment.validator');
 
 router.use(verifyToken, adminLimiter, checkPlatformLock);
 
@@ -24,6 +24,27 @@ router.post(
   manualConfirmPaymentValidator,
   validate,
   paymentController.manualConfirm
+);
+
+// POST /api/admin/payments/:orderId/refund-sent — admin (business only)
+// Money going OUT is a stricter act than money coming in: an admin records that a refund was sent, with the M-Pesa
+// receipt of the reversal. Superadmin is view-only, as for every other business write.
+router.post(
+  '/:orderId/refund-sent',
+  requireBusinessRole('admin'),
+  refundSentValidator,
+  validate,
+  paymentController.refundSent
+);
+
+// POST /api/admin/payments/:paymentId/resolve-exception — supervisor+ (business only)
+// Closes an "M-Pesa money arrived but was not credited" flag once someone has dealt with it.
+router.post(
+  '/:paymentId/resolve-exception',
+  requireBusinessRole('supervisor'),
+  resolveExceptionValidator,
+  validate,
+  paymentController.resolveException
 );
 
 module.exports = router;

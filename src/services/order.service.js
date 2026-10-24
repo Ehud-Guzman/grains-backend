@@ -1115,6 +1115,7 @@ const reject = async (orderId, adminId, reason, branchId, actorRole = 'superviso
     const restocked = await releaseOrderStock(order, adminId, session, reason);
     if (order.couponCode) await couponService.releaseUsage(order.couponCode, order.branchId, session);
     const refunded = await refundPaymentIfPaid(order, reason, session);
+    flagCreditNoteIfInvoiced(order);
     await order.save({ session });
     return { order, restocked, refunded };
   });
@@ -1165,6 +1166,19 @@ const refundPaymentIfPaid = async (order, reason, session) => {
   // admin does off-system, tracked via the Payment record + activity log.
   order.paymentStatus = PAYMENT_STATUSES.REFUNDED;
   return true;
+};
+
+// An order that was fiscalised with KRA and is then cancelled or rejected needs a credit note against its invoice, or
+// KRA keeps a sale that never happened (and the VAT on it). Invoices are only filed once an order is dispatched or
+// completed AND paid, so in practice this is an order cancelled while out for delivery. Runs INSIDE the cancel/reject
+// transaction and only sets the field in memory; the caller's order.save({ session }) persists it. Filing the credit
+// note with KRA is a manual step for now (see markCreditNoteIssued): nothing here talks to KRA.
+const flagCreditNoteIfInvoiced = (order) => {
+  if (order.etimsStatus === 'submitted' && order.etimsCreditNoteStatus !== 'issued') {
+    order.etimsCreditNoteStatus = 'required';
+    return true;
+  }
+  return false;
 };
 
 const logRefund = (order, actorId, actorRole, reason) => activityLogService.log({
@@ -1223,6 +1237,7 @@ const updateStatus = async (orderId, newStatus, adminId, note = null, branchId, 
       restocked = await releaseOrderStock(order, adminId, session, note || 'Cancelled by staff');
       if (order.couponCode) await couponService.releaseUsage(order.couponCode, order.branchId, session);
       refunded = await refundPaymentIfPaid(order, note || 'Cancelled by staff', session);
+      flagCreditNoteIfInvoiced(order);
     }
 
     if (newStatus === ORDER_STATUSES.COMPLETED && !order.deliveredAt) {
@@ -1415,6 +1430,39 @@ const getPackingSlip = async (orderId, branchId) => {
 // ── ASSIGN DRIVER TO ORDER ────────────────────────────────────────────────────
 // Admin assigns a driver when order is preparing or out_for_delivery.
 // Automatically transitions preparing → out_for_delivery on first assignment.
+// ── MARK AN eTIMS CREDIT NOTE AS ISSUED ───────────────────────────────────────
+// Staff file the credit note with KRA (portal or the accountant) and record its reference here, which clears the order
+// from the "credit notes to file" list in the Control Center.
+const markCreditNoteIssued = async (orderId, actorId, actorRole, branchId, reference) => {
+  const ref = typeof reference === 'string' ? reference.trim().toUpperCase() : '';
+  if (ref.length < 3 || ref.length > 60) {
+    throw new AppError('Enter the credit-note reference KRA gave (3-60 characters)', 400, 'CREDIT_NOTE_REF_REQUIRED');
+  }
+  const query = { _id: orderId };
+  if (branchId) query.branchId = branchId;
+  const order = await Order.findOne(query).select('orderRef branchId etimsCreditNoteStatus').lean();
+  if (!order) throw new AppError('Order not found', 404, 'ORDER_NOT_FOUND');
+  if (order.etimsCreditNoteStatus !== 'required') {
+    throw new AppError('This order has no credit note waiting to be filed', 400, 'NO_CREDIT_NOTE_REQUIRED');
+  }
+  const done = await Order.findOneAndUpdate(
+    { _id: orderId, etimsCreditNoteStatus: 'required' },
+    { $set: { etimsCreditNoteStatus: 'issued', etimsCreditNoteRef: ref, etimsCreditNoteAt: new Date() } },
+    { new: true }
+  );
+  if (!done) throw new AppError('This credit note has already been recorded', 409, 'CREDIT_NOTE_ALREADY_RECORDED');
+  await activityLogService.log({
+    actorId,
+    actorRole,
+    action: LOG_ACTIONS.ETIMS_CREDIT_NOTE_ISSUED,
+    branchId: order.branchId,
+    targetId: order._id,
+    targetType: 'Order',
+    detail: { orderRef: order.orderRef, creditNoteRef: ref },
+  });
+  return done;
+};
+
 const assignDriver = async (orderId, driverId, adminId, branchId, actorRole = 'admin') => {
   // Everything the code after the commit needs (activity log, dispatch/reassign events) is
   // returned from the transaction - it must not be read from variables assigned inside a
@@ -1563,6 +1611,7 @@ module.exports = {
   approve,
   reject,
   updateStatus,
+  markCreditNoteIssued,
   cancel,
   bulkApprove,
   bulkReject,

@@ -86,13 +86,13 @@ const CHECKS = [
   },
   {
     id: 'late-mpesa-success',
-    title: 'M-Pesa money that arrived after the payment had already failed',
+    title: 'M-Pesa money that arrived but was not credited to an order',
     severity: 'high',
-    hint: 'Safaricom confirmed a payment the system had given up on. The customer paid; reconcile it against their order (or refund them).',
+    hint: 'Either Safaricom confirmed a payment the system had given up on, or a payment came in for less than the order needed. The customer paid; reconcile it against their order (or refund them), then close it from the Cash-up report so it stops being flagged.',
     run: async () => {
       // receivedAt is always set with lateSuccessMeta; asking for it lets the partial index answer (a `$ne: null`
-      // test on the whole object scanned every payment).
-      const filter = { 'lateSuccessMeta.receivedAt': { $exists: true } };
+      // test on the whole object scanned every payment). Closed ones (resolvedAt) are done with.
+      const filter = { 'lateSuccessMeta.receivedAt': { $exists: true }, 'lateSuccessMeta.resolvedAt': null };
       const [count, rows] = await Promise.all([
         Payment.countDocuments(filter),
         Payment.find(filter).sort({ updatedAt: -1 }).limit(EXAMPLES).populate('orderId', 'orderRef').lean(),
@@ -106,6 +106,64 @@ const CHECKS = [
           link: p.orderId?._id ? `/admin/orders/${p.orderId._id}` : null,
         })),
       };
+    },
+  },
+  {
+    id: 'receipt-mismatch',
+    title: "Payments confirmed by hand whose receipt Safaricom contradicted",
+    severity: 'high',
+    hint: "A person typed one M-Pesa receipt number when confirming the payment; Safaricom's own confirmation carried a different one. One of them is wrong. Compare both with the M-Pesa statement, then close it from the Cash-up report.",
+    run: async () => {
+      const filter = { 'receiptMismatch.detectedAt': { $exists: true }, 'receiptMismatch.resolvedAt': null };
+      const [count, rows] = await Promise.all([
+        Payment.countDocuments(filter),
+        Payment.find(filter).sort({ updatedAt: -1 }).limit(EXAMPLES).populate('orderId', 'orderRef').lean(),
+      ]);
+      return {
+        count,
+        examples: rows.map(p => ({
+          id: String(p._id),
+          label: p.orderId?.orderRef || 'Unknown order',
+          detail: `typed ${p.receiptMismatch.typedReceipt} · Safaricom ${p.receiptMismatch.safaricomReceipt}`,
+          link: p.orderId?._id ? `/admin/orders/${p.orderId._id}` : null,
+        })),
+      };
+    },
+  },
+  {
+    id: 'refund-owed-stale',
+    title: 'Refunds still owed to customers after three days',
+    severity: 'high',
+    hint: 'Money was taken for an order that was then cancelled or rejected, and nobody has recorded sending it back. Return it, then record it on the order (Payment card, "Record refund sent") so it leaves this list.',
+    run: async () => {
+      const filter = { status: 'refunded', refundSentAt: null, refundedAt: { $lt: new Date(Date.now() - 3 * DAY_MS) } };
+      const [count, rows] = await Promise.all([
+        Payment.countDocuments(filter),
+        Payment.find(filter).sort({ refundedAt: 1 }).limit(EXAMPLES).populate('orderId', 'orderRef').lean(),
+      ]);
+      return {
+        count,
+        examples: rows.map(p => ({
+          id: String(p._id),
+          label: p.orderId?.orderRef || 'Unknown order',
+          detail: `KES ${Math.round(p.receivedAmount ?? p.amount ?? 0).toLocaleString('en-KE')} owed since ${new Date(p.refundedAt).toLocaleDateString('en-KE')}`,
+          link: p.orderId?._id ? `/admin/orders/${p.orderId._id}` : null,
+        })),
+      };
+    },
+  },
+  {
+    id: 'etims-credit-note-needed',
+    title: 'Cancelled or rejected orders that KRA still holds an invoice for',
+    severity: 'medium',
+    hint: 'An eTIMS invoice was filed for the sale, then the order was cancelled or rejected. A credit note has to be filed against that invoice or the VAT on a sale that never happened stays declared. File it, then record its reference on the order.',
+    run: async () => {
+      const filter = { etimsCreditNoteStatus: 'required' };
+      const [count, rows] = await Promise.all([
+        Order.countDocuments(filter),
+        Order.find(filter).sort({ updatedAt: -1 }).limit(EXAMPLES).select('orderRef status paymentStatus total etimsInvoiceNumber').lean(),
+      ]);
+      return { count, examples: rows.map(o => ({ ...orderExample(o), detail: `invoice ${o.etimsInvoiceNumber || '?'} · ${o.status}` })) };
     },
   },
   {

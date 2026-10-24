@@ -39,6 +39,9 @@ const THROTTLE_MS = {
   MPESA_CALLBACK_REJECTED: 10 * 60 * 1000, // 10 min global
   MPESA_RECONCILED:   10 * 60 * 1000,   // 10 min global
   MPESA_PAYMENT_FOR_CLOSED_ORDER: 0,    // every one is money owed back - never throttle
+  MPESA_SHORT_PAYMENT: 0,               // money arrived but the payment was not credited - never throttle
+  MPESA_RECEIPT_MISMATCH: 0,            // a typed receipt and Safaricom's disagree - never throttle
+  PAYMENT_OVERPAID_MANUAL: 0,           // surplus to hand back - never throttle
   TRANSACTION_CONFLICT_STORM: 10 * 60 * 1000, // 10 min global
   PAID_ORDER_AWAITING_APPROVAL: 6 * 60 * 60 * 1000, // 6 h per order
 };
@@ -161,6 +164,21 @@ const ALERT_CONFIG = {
     severity: 'high',
     title: 'M-Pesa Payment Received For A Cancelled/Rejected Order — Refund Owed',
     sms: (d) => `[ALERT] M-Pesa receipt ${d['M-Pesa receipt']} (KES ${d.Amount}) arrived for ${d['Order ref']}, which was already ${d['Order status']}. Refund the customer.`,
+  },
+  MPESA_SHORT_PAYMENT: {
+    severity: 'high',
+    title: 'M-Pesa Payment Received For Less Than The Order — Not Credited',
+    sms: (d) => `[ALERT] M-Pesa receipt ${d['M-Pesa receipt']} (KES ${d.Received}) arrived for ${d['Order ref']} but the order needs KES ${d.Expected}. It was NOT credited. Ask the customer for the difference or refund them.`,
+  },
+  MPESA_RECEIPT_MISMATCH: {
+    severity: 'high',
+    title: "Typed M-Pesa Receipt Does Not Match Safaricom's",
+    sms: (d) => `[ALERT] ${d['Order ref']} was confirmed by hand with receipt ${d['Typed receipt']}, but Safaricom reports ${d['Safaricom receipt']}. Check both against the M-Pesa statement.`,
+  },
+  PAYMENT_OVERPAID_MANUAL: {
+    severity: 'medium',
+    title: 'More Than The Order Total Was Recorded As Received',
+    sms: (d) => `[ALERT] ${d['Order ref']}: KES ${d.Received} recorded as received for a KES ${d.Expected} order (${d.Method}). Return the KES ${d.Surplus} surplus to the customer.`,
   },
   MPESA_RECONCILED: {
     severity: 'medium',

@@ -348,6 +348,42 @@ const changePaymentMethod = async (orderId, newMethod) => {
   return updated;
 };
 
+// ── A TYPED RECEIPT THAT SAFARICOM CONTRADICTS ────────────────────────────────
+// A payment a person confirmed by hand carries the receipt they typed. If Safaricom's own callback then arrives with a
+// DIFFERENT receipt number, one of the two is wrong (a typo, or worse). The typed one stays (it is what the order shows)
+// and nothing is overwritten; the contradiction is recorded ONCE, logged and alerted, for someone to compare with the
+// M-Pesa statement. Returns true when the callback's receipt differs from the typed one.
+const flagReceiptMismatch = async (payment, seen) => {
+  const safaricomReceipt = seen?.MpesaReceiptNumber;
+  if (!safaricomReceipt || !payment.mpesaTransactionId || safaricomReceipt === payment.mpesaTransactionId) return false;
+  const flagged = await Payment.findOneAndUpdate(
+    { _id: payment._id, receiptMismatch: null },
+    { receiptMismatch: { typedReceipt: payment.mpesaTransactionId, safaricomReceipt, amount: seen.Amount ?? null, detectedAt: new Date() } },
+    { new: true }
+  );
+  if (flagged) {
+    const mismatchOrder = await Order.findById(payment.orderId).select('branchId orderRef').lean();
+    logger.error('[M-PESA] Callback receipt differs from the receipt typed at manual confirmation', {
+      paymentId: payment._id, typed: payment.mpesaTransactionId, safaricom: safaricomReceipt,
+    });
+    await activityLogService.log({
+      actorId:    payment.orderId,
+      actorRole:  'customer',
+      action:     LOG_ACTIONS.PAYMENT_RECEIPT_MISMATCH,
+      branchId:   mismatchOrder?.branchId || null,
+      targetId:   payment._id,
+      targetType: 'Payment',
+      detail:     { orderRef: mismatchOrder?.orderRef, typedReceipt: payment.mpesaTransactionId, safaricomReceipt, amount: seen.Amount ?? null },
+    }).catch(err => logger.error('[M-PESA] Activity log failed on receipt mismatch', { err: err.message }));
+    await alertService.sendAlert('MPESA_RECEIPT_MISMATCH', {
+      'Order ref': mismatchOrder?.orderRef || 'unknown',
+      'Typed receipt': payment.mpesaTransactionId,
+      'Safaricom receipt': safaricomReceipt,
+    }, String(payment._id)).catch(() => {});
+  }
+  return true;
+};
+
 // ── HANDLE SAFARICOM CALLBACK ─────────────────────────────────────────────────
 const handleCallback = async (callbackData) => {
   const body = callbackData?.Body?.stkCallback;
@@ -428,6 +464,15 @@ const handleCallback = async (callbackData) => {
     return { success: true, message: 'Receipt recorded' };
   }
 
+  // A callback for a payment a person already confirmed by hand, carrying a DIFFERENT receipt number from the one they
+  // typed. The typed one stays (it is what the order shows); but two receipts for one payment means one of them is wrong
+  // (a typo, or worse), so say so once and let someone compare them with the M-Pesa statement.
+  if (payment.status === PAYMENT_STATUSES.PAID && ResultCode === 0 && payment.mpesaTransactionId && !payment.receiptMismatch) {
+    if (await flagReceiptMismatch(payment, parseCallbackMetadata(CallbackMetadata?.Item || []))) {
+      return { success: true, message: 'Already processed', receiptMismatch: true };
+    }
+  }
+
   if (payment.status === PAYMENT_STATUSES.PAID || payment.status === PAYMENT_STATUSES.FAILED) {
     logger.info('[M-PESA] Duplicate callback ignored — already in terminal state', { CheckoutRequestID, status: payment.status });
     return { success: true, message: 'Already processed' };
@@ -447,9 +492,19 @@ const handleCallback = async (callbackData) => {
       // Atomic compare-and-swap on the status we read at the top of this function —
       // if a concurrent duplicate delivery of this same callback already moved the
       // payment out of that status, this is a no-op and we treat it as already handled.
+      // The payment is not credited (the order is not paid), but the money DID leave the customer's phone: ResultCode 0
+      // means Safaricom took it. So keep the receipt and amount where the cash-up and the integrity scan look for
+      // "money that arrived but is not credited" (lateSuccessMeta), instead of letting it vanish into a log line.
       const claimed = await Payment.findOneAndUpdate(
         { _id: payment._id, status: payment.status },
-        { status: PAYMENT_STATUSES.FAILED },
+        {
+          status: PAYMENT_STATUSES.FAILED,
+          receivedAmount: paidAmount || null,
+          lateSuccessMeta: {
+            mpesaTransactionId: mpesaTransactionId || null, paidAmount: paidAmount || null, expected: payment.amount,
+            receivedAt: new Date(), reason: 'short_payment',
+          },
+        },
         { new: true }
       );
       if (!claimed) {
@@ -461,7 +516,7 @@ const handleCallback = async (callbackData) => {
         expected: payment.amount,
         received: paidAmount
       });
-      const failedOrder = await Order.findByIdAndUpdate(payment.orderId, { paymentStatus: PAYMENT_STATUSES.FAILED }).select('branchId');
+      const failedOrder = await Order.findByIdAndUpdate(payment.orderId, { paymentStatus: PAYMENT_STATUSES.FAILED }).select('branchId orderRef');
       await activityLogService.log({
         actorId:    payment.orderId,
         actorRole:  'customer',
@@ -469,8 +524,14 @@ const handleCallback = async (callbackData) => {
         branchId:   failedOrder?.branchId || null,
         targetId:   payment._id,
         targetType: 'Payment',
-        detail:     { reason: 'AMOUNT_MISMATCH', expected: payment.amount, received: paidAmount }
+        detail:     { reason: 'AMOUNT_MISMATCH', expected: payment.amount, received: paidAmount, mpesaTransactionId: mpesaTransactionId || null }
       }).catch(err => logger.error('[M-PESA] Activity log failed on amount mismatch', { err: err.message }));
+      await alertService.sendAlert('MPESA_SHORT_PAYMENT', {
+        'Order ref': failedOrder?.orderRef || 'unknown',
+        'M-Pesa receipt': mpesaTransactionId || 'unknown',
+        Received: paidAmount ?? 'unknown',
+        Expected: payment.amount,
+      }, String(payment._id)).catch(() => {});
       return { success: false, status: 'failed', resultCode: 'AMOUNT_MISMATCH' };
     }
 
@@ -504,6 +565,7 @@ const handleCallback = async (callbackData) => {
           {
             status:             PAYMENT_STATUSES.REFUNDED,
             mpesaTransactionId,
+            receivedAmount:     paidAmount,
             paidAt:             new Date(),
             safaricomTimestamp,
             refundedAt:         new Date(),
@@ -525,6 +587,7 @@ const handleCallback = async (callbackData) => {
         {
           status:            PAYMENT_STATUSES.PAID,
           mpesaTransactionId,
+          receivedAmount:    paidAmount,
           paidAt:            new Date(),
           safaricomTimestamp
         },
@@ -537,6 +600,13 @@ const handleCallback = async (callbackData) => {
 
     if (outcome.duplicate) {
       logger.info('[M-PESA] Duplicate callback ignored (success path)', { CheckoutRequestID });
+      // Someone confirmed this payment by hand in the instant between this callback reading it and recording it. The
+      // callback lost the race, but the receipt it carries is real: compare it with what was typed.
+      const settled = await Payment.findById(payment._id);
+      if (settled?.status === PAYMENT_STATUSES.PAID && settled.mpesaTransactionId && !settled.receiptMismatch
+        && await flagReceiptMismatch(settled, metadata)) {
+        return { success: true, message: 'Already processed', receiptMismatch: true };
+      }
       return { success: true, message: 'Already processed' };
     }
 
@@ -930,20 +1000,16 @@ const manualConfirmPayment = async (orderId, adminId, transactionRef, actorRole 
       isMpesa ? 'MPESA_AMOUNT_MISMATCH' : 'CASH_UNDERPAYMENT'
     );
   }
-  if (Math.round(receivedAmount) > expectedAmount) {
-    logger.warn('[MANUAL CONFIRM] Overpayment on manual confirmation — manual reconciliation required', {
-      orderId:  order._id,
-      method:   order.paymentMethod,
-      expected: expectedAmount,
-      received: receivedAmount,
-      delta:    Math.round(receivedAmount) - expectedAmount
-    });
-  }
+  const receivedWhole = Math.round(receivedAmount);
+  const surplus = receivedWhole - expectedAmount;
 
   const paymentUpdate = {
     status:      PAYMENT_STATUSES.PAID,
     confirmedBy: adminId,
     paidAt:      new Date(),
+    // What was actually taken. It used to be checked here and then thrown away, so an over-payment left no trace and
+    // the cash-up could only ever show what had been ASKED for.
+    receivedAmount: receivedWhole,
     ...(ref && { mpesaTransactionId: ref })
   };
 
@@ -972,7 +1038,9 @@ const manualConfirmPayment = async (orderId, adminId, transactionRef, actorRole 
       orderId:  order._id,
       branchId: order.branchId,
       method:   order.paymentMethod,
-      amount:   order.total,
+      // The same rule as an M-Pesa prompt (the total rounded up to a whole shilling). Cash used to be stored with
+      // cents and M-Pesa without, so the two methods could not be added up on one scale.
+      amount:   expectedAmount,
       currency: 'KES',
       ...paymentUpdate
     });
@@ -986,8 +1054,28 @@ const manualConfirmPayment = async (orderId, adminId, transactionRef, actorRole 
     branchId:   claimedOrder.branchId || null,
     targetId:   payment._id,
     targetType: 'Payment',
-    detail:     { orderId, transactionRef: ref || 'cash' }
+    detail:     { orderId, transactionRef: ref || 'cash', receivedAmount: receivedWhole, expected: expectedAmount }
   });
+
+  // Over-payment: the surplus belongs to the customer. The M-Pesa callback path has always logged and alerted on this;
+  // the manual path now does too, so it can be found and handed back.
+  if (surplus > 0) {
+    logger.warn('[MANUAL CONFIRM] Overpayment on manual confirmation — surplus to return', {
+      orderId: order._id, method: order.paymentMethod, expected: expectedAmount, received: receivedWhole, surplus,
+    });
+    await activityLogService.log({
+      actorId:    adminId,
+      actorRole,
+      action:     LOG_ACTIONS.PAYMENT_OVERPAID,
+      branchId:   claimedOrder.branchId || null,
+      targetId:   payment._id,
+      targetType: 'Payment',
+      detail:     { orderRef: order.orderRef, mode: 'manual', method: order.paymentMethod, expected: expectedAmount, received: receivedWhole, surplus },
+    }).catch(err => logger.error('[MANUAL CONFIRM] Activity log failed on overpayment', { err: err.message }));
+    alertService.sendAlert('PAYMENT_OVERPAID_MANUAL', {
+      'Order ref': order.orderRef, Method: order.paymentMethod, Expected: expectedAmount, Received: receivedWhole, Surplus: surplus,
+    }, String(payment._id)).catch(() => {});
+  }
 
   etimsService.submitInvoice(orderId).catch(err =>
     logger.error('[eTIMS] Invoice submission failed after manual confirmation', { orderId, err: err.message })
@@ -997,7 +1085,142 @@ const manualConfirmPayment = async (orderId, adminId, transactionRef, actorRole 
   return payment;
 };
 
+// ── RECORD A REFUND AS SENT ───────────────────────────────────────────────────
+// Cancelling or rejecting a paid order records that money is OWED back (Payment.status 'refunded'); the actual
+// reversal is made by hand, outside the system, with M-Pesa or in cash. Until now nothing recorded that it had been
+// done, so a refund looked "owed" for ever and money out could not be matched to the M-Pesa statement. This is the last step.
+const REFUND_METHODS = ['mpesa', 'cash', 'bank', 'other'];
+
+const recordRefundSent = async (orderId, actorId, actorRole, branchId, { method, reference, amount, note } = {}) => {
+  if (!REFUND_METHODS.includes(method)) {
+    throw new AppError('Choose how the refund was sent: M-Pesa, cash, bank or other', 400, 'INVALID_REFUND_METHOD');
+  }
+  const query = { _id: orderId };
+  if (branchId) query.branchId = branchId;
+  const order = await Order.findOne(query).select('orderRef branchId paymentId paymentStatus').lean();
+  if (!order) throw new AppError('Order not found', 404, 'ORDER_NOT_FOUND');
+  const payment = order.paymentId ? await Payment.findById(order.paymentId) : null;
+  if (!payment || payment.status !== PAYMENT_STATUSES.REFUNDED) {
+    throw new AppError('There is no refund owed on this order', 400, 'NO_REFUND_OWED');
+  }
+  if (payment.refundSentAt) {
+    throw new AppError('This refund has already been recorded as sent', 409, 'REFUND_ALREADY_SENT');
+  }
+
+  const owed = payment.receivedAmount ?? payment.amount;
+  const sent = amount == null || amount === '' ? owed : Math.round(Number(amount));
+  if (!Number.isFinite(sent) || sent <= 0 || sent > owed) {
+    throw new AppError(`The refund must be between KES 1 and the KES ${owed} that was received`, 400, 'INVALID_REFUND_AMOUNT');
+  }
+  const cleanNote = typeof note === 'string' ? note.trim().slice(0, 300) : '';
+  if (sent < owed && !cleanNote) {
+    throw new AppError('A refund of less than the amount received needs a note saying why', 400, 'REFUND_NOTE_REQUIRED');
+  }
+
+  // An M-Pesa refund must quote the receipt of the reversal or transfer, and a receipt can settle exactly one refund.
+  // Other methods may add a free-text reference; it goes into the note (a cash slip number is not unique across the shop).
+  let refundReference = null;
+  const refText = typeof reference === 'string' ? reference.trim() : '';
+  if (method === 'mpesa') {
+    refundReference = refText.toUpperCase();
+    if (!MPESA_RECEIPT_REGEX.test(refundReference)) {
+      throw new AppError('Enter the 10-character M-Pesa receipt of the refund (e.g. QDK14KSHD7)', 400, 'INVALID_TRANSACTION_REF');
+    }
+    if (await Payment.exists({ refundReference })) {
+      throw new AppError('This M-Pesa receipt has already been used for another refund', 409, 'DUPLICATE_REFUND_REF');
+    }
+  }
+  const fullNote = [method !== 'mpesa' && refText ? `Ref: ${refText.slice(0, 60)}` : '', cleanNote].filter(Boolean).join(' · ') || null;
+
+  let claimed;
+  try {
+    claimed = await Payment.findOneAndUpdate(
+      { _id: payment._id, status: PAYMENT_STATUSES.REFUNDED, refundSentAt: null },
+      { $set: {
+        refundSentAt: new Date(), refundSentAmount: sent, refundMethod: method,
+        refundReference, refundSentBy: actorId, refundNote: fullNote,
+      } },
+      { new: true }
+    );
+  } catch (err) {
+    if (err.code === 11000) throw new AppError('This M-Pesa receipt has already been used for another refund', 409, 'DUPLICATE_REFUND_REF');
+    throw err;
+  }
+  if (!claimed) throw new AppError('This refund has already been recorded as sent', 409, 'REFUND_ALREADY_SENT');
+
+  await Order.updateOne({ _id: order._id }, { refundSettledAt: claimed.refundSentAt });
+
+  await activityLogService.log({
+    actorId,
+    actorRole,
+    action:     LOG_ACTIONS.PAYMENT_REFUND_SENT,
+    branchId:   order.branchId || null,
+    targetId:   payment._id,
+    targetType: 'Payment',
+    detail:     { orderRef: order.orderRef, owed, sent, method, reference: refundReference || refText || null, note: cleanNote || null },
+  });
+
+  return claimed;
+};
+
+// ── CLOSE A PAYMENT EXCEPTION ─────────────────────────────────────────────────
+// "M-Pesa money that arrived but was not credited" (a late success after the attempt was given up on, or a payment that
+// came in short) and "typed receipt differs from Safaricom's" are flagged on the payment. Nothing could ever clear a flag,
+// so the Control Center and the cash-up reported it for ever. A person who has dealt with it (refunded, topped up, matched
+// it to an order, compared the receipts) records that here; it closes every flag that is open on the payment.
+const resolvePaymentException = async (paymentId, actorId, actorRole, branchId, note) => {
+  const cleanNote = typeof note === 'string' ? note.trim().slice(0, 300) : '';
+  if (cleanNote.length < 3) {
+    throw new AppError('Say what was done about it (a few words is enough)', 400, 'RESOLUTION_NOTE_REQUIRED');
+  }
+  const query = { _id: paymentId };
+  if (branchId) query.branchId = branchId;
+  const payment = await Payment.findOne(query).select('orderId branchId lateSuccessMeta receiptMismatch').lean();
+  if (!payment) throw new AppError('Payment not found', 404, 'PAYMENT_NOT_FOUND');
+  const hadLate = Boolean(payment.lateSuccessMeta?.receivedAt);
+  const hadMismatch = Boolean(payment.receiptMismatch?.detectedAt);
+  if (!hadLate && !hadMismatch) {
+    throw new AppError('This payment has no open M-Pesa exception', 400, 'NO_OPEN_EXCEPTION');
+  }
+  const openLate = hadLate && !payment.lateSuccessMeta.resolvedAt;
+  const openMismatch = hadMismatch && !payment.receiptMismatch.resolvedAt;
+  if (!openLate && !openMismatch) {
+    throw new AppError('This exception has already been closed', 409, 'EXCEPTION_ALREADY_RESOLVED');
+  }
+  const now = new Date();
+  const closed = await Payment.findOneAndUpdate(
+    {
+      _id: payment._id,
+      ...(openLate && { 'lateSuccessMeta.resolvedAt': null }),
+      ...(openMismatch && { 'receiptMismatch.resolvedAt': null }),
+    },
+    { $set: {
+      ...(openLate && { 'lateSuccessMeta.resolvedAt': now, 'lateSuccessMeta.resolvedBy': actorId, 'lateSuccessMeta.resolutionNote': cleanNote }),
+      ...(openMismatch && { 'receiptMismatch.resolvedAt': now, 'receiptMismatch.resolvedBy': actorId, 'receiptMismatch.resolutionNote': cleanNote }),
+    } },
+    { new: true }
+  );
+  if (!closed) throw new AppError('This exception has already been closed', 409, 'EXCEPTION_ALREADY_RESOLVED');
+
+  const order = await Order.findById(payment.orderId).select('orderRef').lean();
+  await activityLogService.log({
+    actorId,
+    actorRole,
+    action:     LOG_ACTIONS.PAYMENT_EXCEPTION_RESOLVED,
+    branchId:   payment.branchId || null,
+    targetId:   payment._id,
+    targetType: 'Payment',
+    detail:     {
+      orderRef: order?.orderRef, note: cleanNote,
+      kind: [openLate && (payment.lateSuccessMeta.reason || 'late_success'), openMismatch && 'receipt_mismatch'].filter(Boolean).join('+'),
+    },
+  });
+  return closed;
+};
+
 module.exports = {
+  recordRefundSent,
+  resolvePaymentException,
   initiateStkPush,
   handleCallback,
   queryStkStatus,

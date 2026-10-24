@@ -1337,7 +1337,9 @@ const getCashUpReport = async (period, from, to, branchId) => {
     { $match: { status: 'paid', paidAt: { $gte: start, $lte: end }, ...paymentBranch } },
     { $group: {
       _id: { method: '$method', manual: { $cond: [{ $ifNull: ['$confirmedBy', false] }, true, false] } },
-      count: { $sum: 1 }, amount: { $sum: '$amount' },
+      // What arrived, not what was asked for: they differ by an over-payment, and payments recorded before
+      // `receivedAmount` existed fall back to the amount asked for.
+      count: { $sum: 1 }, amount: { $sum: { $ifNull: ['$receivedAmount', '$amount'] } },
     } },
   ]);
   const money = (rows) => rows.reduce((a, r) => ({ count: a.count + r.count, amount: a.amount + r.amount }), { count: 0, amount: 0 });
@@ -1353,7 +1355,7 @@ const getCashUpReport = async (period, from, to, branchId) => {
   // 2. Cash confirmed, by the person who confirmed it.
   const cashByCollector = await Payment.aggregate([
     { $match: { status: 'paid', method: { $ne: 'mpesa' }, paidAt: { $gte: start, $lte: end }, ...paymentBranch } },
-    { $group: { _id: '$confirmedBy', count: { $sum: 1 }, amount: { $sum: '$amount' } } },
+    { $group: { _id: '$confirmedBy', count: { $sum: 1 }, amount: { $sum: { $ifNull: ['$receivedAmount', '$amount'] } } } },
     { $lookup: { from: 'users', localField: '_id', foreignField: '_id', as: 'user' } },
     { $unwind: { path: '$user', preserveNullAndEmptyArrays: true } },
     { $project: { _id: 0, userId: '$_id', name: '$user.name', role: '$user.role', count: 1, amount: 1 } },
@@ -1396,10 +1398,66 @@ const getCashUpReport = async (period, from, to, branchId) => {
     { $sort: { createdAt: -1 } },
     { $limit: 50 },
     ...joinOrder,
-    { $project: { _id: 0, paymentId: '$_id', orderRef: '$order.orderRef', amount: 1, mpesaPhone: 1, createdAt: 1, lateSuccessMeta: 1 } },
+    { $project: { _id: 0, paymentId: '$_id', orderId: '$order._id', orderRef: '$order.orderRef', amount: 1, mpesaPhone: 1, createdAt: 1, lateSuccessMeta: 1, receiptMismatch: 1 } },
   ]);
-  const lateSuccess = await attention({ lateSuccessMeta: { $ne: null }, 'lateSuccessMeta.receivedAt': { $gte: start, $lte: end } });
+  // Money that arrived but was not credited stays on the list until someone closes it (resolve-exception), whatever
+  // period is on screen: it is a standing item, not a figure for a window. It used to disappear when the period moved
+  // on, and could never be closed, so the Control Center flagged it for ever.
+  const lateSuccess = await attention({ 'lateSuccessMeta.receivedAt': { $exists: true }, 'lateSuccessMeta.resolvedAt': null });
   const stuckPending = await attention({ method: 'mpesa', status: 'pending', createdAt: { $gte: start, $lte: stuckBefore } });
+  // A typed receipt that Safaricom's callback later contradicted: standing until someone compares the two and closes it.
+  const receiptMismatch = await attention({ 'receiptMismatch.detectedAt': { $exists: true }, 'receiptMismatch.resolvedAt': null });
+
+  // 6. Why "received" and "invoiced" differ. Every payment taken in the period, against the orders it paid:
+  //    invoiced (the order totals, with cents) + rounded up (each prompt asks for the next whole shilling)
+  //    + overpaid (more than asked was actually received) = received. Without this the two figures simply disagree.
+  const [reconRow] = await Payment.aggregate([
+    { $match: { status: 'paid', paidAt: { $gte: start, $lte: end }, ...paymentBranch } },
+    { $lookup: { from: 'orders', localField: 'orderId', foreignField: '_id', pipeline: [{ $project: { total: 1 } }], as: 'order' } },
+    { $unwind: '$order' },
+    { $group: {
+      _id: null,
+      payments: { $sum: 1 },
+      invoiced: { $sum: '$order.total' },
+      asked: { $sum: '$amount' },
+      received: { $sum: { $ifNull: ['$receivedAmount', '$amount'] } },
+    } },
+  ]);
+  const r2 = (n) => Math.round((n || 0) * 100) / 100;
+  const reconciliation = {
+    payments: reconRow?.payments || 0,
+    invoiced: r2(reconRow?.invoiced),
+    roundedUp: r2((reconRow?.asked || 0) - (reconRow?.invoiced || 0)),
+    overpaid: r2((reconRow?.received || 0) - (reconRow?.asked || 0)),
+    received: r2(reconRow?.received),
+  };
+
+  // 7. Refunds. OWED is a standing balance (money taken for an order that then closed, not yet sent back), whatever
+  //    the period; SENT is what went back inside the period. The M-Pesa paybill balance and the statement include money
+  //    that is owed back, so without this line the cash-up cannot be matched to the statement.
+  const owedMatch = { status: 'refunded', refundSentAt: null, ...paymentBranch };
+  const [owedTotals] = await Payment.aggregate([
+    { $match: owedMatch },
+    { $group: { _id: null, count: { $sum: 1 }, amount: { $sum: { $ifNull: ['$receivedAmount', '$amount'] } }, oldestAt: { $min: '$refundedAt' } } },
+  ]);
+  const owedOrders = await Payment.aggregate([
+    { $match: owedMatch },
+    { $sort: { refundedAt: 1 } },
+    { $limit: 50 },
+    ...joinOrder,
+    { $project: {
+      _id: 0, paymentId: '$_id', orderId: '$order._id', orderRef: '$order.orderRef', method: 1,
+      amount: { $ifNull: ['$receivedAmount', '$amount'] }, refundedAt: 1, refundReason: 1, mpesaPhone: 1,
+    } },
+  ]);
+  const [sentTotals] = await Payment.aggregate([
+    { $match: { status: 'refunded', refundSentAt: { $gte: start, $lte: end }, ...paymentBranch } },
+    { $group: { _id: null, count: { $sum: 1 }, amount: { $sum: '$refundSentAmount' } } },
+  ]);
+  const refunds = {
+    owed: { count: owedTotals?.count || 0, amount: r2(owedTotals?.amount), oldestAt: owedTotals?.oldestAt || null, orders: owedOrders },
+    sent: { count: sentTotals?.count || 0, amount: r2(sentTotals?.amount) },
+  };
 
   return {
     period: { start, end },
@@ -1407,11 +1465,13 @@ const getCashUpReport = async (period, from, to, branchId) => {
     byMethod,
     cashByCollector,
     drivers,
+    reconciliation,
+    refunds,
     totals: {
       cashOutstanding: drivers.reduce((s, d) => s + d.outstanding, 0),
-      needsAttention: unpaidCompleted.length + lateSuccess.length + stuckPending.length,
+      needsAttention: unpaidCompleted.length + lateSuccess.length + stuckPending.length + receiptMismatch.length + refunds.owed.count,
     },
-    exceptions: { unpaidCompleted, lateSuccess, stuckPending },
+    exceptions: { unpaidCompleted, lateSuccess, stuckPending, receiptMismatch },
   };
 };
 

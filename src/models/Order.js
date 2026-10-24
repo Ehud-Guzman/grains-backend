@@ -103,7 +103,18 @@ const orderSchema = new mongoose.Schema({
   // must treat undefined and 'not_required' as equivalent ("nothing to show").
   etimsStatus:        { type: String, enum: ['not_required', 'pending', 'submitted', 'failed'], default: 'not_required' },
   etimsInvoiceNumber: { type: String },
-  etimsControlNumber: { type: String }
+  etimsControlNumber: { type: String },
+
+  // A refund is OWED until it is sent (Payment.refundSentAt); this mirrors "sent" onto the order so lists can say
+  // "Refund owed" or "Refund sent" without reading the payment.
+  refundSettledAt: { type: Date, default: null },
+
+  // An order that was fiscalised with KRA and is then cancelled or rejected needs a credit note against the original
+  // invoice, or KRA keeps a sale that never happened. 'required' is set when that happens; staff mark it 'issued' with the
+  // credit-note reference once it has been filed. (Filing itself is not automated: see etims.service.js.)
+  etimsCreditNoteStatus: { type: String, enum: ['not_required', 'required', 'issued'], default: 'not_required' },
+  etimsCreditNoteRef: { type: String, default: null },
+  etimsCreditNoteAt: { type: Date, default: null }
 }, {
   timestamps: true
 });
@@ -120,6 +131,7 @@ orderSchema.index({ status: 1, deliveredAt: 1 }); // cash-up / rider reports ove
 // eTIMS retry + the 'stuck pending' integrity check only look at the few invoices not yet accepted.
 orderSchema.index({ etimsStatus: 1, updatedAt: 1 }, { partialFilterExpression: { etimsStatus: { $in: ['pending', 'failed'] } } });
 orderSchema.index({ createdAt: -1 });
+orderSchema.index({ etimsCreditNoteStatus: 1 }, { partialFilterExpression: { etimsCreditNoteStatus: 'required' } }); // the credit-notes-to-file queue
 // (orderRef's unique index is declared on the field above - declaring it twice only produced a warning)
 orderSchema.index({ branchId: 1, paymentStatus: 1 }); // payment reconciliation queries
 orderSchema.index({ driverId: 1, status: 1 }); // driver "my orders"/"my stats" + admin rider report

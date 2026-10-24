@@ -31,7 +31,28 @@ const paymentSchema = new mongoose.Schema({
   // never arrived. Such a payment has no receipt number (the query does not return one) unless
   // the late callback eventually turns up and fills it in; otherwise match it on the M-Pesa statement.
   reconciledViaQuery: { type: Boolean, default: false },
-  reconciledAt: { type: Date, default: null }
+  reconciledAt: { type: Date, default: null },
+
+  // ── Money actually received ──────────────────────────────────────────────────────────────────────────────────────
+  // `amount` is what was ASKED for (the order total rounded up to a whole shilling: the same rule for M-Pesa, cash and
+  // pickup). `receivedAmount` is what actually arrived: Safaricom's Amount on a callback, or the figure staff typed when
+  // confirming by hand. They differ by an over-payment. Reports add up `receivedAmount` (falling back to `amount` for
+  // payments recorded before this field existed), so "money in" is money in, not money asked for.
+  receivedAmount: { type: Number, default: null },
+
+  // ── Refund payout (2026-10 money-trail audit) ──────────────────────────────────────────────────────────────────
+  // `status: refunded` + `refundedAt` mean a refund is OWED (money was taken, then the order closed). They never said
+  // whether it had been sent. These record the other half: how much went back, how, with what reference, who sent it.
+  refundSentAt: { type: Date, default: null },
+  refundSentAmount: { type: Number, default: null },
+  refundMethod: { type: String, enum: ['mpesa', 'cash', 'bank', 'other', null], default: null },
+  refundReference: { type: String, default: null },   // the M-Pesa reversal/transfer receipt (unique when present)
+  refundSentBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  refundNote: { type: String, default: null },
+
+  // A success callback whose receipt number differs from the one a person typed in when confirming by hand. Never
+  // overwrites anything: it is a flag for someone to compare the two against the M-Pesa statement.
+  receiptMismatch: { type: mongoose.Schema.Types.Mixed, default: null }
 }, {
   timestamps: true
 });
@@ -46,6 +67,10 @@ paymentSchema.index({ status: 1, createdAt: -1 }); // date-ranged payment report
 paymentSchema.index({ status: 1, paidAt: -1 }); // cash-up: money in over a period
 paymentSchema.index({ branchId: 1, status: 1, paidAt: -1 }); // ...for one branch
 paymentSchema.index({ mpesaPhone: 1, createdAt: -1 }); // per-phone STK prompt cap
+// The refunds-owed queue: only the (few) refunded payments are ever indexed here.
+paymentSchema.index({ refundedAt: 1 }, { partialFilterExpression: { status: 'refunded' } });
+// A reversal receipt can settle exactly one refund.
+paymentSchema.index({ refundReference: 1 }, { unique: true, partialFilterExpression: { refundReference: { $type: 'string' } } });
 // Late-success reconciliation only ever looks at the (few) payments that have it.
 paymentSchema.index({ 'lateSuccessMeta.receivedAt': 1 }, { partialFilterExpression: { 'lateSuccessMeta.receivedAt': { $exists: true } } });
 
