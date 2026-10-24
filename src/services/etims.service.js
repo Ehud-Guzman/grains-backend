@@ -12,7 +12,8 @@ const axios = require('axios');
 const Order                = require('../models/Order');
 const globalSettingsService = require('./globalSettings.service');
 const logger               = require('../utils/logger');
-const { PAYMENT_METHODS, PAYMENT_STATUSES, ORDER_STATUSES } = require('../utils/constants');
+const activityLogService  = require('./activityLog.service');
+const { PAYMENT_METHODS, PAYMENT_STATUSES, ORDER_STATUSES, LOG_ACTIONS } = require('../utils/constants');
 const { EAT_OFFSET_MS } = require('../utils/businessTime');
 
 // ── CONSTANTS ─────────────────────────────────────────────────────────────────
@@ -21,6 +22,11 @@ const PAYMENT_TYPE_CODES = {
   [PAYMENT_METHODS.PICKUP]:   '01', // Cash
   [PAYMENT_METHODS.DELIVERY]: '01', // Cash on delivery
 };
+
+// KRA's "refund reason" code for a credit note. The list is KRA's, not ours: check the code for "cancelled / other" in the
+// eTIMS code table you were given at onboarding and set ETIMS_REFUND_REASON_CODE before turning eTIMS on in production.
+const REFUND_REASON_CODE = process.env.ETIMS_REFUND_REASON_CODE || '13';
+const CREDIT_NOTE_LEASE_MS = 5 * 60 * 1000; // a claim older than this is a crashed attempt and may be retaken
 
 // UNSPSC commodity code for cereal grains — refine per-product if needed
 const ITEM_CLASS_CODE = '50221700';
@@ -40,6 +46,7 @@ const buildPayload = (order, tin, bhfId) => {
   const couponDiscount  = Number(order.couponDiscount) || 0;
   const deliveryFee     = Number(order.deliveryFee) || 0;
   const vatAmount       = Number(order.vatAmount) || 0;
+  const rounding        = Number(order.roundingAdjustment) || 0;
 
   // Dates are on the Nairobi clock, like the VAT report's month buckets. In UTC an order placed 00:00-03:00 EAT
   // was filed under the previous day (and, on the 1st, the previous month) - 2026-10 audit, F-16.
@@ -153,6 +160,29 @@ const buildPayload = (order, tin, bhfId) => {
     taxblAmtE += deliveryFee;
   }
 
+  // The few cents the total was rounded up by to a whole shilling are charged to the customer, so the invoice carries
+  // them as their own exempt line - without it the items would add up to less than totAmt.
+  if (rounding > 0) {
+    itemList.push({
+      itemSeq:   itemList.length + 1,
+      itemCd:    'ROUNDING',
+      itemClsCd: ITEM_CLASS_CODE,
+      itemNm:    'Rounding to whole shilling',
+      bcd:       '',
+      pkgUnt:    'U',
+      qty:       1,
+      prc:       rounding,
+      splyAmt:   rounding,
+      dcRt:      0,
+      dcAmt:     0,
+      taxblAmt:  rounding,
+      taxTyCd:   'E',
+      taxAmt:    0,
+      totAmt:    rounding,
+    });
+    taxblAmtE += rounding;
+  }
+
   taxblAmtB = Math.round(taxblAmtB * 100) / 100;
   taxblAmtE = Math.round(taxblAmtE * 100) / 100;
 
@@ -195,7 +225,7 @@ const submitInvoice = async (orderId) => {
   }
 
   const order = await Order.findById(orderId)
-    .select('orderRef orderItems subtotal deliveryFee couponDiscount vatEnabled vatRate vatAmount total paymentMethod specialInstructions createdAt etimsStatus etimsInvoiceNumber status paymentStatus buyerKraPin')
+    .select('orderRef orderItems subtotal deliveryFee couponDiscount vatEnabled vatRate vatAmount roundingAdjustment total paymentMethod specialInstructions createdAt etimsStatus etimsInvoiceNumber status paymentStatus buyerKraPin')
     .lean();
 
   if (!order) {
@@ -278,4 +308,78 @@ const submitInvoice = async (orderId) => {
   }
 };
 
-module.exports = { submitInvoice, buildPayload };
+// ── SUBMIT A CREDIT NOTE ──────────────────────────────────────────────────────
+// An invoice KRA already holds for an order that was then cancelled or rejected is reversed by a credit note: the same
+// saveTrnsSaleOsdc call with receipt type 'R' (refund), pointing back at the original invoice. Mirrors submitInvoice:
+// skips quietly when eTIMS is off, claims the order so two callers can't file it twice, and on failure leaves the order
+// in the "credit notes to file" list (status stays 'required', the error is kept for the screen) for the retry job or an
+// admin. On success the order is marked 'issued' with KRA's reference. Returns { filed, reason?, reference? }.
+// NOT yet exercised against KRA's sandbox (eTIMS is still on development): the field names follow the invoice call and
+// KRA's refund convention, and the reason code is configurable - confirm both with a sandbox credit note before going live.
+const submitCreditNote = async (orderId) => {
+  const global = await globalSettingsService.getSettings();
+  const { enabled, baseUrl, tin, bhfId = '00', deviceId } = global.etims || {};
+  if (!enabled || !baseUrl || !tin || !deviceId) return { filed: false, reason: 'disabled' };
+
+  const order = await Order.findById(orderId)
+    .select('orderRef branchId orderItems subtotal deliveryFee couponDiscount vatEnabled vatRate vatAmount roundingAdjustment total paymentMethod specialInstructions createdAt etimsInvoiceNumber etimsCreditNoteStatus buyerKraPin')
+    .lean();
+  if (!order) return { filed: false, reason: 'not_found' };
+  if (order.etimsCreditNoteStatus !== 'required' || !order.etimsInvoiceNumber) return { filed: false, reason: 'not_required' };
+
+  const claimed = await Order.findOneAndUpdate(
+    {
+      _id: orderId,
+      etimsCreditNoteStatus: 'required',
+      $or: [{ etimsCreditNoteClaimedAt: null }, { etimsCreditNoteClaimedAt: { $lt: new Date(Date.now() - CREDIT_NOTE_LEASE_MS) } }],
+    },
+    { $set: { etimsCreditNoteClaimedAt: new Date() } }
+  );
+  if (!claimed) return { filed: false, reason: 'in_progress' };
+
+  try {
+    const original = Number(order.etimsInvoiceNumber);
+    const base = buildPayload(order, tin, bhfId);
+    const payload = {
+      ...base,
+      rcptTyCd:  'R',                                  // R = refund (credit note)
+      orgInvcNo: Number.isFinite(original) ? original : 0,
+      rfdRsnCd:  REFUND_REASON_CODE,
+      rfdDt:     base.cfmDt,
+      remark:    `Credit note for ${order.orderRef}`,
+    };
+    const response = await axios.post(`${baseUrl}/saveTrnsSaleOsdc`, payload, {
+      headers: { 'Content-Type': 'application/json', tin, bhfId, dvcSrNo: deviceId },
+      timeout: 15_000,
+    });
+    const resultCd = response.data?.resultCd;
+    if (resultCd !== '000') throw new Error(`eTIMS error: ${response.data?.resultMsg} (code ${resultCd})`);
+
+    const { rcptNo, tradeIvtNo } = response.data.data || {};
+    const reference = String(tradeIvtNo ?? rcptNo ?? 'ACCEPTED').toUpperCase();
+    await Order.updateOne(
+      { _id: orderId, etimsCreditNoteStatus: 'required' },
+      { $set: { etimsCreditNoteStatus: 'issued', etimsCreditNoteRef: reference, etimsCreditNoteAt: new Date(), etimsCreditNoteError: null, etimsCreditNoteClaimedAt: null } }
+    );
+    await activityLogService.log({
+      actorId:    order._id,
+      actorRole:  'system',
+      action:     LOG_ACTIONS.ETIMS_CREDIT_NOTE_ISSUED,
+      branchId:   order.branchId,
+      targetId:   order._id,
+      targetType: 'Order',
+      detail:     { orderRef: order.orderRef, creditNoteRef: reference, mode: 'automatic' },
+    }).catch(err => logger.error('[eTIMS] Activity log failed on credit note', { err: err.message }));
+    logger.info('[eTIMS] Credit note submitted', { orderId, orderRef: order.orderRef, reference });
+    return { filed: true, reference };
+  } catch (err) {
+    await Order.updateOne(
+      { _id: orderId },
+      { $set: { etimsCreditNoteClaimedAt: null, etimsCreditNoteError: String(err.message).slice(0, 300) } }
+    );
+    logger.error('[eTIMS] Credit note submission failed', { orderId, orderRef: order.orderRef, err: err.message });
+    throw err;
+  }
+};
+
+module.exports = { submitInvoice, submitCreditNote, buildPayload };

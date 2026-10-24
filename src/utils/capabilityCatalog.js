@@ -214,17 +214,17 @@ const CAPABILITIES = [
   {
     id: 'orders-etims-credit-note',
     area: 'orders',
-    title: 'Record a KRA credit note for a cancelled invoiced order',
-    summary: 'When an order that already has a KRA invoice is cancelled or rejected, record the credit note you filed.',
+    title: 'File or record a KRA credit note for a cancelled invoiced order',
+    summary: 'When an order that already has a KRA invoice is cancelled or rejected, send the credit note to KRA, or record the one you filed yourself.',
     keywords: ['credit note', 'etims credit note', 'kra credit note', 'cancel invoice', 'reverse invoice', 'invoice cancelled order', 'tax credit', 'kra refund'],
     routes: ['POST /api/admin/orders/:id/etims/credit-note'],
     page: '/admin/orders',
     steps: [
       'Open the cancelled or rejected order from Orders. A banner says a credit note must be filed with KRA.',
-      'File the credit note with KRA (through the KRA portal or your accountant).',
-      'Enter the credit-note reference on the order and click Record credit note.',
+      'Click Send to KRA now. (With eTIMS switched on the system also tries by itself, and again every 30 minutes.)',
+      'Or file it yourself on the KRA portal, enter its reference on the order and click Record credit note.',
     ],
-    notes: ['The system does not file the credit note with KRA for you; this only records that it was done.'],
+    notes: ['Sending needs eTIMS to be switched on in Global Settings; if it is off, file on the KRA portal and record the reference.'],
   },
   {
     id: 'payments-troubleshoot',

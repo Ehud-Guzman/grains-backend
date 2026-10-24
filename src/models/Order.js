@@ -46,6 +46,9 @@ const orderSchema = new mongoose.Schema({
   vatEnabled: { type: Boolean, default: false },
   vatRate:    { type: Number,  default: 0 },   // e.g. 16 (percent)
   vatAmount:  { type: Number,  default: 0 },   // calculated amount in KES
+  // Added to the exact total so it is a whole number of shillings (see toWholeShilling in order.service.js). 0 on orders
+  // placed before whole-shilling totals, whose `total` still carries cents.
+  roundingAdjustment: { type: Number, default: 0 },
   total: { type: Number, required: true },
   deliveryMethod: { type: String, enum: Object.values(DELIVERY_METHODS), required: true },
   deliveryAddress: { type: String, default: null },
@@ -114,7 +117,9 @@ const orderSchema = new mongoose.Schema({
   // credit-note reference once it has been filed. (Filing itself is not automated: see etims.service.js.)
   etimsCreditNoteStatus: { type: String, enum: ['not_required', 'required', 'issued'], default: 'not_required' },
   etimsCreditNoteRef: { type: String, default: null },
-  etimsCreditNoteAt: { type: Date, default: null }
+  etimsCreditNoteAt: { type: Date, default: null },
+  etimsCreditNoteClaimedAt: { type: Date, default: null },  // lease while a submission to KRA is in flight
+  etimsCreditNoteError: { type: String, default: null }     // why the last automatic attempt failed, for the screen
 }, {
   timestamps: true
 });

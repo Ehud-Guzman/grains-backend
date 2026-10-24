@@ -208,6 +208,7 @@ const getSalesReport = async (period, from, to, branchId) => {
           couponDiscounts: { $sum: { $ifNull: ['$couponDiscount', 0] } },
           deliveryFees: { $sum: { $ifNull: ['$deliveryFee', 0] } },
           vatCollected: { $sum: { $ifNull: ['$vatAmount', 0] } },
+          roundingAdded: { $sum: { $ifNull: ['$roundingAdjustment', 0] } },
           // Collected vs still owed. "Revenue" counts orders from approval on, whether or not the money has
           // arrived (cash on delivery, pay on pickup), so the report needs to say how much of it is in hand.
           paidRevenue: { $sum: { $cond: [{ $eq: ['$paymentStatus', 'paid'] }, '$total', 0] } },
@@ -349,6 +350,8 @@ const getSalesReport = async (period, from, to, branchId) => {
         netGoods: Math.round(((s.goodsSubtotal || 0) - (s.couponDiscounts || 0)) * 100) / 100,
         deliveryFees: Math.round((s.deliveryFees || 0) * 100) / 100,
         vatCollected: Math.round((s.vatCollected || 0) * 100) / 100,
+        // The few cents each order is rounded up by to a whole shilling (orders from 2026-10-24 on).
+        rounding: Math.round((s.roundingAdded || 0) * 100) / 100,
       }
     },
     previous: {
@@ -1506,6 +1509,10 @@ const getVatReport = async (period, from, to, branchId) => {
         deliveryFees: { $sum: { $ifNull: ['$deliveryFee', 0] } },
         totalVat:    { $sum: '$vatAmount' },
         totalInclVat:{ $sum: { $add: [{ $subtract: ['$subtotal', { $ifNull: ['$couponDiscount', 0] }] }, '$vatAmount'] } },
+        // Orders in this report that KRA has NOT been told about through eTIMS (a delivered cash order still unpaid is the
+        // usual one: an invoice is only filed once the order is paid). The report counts them, so say how many.
+        unfiledOrders: { $sum: { $cond: [{ $eq: ['$etimsStatus', 'submitted'] }, 0, 1] } },
+        unfiledVat:    { $sum: { $cond: [{ $eq: ['$etimsStatus', 'submitted'] }, 0, { $ifNull: ['$vatAmount', 0] }] } },
         vatRate:     { $first: '$vatRate' },
       },
     },
@@ -1523,6 +1530,8 @@ const getVatReport = async (period, from, to, branchId) => {
         deliveryFees: { $round: ['$deliveryFees', 0] },
         totalVat:     { $round: ['$totalVat',     0] },
         totalInclVat: { $round: ['$totalInclVat', 0] },
+        unfiledOrders: 1,
+        unfiledVat:   { $round: ['$unfiledVat', 0] },
       },
     },
   ]);
@@ -1536,8 +1545,10 @@ const getVatReport = async (period, from, to, branchId) => {
       deliveryFees:  acc.deliveryFees  + r.deliveryFees,
       totalVat:      acc.totalVat      + r.totalVat,
       totalInclVat:  acc.totalInclVat  + r.totalInclVat,
+      unfiledOrders: acc.unfiledOrders + r.unfiledOrders,
+      unfiledVat:    acc.unfiledVat    + r.unfiledVat,
     }),
-    { totalOrders: 0, totalExVat: 0, taxableSales: 0, exemptSales: 0, deliveryFees: 0, totalVat: 0, totalInclVat: 0 }
+    { totalOrders: 0, totalExVat: 0, taxableSales: 0, exemptSales: 0, deliveryFees: 0, totalVat: 0, totalInclVat: 0, unfiledOrders: 0, unfiledVat: 0 }
   );
 
   return { period: { start, end }, summary, rows };

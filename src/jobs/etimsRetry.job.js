@@ -17,7 +17,25 @@ const INITIAL_DELAY_MS = 5 * 60 * 1000;   // let startup I/O settle first
 // a human via the manual resubmit route, not another automatic attempt.
 const MAX_AGE_MS = 7 * MS_PER_DAY;
 
+// Credit notes waiting to be filed (an invoiced order was cancelled): same idea, same one-week limit. submitCreditNote
+// does nothing at all while eTIMS is switched off, so this is free until it is turned on.
+const retryCreditNotes = async () => {
+  const waiting = await Order.find({
+    etimsCreditNoteStatus: 'required',
+    updatedAt: { $gte: new Date(Date.now() - MAX_AGE_MS) }
+  }).select('_id orderRef').lean();
+
+  for (const { _id, orderRef } of waiting) {
+    try {
+      await etimsService.submitCreditNote(_id);
+    } catch (err) {
+      logger.warn('[ETIMS RETRY] Credit note retry failed, will try again next cycle', { orderId: _id, orderRef, err: err.message });
+    }
+  }
+};
+
 const retryFailedInvoices = async () => {
+  await retryCreditNotes();
   const candidates = await Order.find({
     etimsStatus: 'failed',
     updatedAt: { $gte: new Date(Date.now() - MAX_AGE_MS) }

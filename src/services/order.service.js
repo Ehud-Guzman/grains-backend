@@ -41,6 +41,16 @@ const { runTransaction } = require('../utils/transaction');
 // rule, just IEEE-754 cleanup to the nearest cent.
 const round2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
 
+// An order's total is a WHOLE number of shillings (decided 2026-10-24, F-21). M-Pesa can only ask for whole shillings
+// and it always asked for the total rounded UP, so a total with cents meant every customer paid up to KES 1 more than
+// the order said and the books never matched. The exact total is rounded up here once, and the difference is stored as
+// `roundingAdjustment` (0 to 0.99) so receipts, the sales breakdown and the eTIMS invoice can show it as its own line
+// and still add up. Rounding UP (not to nearest) keeps it a positive line, which eTIMS can carry as an exempt item.
+const toWholeShilling = (exactTotal) => {
+  const total = Math.ceil(round2(exactTotal));
+  return { total, roundingAdjustment: round2(total - exactTotal) };
+};
+
 // A customer's preferred rider is informational only — admin still confirms the
 // real assignment via assignDriver(). Silently drops anything that doesn't
 // resolve to an available driver in this branch rather than failing the order.
@@ -616,7 +626,7 @@ const createGuestOrder = async (orderData, branchId) => {
   const vatAmount  = vatEnabled ? round2(vatBase * vatRate / 100) : 0;
 
   const preferredDriverId = await resolvePreferredDriver(orderData.preferredDriverId, branchId);
-  const total = round2(Math.max(0, subtotal + deliveryFee + vatAmount - couponDiscount));
+  const { total, roundingAdjustment } = toWholeShilling(Math.max(0, subtotal + deliveryFee + vatAmount - couponDiscount));
   assertExpectedTotal(orderData.expectedTotal, total);
 
   // Match against every historically-possible stored format (07.../+254.../254...)
@@ -676,6 +686,7 @@ const createGuestOrder = async (orderData, branchId) => {
       vatAmount,
       couponCode,
       couponDiscount,
+      roundingAdjustment,
       total,
       deliveryMethod: orderData.deliveryMethod,
       deliveryAddress: orderData.deliveryAddress || null,
@@ -774,7 +785,7 @@ const createCustomerOrder = async (orderData, userId, branchId) => {
   const vatAmount  = vatEnabled ? round2(vatBase * vatRate / 100) : 0;
 
   const preferredDriverId = await resolvePreferredDriver(orderData.preferredDriverId, branchId);
-  const total = round2(Math.max(0, subtotal + deliveryFee + vatAmount - couponDiscount));
+  const { total, roundingAdjustment } = toWholeShilling(Math.max(0, subtotal + deliveryFee + vatAmount - couponDiscount));
   assertExpectedTotal(orderData.expectedTotal, total);
 
   // Same shape as createGuestOrder: one queued, retried transaction.
@@ -792,6 +803,7 @@ const createCustomerOrder = async (orderData, userId, branchId) => {
       vatAmount,
       couponCode,
       couponDiscount,
+      roundingAdjustment,
       total,
       deliveryMethod: orderData.deliveryMethod,
       deliveryAddress: orderData.deliveryAddress || null,
@@ -933,7 +945,7 @@ const toCustomerHistory = (history = []) =>
 const toCustomerOrder = (order) => (order ? { ...order, statusHistory: toCustomerHistory(order.statusHistory) } : order);
 
 // ── GET MY ORDERS (CUSTOMER) ──────────────────────────────────────────────────
-const CUSTOMER_ORDER_FIELDS = 'orderRef orderItems subtotal deliveryFee couponCode couponDiscount vatEnabled vatRate vatAmount total deliveryMethod deliveryAddress paymentMethod paymentStatus status rejectionReason specialInstructions buyerKraPin branchId createdAt updatedAt statusHistory.status statusHistory.changedAt statusHistory.publicNote driverId preferredDriverId deliveredAt';
+const CUSTOMER_ORDER_FIELDS = 'orderRef orderItems subtotal deliveryFee couponCode couponDiscount vatEnabled vatRate vatAmount roundingAdjustment total deliveryMethod deliveryAddress paymentMethod paymentStatus status rejectionReason specialInstructions buyerKraPin branchId createdAt updatedAt statusHistory.status statusHistory.changedAt statusHistory.publicNote driverId preferredDriverId deliveredAt';
 
 const getMyOrders = async (userId, query = {}, branchId) => {
   // Auto-cancel is handled by autoCancel.job.js — no per-request call needed
@@ -985,7 +997,7 @@ const getMyOrderById = async (userId, orderId) => {
 // Field list mirrors CUSTOMER_ORDER_FIELDS — this is an unauthenticated lookup
 // (phone + ref only), so GPS coordinates, buyerKraPin, and statusHistory actor
 // IDs must never be exposed here even though they're safe on the authed routes.
-const TRACK_ORDER_FIELDS = 'orderRef orderItems subtotal deliveryFee couponCode couponDiscount vatEnabled vatRate vatAmount total deliveryMethod paymentMethod paymentStatus status rejectionReason createdAt statusHistory.status statusHistory.changedAt statusHistory.publicNote';
+const TRACK_ORDER_FIELDS = 'orderRef orderItems subtotal deliveryFee couponCode couponDiscount vatEnabled vatRate vatAmount roundingAdjustment total deliveryMethod paymentMethod paymentStatus status rejectionReason createdAt statusHistory.status statusHistory.changedAt statusHistory.publicNote';
 
 const trackByRef = async (phone, orderRef) => {
   // Auto-cancel is handled by autoCancel.job.js — no per-request call needed
@@ -1137,6 +1149,7 @@ const reject = async (orderId, adminId, reason, branchId, actorRole = 'superviso
   });
 
   appEvents.emit(ORDER_EVENTS.REJECTED, { order, branchId: order.branchId });
+  fileCreditNoteNow(order);
 
   return order;
 };
@@ -1172,13 +1185,23 @@ const refundPaymentIfPaid = async (order, reason, session) => {
 // KRA keeps a sale that never happened (and the VAT on it). Invoices are only filed once an order is dispatched or
 // completed AND paid, so in practice this is an order cancelled while out for delivery. Runs INSIDE the cancel/reject
 // transaction and only sets the field in memory; the caller's order.save({ session }) persists it. Filing the credit
-// note with KRA is a manual step for now (see markCreditNoteIssued): nothing here talks to KRA.
+// note with KRA happens AFTER the commit (fileCreditNoteNow); nothing in here talks to KRA.
 const flagCreditNoteIfInvoiced = (order) => {
   if (order.etimsStatus === 'submitted' && order.etimsCreditNoteStatus !== 'issued') {
     order.etimsCreditNoteStatus = 'required';
     return true;
   }
   return false;
+};
+
+// Fire-and-forget, like the invoice itself: when eTIMS is switched on the credit note goes to KRA at once; if that fails
+// (or eTIMS is off) the order stays in the "credit notes to file" list, the retry job tries again, and an admin can send
+// it by hand or record the reference of one filed on the KRA portal.
+const fileCreditNoteNow = (order) => {
+  if (order.etimsCreditNoteStatus !== 'required') return;
+  etimsService.submitCreditNote(order._id).catch(err =>
+    logger.error('[eTIMS] Credit note submission failed', { orderId: order._id, err: err.message })
+  );
 };
 
 const logRefund = (order, actorId, actorRole, reason) => activityLogService.log({
@@ -1253,6 +1276,7 @@ const updateStatus = async (orderId, newStatus, adminId, note = null, branchId, 
   if (refunded) await logRefund(order, adminId, actorRole, note || 'Cancelled by staff');
   if (newStatus === ORDER_STATUSES.CANCELLED) {
     appEvents.emit(ORDER_EVENTS.CANCELLED, { order, branchId: order.branchId, refundOwed: refunded, reason: note });
+    fileCreditNoteNow(order);
   }
   if (newStatus === ORDER_STATUSES.COMPLETED) {
     appEvents.emit(ORDER_EVENTS.COMPLETED, { order, branchId: order.branchId });
@@ -1421,6 +1445,7 @@ const getPackingSlip = async (orderId, branchId) => {
     items: order.orderItems,
     subtotal: order.subtotal,
     deliveryFee: order.deliveryFee,
+    roundingAdjustment: order.roundingAdjustment || 0,
     total: order.total,
     specialInstructions: order.specialInstructions,
     paymentMethod: order.paymentMethod
@@ -1461,6 +1486,31 @@ const markCreditNoteIssued = async (orderId, actorId, actorRole, branchId, refer
     detail: { orderRef: order.orderRef, creditNoteRef: ref },
   });
   return done;
+};
+
+// An admin sends the waiting credit note to KRA now (instead of waiting for the retry job). Needs eTIMS switched on.
+const submitCreditNoteToKra = async (orderId, branchId) => {
+  const query = { _id: orderId };
+  if (branchId) query.branchId = branchId;
+  const order = await Order.findOne(query).select('etimsCreditNoteStatus').lean();
+  if (!order) throw new AppError('Order not found', 404, 'ORDER_NOT_FOUND');
+  if (order.etimsCreditNoteStatus !== 'required') {
+    throw new AppError('This order has no credit note waiting to be filed', 400, 'NO_CREDIT_NOTE_REQUIRED');
+  }
+  let result;
+  try {
+    result = await etimsService.submitCreditNote(orderId);
+  } catch (err) {
+    throw new AppError(`KRA did not accept the credit note: ${err.message}`, 502, 'ETIMS_CREDIT_NOTE_FAILED');
+  }
+  if (!result.filed) {
+    const why = {
+      disabled:    ['eTIMS is not switched on, so nothing can be sent. File it on the KRA portal and record its reference instead.', 400, 'ETIMS_DISABLED'],
+      in_progress: ['This credit note is already being sent. Check again in a minute.', 409, 'CREDIT_NOTE_IN_PROGRESS'],
+    }[result.reason] || ['This order has no credit note waiting to be filed', 400, 'NO_CREDIT_NOTE_REQUIRED'];
+    throw new AppError(...why);
+  }
+  return Order.findById(orderId);
 };
 
 const assignDriver = async (orderId, driverId, adminId, branchId, actorRole = 'admin') => {
@@ -1612,6 +1662,7 @@ module.exports = {
   reject,
   updateStatus,
   markCreditNoteIssued,
+  submitCreditNoteToKra,
   cancel,
   bulkApprove,
   bulkReject,

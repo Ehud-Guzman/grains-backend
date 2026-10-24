@@ -120,10 +120,16 @@ router.post('/:id/etims/resubmit', requireMinRole('staff'), async (req, res, nex
 // Records that the credit note for a cancelled/rejected, already-invoiced order has been filed with KRA. Admin only: it
 // answers for a tax filing, and keeping the rule in the guard (not in the handler) keeps the permission matrix and the
 // help assistant truthful about who can do it.
+// With a `reference` it records one filed on the KRA portal; without one it sends the credit note to KRA now (needs eTIMS on).
 router.post('/:id/etims/credit-note', requireBusinessRole('admin'), async (req, res, next) => {
   try {
-    const order = await require('../../services/order.service').markCreditNoteIssued(
-      req.params.id, req.user.id, req.user.role, req.branchId || null, req.body?.reference
+    const orderService = require('../../services/order.service');
+    if (req.body?.reference === undefined || req.body?.reference === null || req.body?.reference === '') {
+      const sent = await orderService.submitCreditNoteToKra(req.params.id, req.branchId || null);
+      return success(res, sent, 'Credit note sent to KRA');
+    }
+    const order = await orderService.markCreditNoteIssued(
+      req.params.id, req.user.id, req.user.role, req.branchId || null, req.body.reference
     );
     return success(res, order, 'Credit note recorded');
   } catch (err) { next(err); }
